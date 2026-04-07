@@ -335,6 +335,83 @@ async def test_upsert_reactivates_skipped_signal_on_material_change(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_upsert_reactivates_unchanged_skipped_scanner_signal_after_cooldown(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    signal_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            prior = now - timedelta(minutes=4)
+            session.add(
+                TradeSignal(
+                    id=signal_id,
+                    source="scanner",
+                    source_item_id="scanner_old",
+                    signal_type="scanner_opportunity",
+                    strategy_type="custom_strategy",
+                    market_id="market_scanner_skipped",
+                    market_question="Scanner skipped signal",
+                    direction="buy_yes",
+                    entry_price=0.44,
+                    edge_percent=6.0,
+                    confidence=0.72,
+                    liquidity=88.0,
+                    expires_at=now + timedelta(hours=1),
+                    status="skipped",
+                    dedupe_key="dedupe_scanner_skipped",
+                    payload_json={"id": "stable", "ingested_at": "2026-02-24T00:00:00Z"},
+                    strategy_context_json={"mode": "directional", "bridge_run_at": "2026-02-24T00:00:00Z"},
+                    created_at=prior,
+                    updated_at=prior,
+                )
+            )
+            await session.commit()
+
+            await upsert_trade_signal(
+                session,
+                source="scanner",
+                source_item_id="scanner_old",
+                signal_type="scanner_opportunity",
+                strategy_type="custom_strategy",
+                market_id="market_scanner_skipped",
+                market_question="Scanner skipped signal",
+                direction="buy_yes",
+                entry_price=0.44,
+                edge_percent=6.0,
+                confidence=0.72,
+                liquidity=88.0,
+                expires_at=now + timedelta(hours=1),
+                payload_json={"id": "stable", "ingested_at": "2026-02-24T00:00:05Z"},
+                strategy_context_json={"mode": "directional", "bridge_run_at": "2026-02-24T00:00:05Z"},
+                dedupe_key="dedupe_scanner_skipped",
+                commit=True,
+            )
+
+            refreshed = await session.get(TradeSignal, signal_id)
+            assert refreshed is not None
+            assert refreshed.status == "pending"
+            assert refreshed.updated_at is not None
+            assert refreshed.updated_at > prior
+
+            emissions = (
+                (
+                    await session.execute(
+                        select(TradeSignalEmission)
+                        .where(TradeSignalEmission.signal_id == signal_id)
+                        .order_by(TradeSignalEmission.created_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert emissions
+            assert emissions[-1].event_type == "upsert_reactivated"
+            assert emissions[-1].reason == "reactivated_from:skipped"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_upsert_skipped_signal_ignores_micro_jitter(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     signal_id = uuid.uuid4().hex

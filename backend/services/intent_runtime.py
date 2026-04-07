@@ -35,6 +35,7 @@ _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
 _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
 _PREWARM_WAIT_POLL_SECONDS = 0.01
+_UNCHANGED_SCANNER_TERMINAL_REACTIVATION_COOLDOWN_SECONDS = 180.0
 _PAYLOAD_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
@@ -309,6 +310,27 @@ def _material_signal_change(existing: dict[str, Any], incoming: dict[str, Any]) 
     if _normalize_payload_for_compare(existing.get("strategy_context_json")) != _normalize_payload_for_compare(incoming.get("strategy_context_json")):
         return True
     return False
+
+
+def _should_reactivate_unchanged_terminal_signal(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+    *,
+    now: datetime,
+) -> bool:
+    existing_source = str(existing.get("source") or "").strip().lower()
+    incoming_source = str(incoming.get("source") or "").strip().lower()
+    if existing_source != "scanner" or incoming_source != "scanner":
+        return False
+    if str(incoming.get("status") or "").strip().lower() != "pending":
+        return False
+    existing_status = str(existing.get("status") or "").strip().lower()
+    if existing_status not in _SIGNAL_TERMINAL_STATUSES:
+        return False
+    updated_at = _normalize_datetime(existing.get("updated_at")) or _normalize_datetime(existing.get("created_at"))
+    if updated_at is None:
+        return True
+    return (now - updated_at).total_seconds() >= _UNCHANGED_SCANNER_TERMINAL_REACTIVATION_COOLDOWN_SECONDS
 
 
 def _coerce_runtime_signal(snapshot: dict[str, Any]) -> Any:
@@ -1037,7 +1059,14 @@ class IntentRuntime:
                     incoming_snapshot["effective_price"] = existing.get("effective_price")
                     existing_status = str(existing.get("status") or "pending").strip().lower()
                     material_change = _material_signal_change(existing, incoming_snapshot)
+                    reactivated_unchanged_terminal = False
                     if not material_change:
+                        reactivated_unchanged_terminal = _should_reactivate_unchanged_terminal_signal(
+                            existing,
+                            incoming_snapshot,
+                            now=now,
+                        )
+                    if not material_change and not reactivated_unchanged_terminal:
                         active_dedupe_keys.add(dedupe_key)
                         continue
                     incoming_snapshot["effective_price"] = None

@@ -81,6 +81,107 @@ async def test_publish_opportunities_restamps_signal_emitted_at_to_actionable_pu
 
 
 @pytest.mark.asyncio
+async def test_publish_opportunities_reactivates_unchanged_scanner_terminal_signal_after_cooldown(monkeypatch):
+    published_batches: list[dict[str, object]] = []
+
+    async def _publish_signal_batch(**kwargs):
+        published_batches.append(kwargs)
+        return "batch-1"
+
+    monkeypatch.setattr(
+        "services.intent_runtime.build_signal_contract_from_opportunity",
+        lambda _opportunity: (
+            "market-1",
+            "buy_yes",
+            0.42,
+            "Will event happen?",
+            {"markets": [{"id": "market-1"}]},
+            {},
+        ),
+    )
+    monkeypatch.setattr("services.intent_runtime.publish_signal_batch", _publish_signal_batch)
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+
+    runtime = IntentRuntime()
+    opportunity = SimpleNamespace(
+        id="opp-reactivate-1",
+        stable_id="stable-reactivate-1",
+        strategy="generic_strategy",
+        roi_percent=7.5,
+        confidence=0.8,
+        min_liquidity=1000.0,
+        resolution_date=None,
+    )
+
+    assert await runtime.publish_opportunities([opportunity], source="scanner") == 1
+    signal_id = next(iter(runtime._signals_by_id))
+    runtime._signals_by_id[signal_id]["status"] = "skipped"
+    runtime._signals_by_id[signal_id]["runtime_sequence"] = None
+    runtime._signals_by_id[signal_id]["updated_at"] = (
+        utcnow() - timedelta(seconds=181)
+    ).isoformat().replace("+00:00", "Z")
+    published_batches.clear()
+
+    published = await runtime.publish_opportunities([opportunity], source="scanner")
+
+    assert published == 1
+    assert len(published_batches) == 1
+    assert published_batches[0]["event_type"] == "upsert_reactivated"
+    refreshed = runtime._signals_by_id[signal_id]
+    assert refreshed["status"] == "pending"
+    assert refreshed["runtime_sequence"] is not None
+
+
+@pytest.mark.asyncio
+async def test_publish_opportunities_does_not_reactivate_unchanged_scanner_terminal_signal_inside_cooldown(monkeypatch):
+    published_batches: list[dict[str, object]] = []
+
+    async def _publish_signal_batch(**kwargs):
+        published_batches.append(kwargs)
+        return "batch-1"
+
+    monkeypatch.setattr(
+        "services.intent_runtime.build_signal_contract_from_opportunity",
+        lambda _opportunity: (
+            "market-1",
+            "buy_yes",
+            0.42,
+            "Will event happen?",
+            {"markets": [{"id": "market-1"}]},
+            {},
+        ),
+    )
+    monkeypatch.setattr("services.intent_runtime.publish_signal_batch", _publish_signal_batch)
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+
+    runtime = IntentRuntime()
+    opportunity = SimpleNamespace(
+        id="opp-reactivate-2",
+        stable_id="stable-reactivate-2",
+        strategy="generic_strategy",
+        roi_percent=7.5,
+        confidence=0.8,
+        min_liquidity=1000.0,
+        resolution_date=None,
+    )
+
+    assert await runtime.publish_opportunities([opportunity], source="scanner") == 1
+    signal_id = next(iter(runtime._signals_by_id))
+    runtime._signals_by_id[signal_id]["status"] = "skipped"
+    runtime._signals_by_id[signal_id]["runtime_sequence"] = None
+    runtime._signals_by_id[signal_id]["updated_at"] = utcnow().isoformat().replace("+00:00", "Z")
+    published_batches.clear()
+
+    published = await runtime.publish_opportunities([opportunity], source="scanner")
+
+    assert published == 0
+    assert published_batches == []
+    refreshed = runtime._signals_by_id[signal_id]
+    assert refreshed["status"] == "skipped"
+    assert refreshed["runtime_sequence"] is None
+
+
+@pytest.mark.asyncio
 async def test_project_upserts_scopes_source_sweep_by_strategy_type(monkeypatch):
     class _Session:
         async def commit(self) -> None:

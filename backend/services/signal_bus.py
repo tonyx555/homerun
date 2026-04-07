@@ -34,6 +34,7 @@ from services.market_tradability import get_market_tradability_map
 SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 SIGNAL_REACTIVATABLE_STATUSES = {"selected", "submitted", "executed", "skipped", "expired", "failed"}
+_UNCHANGED_SCANNER_SKIPPED_REACTIVATION_COOLDOWN_SECONDS = 180.0
 _SKIPPED_REACTIVATION_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
@@ -118,6 +119,20 @@ def _normalize_reason_list(values: Any) -> list[str]:
     cleaned = [str(item).strip() for item in values if str(item).strip()]
     cleaned.sort()
     return cleaned
+
+
+def _should_reactivate_unchanged_skipped_scanner_signal(row: TradeSignal, *, source: str) -> bool:
+    normalized_source = str(source or "").strip().lower()
+    existing_source = str(row.source or "").strip().lower()
+    if normalized_source != "scanner" or existing_source != "scanner":
+        return False
+    updated_at = _to_utc_naive(row.updated_at) or _to_utc_naive(row.created_at)
+    if updated_at is None:
+        return True
+    now = _to_utc_naive(_utc_now())
+    if now is None:
+        return False
+    return (now - updated_at).total_seconds() >= _UNCHANGED_SCANNER_SKIPPED_REACTIVATION_COOLDOWN_SECONDS
 
 
 def _has_signal_material_change(
@@ -870,6 +885,7 @@ async def upsert_trade_signal(
         can_update_row = previous_status in SIGNAL_ACTIVE_STATUSES or previous_status in SIGNAL_REACTIVATABLE_STATUSES
         if can_update_row:
             has_material_change = True
+            skipped_cooldown_reactivation = False
             if previous_status in SIGNAL_ACTIVE_STATUSES:
                 has_material_change = _has_signal_material_change(
                     row,
@@ -912,6 +928,11 @@ async def upsert_trade_signal(
                     quality_passed=quality_passed,
                     quality_rejection_reasons=quality_rejection_reasons,
                 )
+                if not has_material_change:
+                    skipped_cooldown_reactivation = _should_reactivate_unchanged_skipped_scanner_signal(
+                        row,
+                        source=source,
+                    )
             if previous_status in SIGNAL_ACTIVE_STATUSES and not has_material_change:
                 emission_event_type = "upsert_active_unchanged"
                 emission_reason = "suppressed:active_unchanged"
@@ -919,7 +940,7 @@ async def upsert_trade_signal(
             else:
                 should_reactivate = previous_status in SIGNAL_REACTIVATABLE_STATUSES
                 if previous_status == "skipped":
-                    should_reactivate = has_material_change
+                    should_reactivate = has_material_change or skipped_cooldown_reactivation
                 if previous_status == "skipped" and not should_reactivate:
                     emission_event_type = "upsert_skipped_unchanged"
                     emission_reason = "reactivation_suppressed:skipped_unchanged"

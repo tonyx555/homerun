@@ -5186,11 +5186,9 @@ async def _run_trader_once(
                         )
                         strict_release_age_budget_ms = max(
                             50,
-                            int(strict_age_budget_ms)
-                            if signal_source == "scanner"
-                            else safe_int(strategy_params.get("max_market_data_age_ms"), int(strict_age_budget_ms)),
+                            safe_int(strategy_params.get("max_market_data_age_ms"), int(strict_age_budget_ms)),
                         )
-                        if signal_emitted_at is not None:
+                        if signal_source == "crypto" and signal_emitted_at is not None:
                             signal_release_age_ms = max(
                                 0,
                                 int((signal_wake_started_at - signal_emitted_at).total_seconds() * 1000),
