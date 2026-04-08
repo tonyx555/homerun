@@ -279,6 +279,16 @@ def _extract_payload_market_hint(signal: Any) -> dict[str, Any]:
         "no_price",
         "up_price",
         "down_price",
+        "yes_price_source",
+        "no_price_source",
+        "up_price_source",
+        "down_price_source",
+        "yes_price_updated_at",
+        "no_price_updated_at",
+        "up_price_updated_at",
+        "down_price_updated_at",
+        "market_data_source",
+        "live_selected_price_source",
         "liquidity",
         "volume",
         "spread",
@@ -836,37 +846,77 @@ def _build_cached_signal_contexts(
         # WS price is newer (i.e. has a smaller age_ms).
         is_scanner = row.get("source") == "scanner"
         if is_scanner:
-            hint_observed_s = None
-            for _ts_key in (
-                "source_observed_at",
-                "price_updated_at",
-                "updated_at",
-                "fetched_at",
-                "live_market_fetched_at",
-            ):
-                hint_observed_s = _epoch_seconds_from_market_timestamp(market_info.get(_ts_key))
-                if hint_observed_s is not None:
-                    break
-            hint_age_ms = (
-                max(0.0, (now_epoch - hint_observed_s) * 1000.0) if hint_observed_s is not None else None
+            def _hint_price_meta(
+                *,
+                price_keys: tuple[str, ...],
+                source_keys: tuple[str, ...],
+                observed_keys: tuple[str, ...],
+            ) -> tuple[float | None, float | None, str | None, str]:
+                hint_price = None
+                for price_key in price_keys:
+                    hint_price = safe_float(market_info.get(price_key))
+                    if hint_price is not None:
+                        break
+                observed_at_s = None
+                for observed_key in observed_keys:
+                    observed_at_s = _epoch_seconds_from_market_timestamp(market_info.get(observed_key))
+                    if observed_at_s is not None:
+                        break
+                hint_source = ""
+                for source_key in source_keys:
+                    hint_source = str(market_info.get(source_key) or "").strip().lower()
+                    if hint_source:
+                        break
+                hint_age_ms = (
+                    max(0.0, (now_epoch - observed_at_s) * 1000.0) if observed_at_s is not None else None
+                )
+                return (
+                    hint_price,
+                    hint_age_ms,
+                    _iso_from_epoch_seconds(observed_at_s),
+                    hint_source or "market_snapshot",
+                )
+
+            hint_yes, hint_yes_age_ms, hint_yes_observed_at, hint_yes_source = _hint_price_meta(
+                price_keys=("yes_price", "up_price"),
+                source_keys=("yes_price_source", "up_price_source", "market_data_source", "live_selected_price_source"),
+                observed_keys=(
+                    "yes_price_updated_at",
+                    "up_price_updated_at",
+                    "source_observed_at",
+                    "price_updated_at",
+                    "updated_at",
+                    "fetched_at",
+                    "live_market_fetched_at",
+                ),
             )
-
-            hint_yes = safe_float(market_info.get("yes_price") or market_info.get("up_price"))
-            if hint_yes is not None and hint_age_ms is not None:
+            if hint_yes is not None and hint_yes_age_ms is not None:
                 # Use scanner price if WS is missing, or scanner is fresher
-                if yes_live is None or (yes_age_ms is not None and hint_age_ms < yes_age_ms):
+                if yes_live is None or (yes_age_ms is not None and hint_yes_age_ms < yes_age_ms):
                     yes_live = float(hint_yes)
-                    yes_age_ms = hint_age_ms
-                    yes_observed_at = _iso_from_epoch_seconds(hint_observed_s)
-                    yes_src = "market_snapshot"
+                    yes_age_ms = hint_yes_age_ms
+                    yes_observed_at = hint_yes_observed_at
+                    yes_src = hint_yes_source
 
-            hint_no = safe_float(market_info.get("no_price") or market_info.get("down_price"))
-            if hint_no is not None and hint_age_ms is not None:
-                if no_live is None or (no_age_ms is not None and hint_age_ms < no_age_ms):
+            hint_no, hint_no_age_ms, hint_no_observed_at, hint_no_source = _hint_price_meta(
+                price_keys=("no_price", "down_price"),
+                source_keys=("no_price_source", "down_price_source", "market_data_source", "live_selected_price_source"),
+                observed_keys=(
+                    "no_price_updated_at",
+                    "down_price_updated_at",
+                    "source_observed_at",
+                    "price_updated_at",
+                    "updated_at",
+                    "fetched_at",
+                    "live_market_fetched_at",
+                ),
+            )
+            if hint_no is not None and hint_no_age_ms is not None:
+                if no_live is None or (no_age_ms is not None and hint_no_age_ms < no_age_ms):
                     no_live = float(hint_no)
-                    no_age_ms = hint_age_ms
-                    no_observed_at = _iso_from_epoch_seconds(hint_observed_s)
-                    no_src = "market_snapshot"
+                    no_age_ms = hint_no_age_ms
+                    no_observed_at = hint_no_observed_at
+                    no_src = hint_no_source
 
         selected_live = yes_live if selected_token == yes_token else no_live
         if selected_live is None:
@@ -1120,6 +1170,7 @@ async def build_live_signal_contexts(
     default_strict_ttl = max(0.05, float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0))
     source_priority = {
         "ws_strict": 0,
+        "redis_strict": 0,
         "http_batch": 1,
         "market_snapshot": 2,
         "history_tail": 3,
@@ -1194,14 +1245,40 @@ async def build_live_signal_contexts(
         no_snapshot = safe_float(info.get("no_price"))
         if no_snapshot is None:
             no_snapshot = safe_float(info.get("down_price"))
+        yes_snapshot_source = str(
+            info.get("yes_price_source")
+            or info.get("up_price_source")
+            or info.get("market_data_source")
+            or info.get("live_selected_price_source")
+            or "market_snapshot"
+        ).strip().lower() or "market_snapshot"
+        yes_snapshot_observed_s = snapshot_observed_s
+        for key in ("yes_price_updated_at", "up_price_updated_at"):
+            observed = _epoch_seconds_from_market_timestamp(info.get(key))
+            if observed is not None:
+                yes_snapshot_observed_s = observed
+                break
+        no_snapshot_source = str(
+            info.get("no_price_source")
+            or info.get("down_price_source")
+            or info.get("market_data_source")
+            or info.get("live_selected_price_source")
+            or "market_snapshot"
+        ).strip().lower() or "market_snapshot"
+        no_snapshot_observed_s = snapshot_observed_s
+        for key in ("no_price_updated_at", "down_price_updated_at"):
+            observed = _epoch_seconds_from_market_timestamp(info.get(key))
+            if observed is not None:
+                no_snapshot_observed_s = observed
+                break
         if yes_token:
             runtime_snapshot_tokens.add(yes_token)
             if yes_snapshot is not None:
                 _record_live_price(
                     yes_token,
                     mid=yes_snapshot,
-                    source="market_snapshot",
-                    observed_at_s=snapshot_observed_s,
+                    source=yes_snapshot_source,
+                    observed_at_s=yes_snapshot_observed_s,
                 )
         if no_token:
             runtime_snapshot_tokens.add(no_token)
@@ -1209,8 +1286,8 @@ async def build_live_signal_contexts(
                 _record_live_price(
                     no_token,
                     mid=no_snapshot,
-                    source="market_snapshot",
-                    observed_at_s=snapshot_observed_s,
+                    source=no_snapshot_source,
+                    observed_at_s=no_snapshot_observed_s,
                 )
         history_tail = info.get("history_tail")
         normalized_history = _normalize_history_points(

@@ -1428,9 +1428,42 @@ def _build_scanner_signal_market_snapshot_live_context(signal: Any) -> dict[str,
     if selected_price is None or selected_price <= 0.0:
         return {}
 
+    selected_source = "market_snapshot"
+    if selected_outcome == "yes":
+        selected_source = str(
+            selected_market.get("yes_price_source")
+            or selected_market.get("up_price_source")
+            or selected_market.get("market_data_source")
+            or selected_market.get("live_selected_price_source")
+            or "market_snapshot"
+        ).strip().lower() or "market_snapshot"
+    elif selected_outcome == "no":
+        selected_source = str(
+            selected_market.get("no_price_source")
+            or selected_market.get("down_price_source")
+            or selected_market.get("market_data_source")
+            or selected_market.get("live_selected_price_source")
+            or "market_snapshot"
+        ).strip().lower() or "market_snapshot"
+
     observed_at = _parse_iso(
         str(
-            selected_market.get("price_updated_at")
+            (
+                selected_market.get("yes_price_updated_at")
+                if selected_outcome == "yes"
+                else selected_market.get("no_price_updated_at")
+                if selected_outcome == "no"
+                else None
+            )
+            or (
+                selected_market.get("up_price_updated_at")
+                if selected_outcome == "yes"
+                else selected_market.get("down_price_updated_at")
+                if selected_outcome == "no"
+                else None
+            )
+            or selected_market.get("source_observed_at")
+            or selected_market.get("price_updated_at")
             or payload.get("last_priced_at")
             or payload.get("last_updated_at")
             or payload.get("signal_emitted_at")
@@ -1481,8 +1514,8 @@ def _build_scanner_signal_market_snapshot_live_context(signal: Any) -> dict[str,
         "live_yes_price": safe_float(selected_market.get("current_yes_price"), safe_float(selected_market.get("yes_price"), None)),
         "live_no_price": safe_float(selected_market.get("current_no_price"), safe_float(selected_market.get("no_price"), None)),
         "live_selected_price": float(selected_price),
-        "live_selected_price_source": "market_snapshot",
-        "market_data_source": "market_snapshot",
+        "live_selected_price_source": selected_source,
+        "market_data_source": selected_source,
         "source_observed_at": observed_at_iso,
         "market_data_age_ms": age_ms,
         "market_data_age_seconds": ((age_ms / 1000.0) if age_ms is not None else None),
@@ -5181,6 +5214,8 @@ async def _run_trader_once(
                                     signal_id=signal_id,
                                     required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
                                     reason="strict_ws_pricing_signal_release_stale",
+                                    min_observed_at=signal_wake_started_at,
+                                    required_max_age_ms=strict_release_age_budget_ms,
                                 )
                                 deferred_signals += 1
                                 deferred_by_reason["strict_ws_pricing_signal_release_stale"] = (
@@ -5449,6 +5484,8 @@ async def _run_trader_once(
                                 signal_id=signal_id,
                                 required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
                                 reason="strict_ws_pricing_live_context_unavailable",
+                                min_observed_at=signal_wake_started_at,
+                                required_max_age_ms=effective_max_age_ms,
                             )
                             deferred_signals += 1
                             deferred_by_reason["strict_ws_pricing_live_context_unavailable"] = (

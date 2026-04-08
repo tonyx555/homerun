@@ -53,8 +53,9 @@ POST_ONLY_REPRICE_TICK = 0.01
 INITIALIZATION_RETRY_BACKOFF_SECONDS = 60.0
 MISSING_DEPENDENCY_RELOG_SECONDS = 300.0
 PENDING_RECONCILIATION_MAX_ATTEMPTS = 6
-_ORDER_SUBMIT_TIMEOUT_SECONDS = 10.0
+_ORDER_SUBMIT_TIMEOUT_SECONDS = 20.0
 _CLIENT_IO_TIMEOUT_SECONDS = 10.0
+_CLOB_READ_TIMEOUT_SECONDS = 3.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
 _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
 _CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
@@ -2167,7 +2168,7 @@ class LiveExecutionService:
                     snapshots[clob_id] = snapshot
 
         try:
-            response = await self._run_client_io(self._client.get_orders)
+            response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
             _ingest_open_orders(response)
         except Exception as exc:
             if _is_transient_transport_error(exc):
@@ -2184,7 +2185,7 @@ class LiveExecutionService:
                 reinitialized = False
             if reinitialized and self.is_ready():
                 try:
-                    response = await self._run_client_io(self._client.get_orders)
+                    response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                     _ingest_open_orders(response)
                 except Exception as retry_exc:
                     if _is_transient_transport_error(retry_exc):
@@ -2202,7 +2203,11 @@ class LiveExecutionService:
         if missing and hasattr(self._client, "get_order"):
             for clob_id in sorted(missing):
                 try:
-                    single_response = await self._run_client_io(self._client.get_order, clob_id)
+                    single_response = await self._run_client_io(
+                        self._client.get_order,
+                        clob_id,
+                        timeout=_CLOB_READ_TIMEOUT_SECONDS,
+                    )
                 except Exception as exc:
                     error_text = str(exc).lower()
                     if "not found" in error_text or "does not exist" in error_text:
@@ -2338,7 +2343,10 @@ class LiveExecutionService:
             return []
 
         try:
-            provider_response = await self._run_client_io(self._client.get_orders)
+            provider_response = await self._run_client_io(
+                self._client.get_orders,
+                timeout=_CLOB_READ_TIMEOUT_SECONDS,
+            )
         except Exception as exc:
             self._clob_read_record_failure(exc, "Provider open orders sync")
             return []
@@ -2895,7 +2903,9 @@ class LiveExecutionService:
                     ):
                         try:
                             detail = await self._run_client_io(
-                                self._client.get_order, order.clob_order_id
+                                self._client.get_order,
+                                order.clob_order_id,
+                                timeout=_CLOB_READ_TIMEOUT_SECONDS,
                             )
                             for srv in self._extract_server_orders(
                                 detail if isinstance(detail, (list, dict)) else {}

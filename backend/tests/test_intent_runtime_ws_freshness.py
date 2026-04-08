@@ -735,3 +735,49 @@ async def test_publish_opportunities_defers_trader_signal_until_post_arm_ws_tick
     snapshot = next(iter(runtime._signals_by_id.values()))
     assert snapshot["deferred_until_ws"] is True
     assert snapshot["deferred_reason"] == "awaiting_post_arm_ws_tick"
+
+
+def test_snapshot_ready_for_runtime_requires_newer_quote_after_strict_ws_defer(monkeypatch):
+    state = {
+        "now_epoch": datetime.now(timezone.utc).timestamp(),
+        "observed_at_epoch": datetime.now(timezone.utc).timestamp() - 20.0,
+    }
+    seen_max_age_seconds: list[float] = []
+
+    class _Cache:
+        def is_fresh(self, token_id: str, *, max_age_seconds: float | None = None) -> bool:
+            assert token_id == "scanner-token"
+            seen_max_age_seconds.append(float(max_age_seconds or 0.0))
+            return (state["now_epoch"] - state["observed_at_epoch"]) <= float(max_age_seconds or 0.0)
+
+        def get_mid_price(self, token_id: str):
+            assert token_id == "scanner-token"
+            return 0.42
+
+        def get_observed_at_epoch(self, token_id: str) -> float:
+            assert token_id == "scanner-token"
+            return state["observed_at_epoch"]
+
+    monkeypatch.setattr(
+        "services.intent_runtime.get_feed_manager",
+        lambda: SimpleNamespace(_started=True, cache=_Cache()),
+    )
+
+    runtime = IntentRuntime()
+    deferred_after = datetime.fromtimestamp(state["now_epoch"] - 5.0, tz=timezone.utc)
+    snapshot = {
+        "source": "scanner",
+        "deferred_reason": "strict_ws_pricing_live_context_unavailable",
+        "required_token_ids": ["scanner-token"],
+        "payload_json": {
+            "deferred_quote_min_observed_at": deferred_after.isoformat().replace("+00:00", "Z"),
+            "strict_ws_required_max_age_ms": 15000,
+        },
+    }
+
+    assert runtime._snapshot_ready_for_runtime(snapshot) is False
+
+    state["observed_at_epoch"] = deferred_after.timestamp() + 0.5
+
+    assert runtime._snapshot_ready_for_runtime(snapshot) is True
+    assert seen_max_age_seconds[-1] == pytest.approx(15.0)

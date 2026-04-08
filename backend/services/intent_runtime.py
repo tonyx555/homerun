@@ -36,6 +36,8 @@ _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
 _PREWARM_WAIT_POLL_SECONDS = 0.01
 _UNCHANGED_SCANNER_TERMINAL_REACTIVATION_COOLDOWN_SECONDS = 180.0
+_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY = "deferred_quote_min_observed_at"
+_DEFERRED_REQUIRED_MAX_AGE_MS_KEY = "strict_ws_required_max_age_ms"
 _PAYLOAD_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
@@ -476,6 +478,10 @@ class IntentRuntime:
                 snapshot["deferred_until_ws"] = False
                 snapshot["deferred_reason"] = None
                 snapshot["deferred_started_at"] = None
+                payload = snapshot.get("payload_json")
+                if isinstance(payload, dict):
+                    payload.pop(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY, None)
+                    payload.pop(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY, None)
 
     def _set_deferred_state_locked(
         self,
@@ -483,15 +489,28 @@ class IntentRuntime:
         *,
         required_token_ids: list[str],
         reason: str,
+        min_observed_at_iso: str | None = None,
+        required_max_age_ms: int | None = None,
     ) -> None:
         snapshot = self._signals_by_id.get(signal_id)
         deferred_started_at = None
+        preserved_min_observed_at_iso: str | None = None
+        preserved_required_max_age_ms: int | None = None
         if snapshot is not None and bool(snapshot.get("deferred_until_ws")):
             deferred_started_at = _to_iso(
                 _normalize_datetime(snapshot.get("deferred_started_at"))
                 or _normalize_datetime(snapshot.get("updated_at"))
                 or utcnow()
             )
+            payload = snapshot.get("payload_json")
+            if isinstance(payload, dict):
+                preserved_min_observed_at_iso = str(payload.get(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY) or "").strip() or None
+                try:
+                    preserved_required_max_age_ms = int(payload.get(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY))
+                    if preserved_required_max_age_ms <= 0:
+                        preserved_required_max_age_ms = None
+                except Exception:
+                    preserved_required_max_age_ms = None
         self._clear_deferred_state_locked(signal_id, clear_snapshot_state=False)
         token_set = {token_id for token_id in _normalize_token_ids(required_token_ids) if token_id}
         if token_set:
@@ -504,6 +523,36 @@ class IntentRuntime:
             snapshot["deferred_until_ws"] = True
             snapshot["deferred_reason"] = str(reason or "strict_ws_context_missing")
             snapshot["deferred_started_at"] = deferred_started_at or _to_iso(utcnow())
+            payload = snapshot.get("payload_json")
+            if not isinstance(payload, dict):
+                payload = {}
+                snapshot["payload_json"] = payload
+            resolved_min_observed_at_iso = preserved_min_observed_at_iso or min_observed_at_iso
+            normalized_reason = str(reason or "").strip().lower()
+            if resolved_min_observed_at_iso is None and normalized_reason == "awaiting_post_arm_ws_tick":
+                resolved_min_observed_at_iso = str(payload.get("execution_armed_at") or "").strip() or None
+            if resolved_min_observed_at_iso is None and normalized_reason in {
+                "awaiting_post_arm_ws_tick",
+                "prewarm_waiting_for_strict_ws_quote",
+                "strict_ws_pricing_live_context_unavailable",
+                "strict_ws_pricing_signal_release_stale",
+            }:
+                resolved_min_observed_at_iso = snapshot["deferred_started_at"]
+            if resolved_min_observed_at_iso:
+                payload[_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY] = str(resolved_min_observed_at_iso)
+            else:
+                payload.pop(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY, None)
+            resolved_required_max_age_ms = preserved_required_max_age_ms
+            if resolved_required_max_age_ms is None:
+                try:
+                    if required_max_age_ms is not None and int(required_max_age_ms) > 0:
+                        resolved_required_max_age_ms = int(required_max_age_ms)
+                except Exception:
+                    resolved_required_max_age_ms = None
+            if resolved_required_max_age_ms is not None:
+                payload[_DEFERRED_REQUIRED_MAX_AGE_MS_KEY] = int(resolved_required_max_age_ms)
+            else:
+                payload.pop(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY, None)
 
     def _tokens_have_fresh_ws_quotes(
         self,
@@ -511,6 +560,7 @@ class IntentRuntime:
         *,
         source: str | None = None,
         min_observed_at_epoch: float | None = None,
+        max_age_seconds: float | None = None,
     ) -> bool:
         normalized = _normalize_token_ids(token_ids)
         if not normalized:
@@ -521,7 +571,11 @@ class IntentRuntime:
             return False
         if feed_manager is None or not getattr(feed_manager, "_started", False):
             return False
-        strict_ttl = _strict_ws_ttl_seconds_for_source(source)
+        strict_ttl = (
+            max(0.01, float(max_age_seconds))
+            if max_age_seconds is not None
+            else _strict_ws_ttl_seconds_for_source(source)
+        )
         for token_id in normalized:
             try:
                 if not feed_manager.cache.is_fresh(token_id, max_age_seconds=strict_ttl):
@@ -561,25 +615,45 @@ class IntentRuntime:
 
     def _snapshot_ready_for_runtime(self, snapshot: dict[str, Any]) -> bool:
         deferred_reason = str(snapshot.get("deferred_reason") or "")
+        payload = snapshot.get("payload_json")
+        payload = payload if isinstance(payload, dict) else {}
+        min_observed_at_epoch = None
+        deferred_min_observed_at = _normalize_datetime(payload.get(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY))
+        if deferred_min_observed_at is not None:
+            min_observed_at_epoch = deferred_min_observed_at.timestamp()
+        max_age_seconds = None
+        try:
+            required_max_age_ms = payload.get(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY)
+            if required_max_age_ms is not None and int(required_max_age_ms) > 0:
+                max_age_seconds = max(0.01, int(required_max_age_ms) / 1000.0)
+        except Exception:
+            max_age_seconds = None
         if deferred_reason == "awaiting_post_arm_ws_tick":
-            payload = snapshot.get("payload_json") or {}
-            armed_at_raw = payload.get("execution_armed_at")
-            armed_at_epoch: float | None = None
-            if armed_at_raw:
-                try:
-                    armed_at_epoch = datetime.fromisoformat(
-                        str(armed_at_raw).replace("Z", "+00:00")
-                    ).timestamp()
-                except Exception:
-                    pass
+            if min_observed_at_epoch is None:
+                armed_at = _normalize_datetime(payload.get("execution_armed_at"))
+                if armed_at is not None:
+                    min_observed_at_epoch = armed_at.timestamp()
             return self._tokens_have_fresh_ws_quotes(
                 list(snapshot.get("required_token_ids") or []),
                 source=str(snapshot.get("source") or ""),
-                min_observed_at_epoch=armed_at_epoch,
+                min_observed_at_epoch=min_observed_at_epoch,
+                max_age_seconds=max_age_seconds,
+            )
+        if deferred_reason in {
+            "prewarm_waiting_for_strict_ws_quote",
+            "strict_ws_pricing_live_context_unavailable",
+            "strict_ws_pricing_signal_release_stale",
+        }:
+            return self._tokens_have_fresh_ws_quotes(
+                list(snapshot.get("required_token_ids") or []),
+                source=str(snapshot.get("source") or ""),
+                min_observed_at_epoch=min_observed_at_epoch,
+                max_age_seconds=max_age_seconds,
             )
         return self._tokens_have_fresh_ws_quotes(
             list(snapshot.get("required_token_ids") or []),
             source=str(snapshot.get("source") or ""),
+            max_age_seconds=max_age_seconds,
         )
 
     async def _ensure_hot_subscriptions(self, token_ids: list[str]) -> None:
@@ -836,12 +910,15 @@ class IntentRuntime:
         signal_id: str,
         required_token_ids: list[str] | None = None,
         reason: str = "strict_ws_context_missing",
+        min_observed_at: Any = None,
+        required_max_age_ms: int | None = None,
     ) -> bool:
         normalized_signal_id = str(signal_id or "").strip()
         if not normalized_signal_id:
             return False
         snapshot_copy: dict[str, Any] | None = None
         token_ids: list[str] = []
+        min_observed_at_iso = _to_iso(_normalize_datetime(min_observed_at))
         async with self._lock:
             snapshot = self._signals_by_id.get(normalized_signal_id)
             if snapshot is None:
@@ -861,6 +938,8 @@ class IntentRuntime:
                 normalized_signal_id,
                 required_token_ids=token_ids,
                 reason=reason,
+                min_observed_at_iso=min_observed_at_iso,
+                required_max_age_ms=required_max_age_ms,
             )
             snapshot_copy = copy.deepcopy(snapshot)
         if snapshot_copy is not None:

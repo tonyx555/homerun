@@ -857,8 +857,28 @@ class MarketRuntime:
         if feed_manager is not None and getattr(feed_manager, "_started", False):
             if yes_token and feed_manager.cache.is_fresh(yes_token):
                 row["yes_price"] = feed_manager.cache.get_mid_price(yes_token)
+                row["yes_price_source"] = "redis_strict"
+                try:
+                    observed_at_epoch = feed_manager.cache.get_observed_at_epoch(yes_token)
+                except Exception:
+                    observed_at_epoch = None
+                if observed_at_epoch is not None:
+                    row["yes_price_updated_at"] = datetime.fromtimestamp(
+                        float(observed_at_epoch),
+                        tz=timezone.utc,
+                    ).isoformat().replace("+00:00", "Z")
             if no_token and feed_manager.cache.is_fresh(no_token):
                 row["no_price"] = feed_manager.cache.get_mid_price(no_token)
+                row["no_price_source"] = "redis_strict"
+                try:
+                    observed_at_epoch = feed_manager.cache.get_observed_at_epoch(no_token)
+                except Exception:
+                    observed_at_epoch = None
+                if observed_at_epoch is not None:
+                    row["no_price_updated_at"] = datetime.fromtimestamp(
+                        float(observed_at_epoch),
+                        tz=timezone.utc,
+                    ).isoformat().replace("+00:00", "Z")
             selected_token = yes_token or no_token
             if selected_token and hasattr(feed_manager.cache, "get_price_history"):
                 row["history_tail"] = feed_manager.cache.get_price_history(selected_token, max_snapshots=20)
@@ -1314,8 +1334,28 @@ class MarketRuntime:
             if feed_manager is not None and getattr(feed_manager, "_started", False):
                 if len(token_ids) > 0 and feed_manager.cache.is_fresh(token_ids[0], max_age_seconds=strict_age):
                     row["up_price"] = feed_manager.cache.get_mid_price(token_ids[0])
+                    row["up_price_source"] = "redis_strict"
+                    try:
+                        observed_at_epoch = feed_manager.cache.get_observed_at_epoch(token_ids[0])
+                    except Exception:
+                        observed_at_epoch = None
+                    if observed_at_epoch is not None:
+                        row["up_price_updated_at"] = datetime.fromtimestamp(
+                            float(observed_at_epoch),
+                            tz=timezone.utc,
+                        ).isoformat().replace("+00:00", "Z")
                 if len(token_ids) > 1 and feed_manager.cache.is_fresh(token_ids[1], max_age_seconds=strict_age):
                     row["down_price"] = feed_manager.cache.get_mid_price(token_ids[1])
+                    row["down_price_source"] = "redis_strict"
+                    try:
+                        observed_at_epoch = feed_manager.cache.get_observed_at_epoch(token_ids[1])
+                    except Exception:
+                        observed_at_epoch = None
+                    if observed_at_epoch is not None:
+                        row["down_price_updated_at"] = datetime.fromtimestamp(
+                            float(observed_at_epoch),
+                            tz=timezone.utc,
+                        ).isoformat().replace("+00:00", "Z")
                 if token_ids:
                     row["history_tail"] = feed_manager.cache.get_price_history(token_ids[0], max_snapshots=20)
             asset = str(row.get("asset") or "").strip().upper()

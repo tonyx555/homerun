@@ -14,7 +14,7 @@ from utils.converters import safe_float
 
 _MIN_EXECUTION_PRICE = 0.001
 _MIN_LIVE_SHARES = 5.0
-_LEG_SUBMIT_TIMEOUT_SECONDS = 8.0
+_LEG_SUBMIT_TIMEOUT_SECONDS = 35.0
 _NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")

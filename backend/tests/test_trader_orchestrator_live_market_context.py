@@ -699,6 +699,60 @@ async def test_build_live_signal_contexts_keeps_unknown_age_for_snapshot_without
     assert ctx["market_data_age_ms"] is None
 
 
+@pytest.mark.asyncio
+async def test_build_cached_live_signal_contexts_accepts_runtime_redis_strict_snapshot_for_scanner(
+    monkeypatch,
+):
+    market_id = "runtime-scanner-market-1"
+    yes_token = "121212121212121212"
+    no_token = "343434343434343434"
+    observed_at = "2026-03-10T02:39:50Z"
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_feed_manager",
+        lambda: SimpleNamespace(_started=False),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_market_runtime",
+        lambda: SimpleNamespace(
+            get_market_snapshot=lambda lookup_id, hint=None: (
+                {
+                    "condition_id": "0x" + ("c" * 64),
+                    "question": "Runtime redis strict scanner market",
+                    "clob_token_ids": [yes_token, no_token],
+                    "outcome_labels": ["Yes", "No"],
+                    "yes_price": 0.44,
+                    "no_price": 0.56,
+                    "yes_price_source": "redis_strict",
+                    "no_price_source": "redis_strict",
+                    "yes_price_updated_at": observed_at,
+                    "no_price_updated_at": observed_at,
+                }
+                if lookup_id == market_id
+                else None
+            )
+        ),
+    )
+
+    signal = SimpleNamespace(
+        id="sig_runtime_redis_strict",
+        market_id=market_id,
+        market_question="Runtime redis strict scanner market",
+        source="scanner",
+        direction="buy_yes",
+        entry_price=0.43,
+        edge_percent=1.0,
+        payload_json={},
+    )
+
+    contexts = await build_cached_live_signal_contexts([signal], strict_ws_only=True)
+    ctx = contexts["sig_runtime_redis_strict"]
+    assert ctx["available"] is True
+    assert ctx["market_data_source"] == "redis_strict"
+    assert ctx["live_selected_price"] == pytest.approx(0.44)
+    assert ctx["selected_token_id"] == yes_token
+
+
 def test_runtime_trade_signal_view_overrides_runtime_fields():
     base = SimpleNamespace(
         id="sig_runtime",
