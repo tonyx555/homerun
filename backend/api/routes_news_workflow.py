@@ -15,7 +15,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     NewsArticleCache,
-    ScannerSnapshot,
     NewsTradeIntent,
     NewsWorkflowFinding,
     get_db_session,

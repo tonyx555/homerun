@@ -16,7 +16,6 @@ from utils.converters import normalize_market_id, safe_float
 from models.database import (
     AsyncSessionLocal,
     DiscoveredWallet,
-    ScannerSnapshot,
     TrackedWallet,
     TraderGroup,
     TraderGroupMember,

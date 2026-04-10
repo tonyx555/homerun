@@ -15,8 +15,6 @@ class _FakeSession:
 
 @pytest.mark.asyncio
 async def test_bridge_publishes_stream_before_commit(monkeypatch):
-    session = _FakeSession()
-
     fake_runtime = SimpleNamespace(
         started=True,
         prewarm_source_tokens=AsyncMock(return_value=None),

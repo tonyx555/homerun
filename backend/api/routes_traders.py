@@ -862,6 +862,7 @@ async def get_trader_market_history(
                 except Exception:
                     pass
 
+    row = None
     histories: dict[str, list[dict[str, float]]] = {}
     for market_id in requested_ids:
         resolved_key = alias_to_history_key.get(market_id, market_id)

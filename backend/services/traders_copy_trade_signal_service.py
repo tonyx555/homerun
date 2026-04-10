@@ -468,15 +468,14 @@ class TradersCopyTradeSignalService:
         if not opportunities:
             return 0
 
-        async with AsyncSessionLocal() as session:
-            await bridge_opportunities_to_signals(
-                opportunities,
-                source="traders",
-                signal_type_override="copy_trade",
-                default_ttl_minutes=15,
-                sweep_missing=False,
-                refresh_prices=False,
-            )
+        await bridge_opportunities_to_signals(
+            opportunities,
+            source="traders",
+            signal_type_override="copy_trade",
+            default_ttl_minutes=15,
+            sweep_missing=False,
+            refresh_prices=False,
+        )
         return len(opportunities)
 
     async def copy_existing_open_positions_for_trader(

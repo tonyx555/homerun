@@ -878,6 +878,16 @@ def upsert_active_order(
     )
 
 
+def record_order_created(
+    *,
+    trader_id: str,
+    mode: str,
+    order_id: str,
+    **kwargs: Any,
+) -> None:
+    pass
+
+
 def record_order_resolved(
     *,
     trader_id: str,
