@@ -181,6 +181,7 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
                 direction="buy_no",
                 dedupe_key="scanner-tail",
                 status="pending",
+                runtime_sequence=1,
                 created_at=now,
                 updated_at=now,
             )
@@ -337,6 +338,7 @@ async def test_reactivated_signal_bypasses_cursor_when_updated_after_last_consum
                 direction="buy_no",
                 dedupe_key="reactivated-tail",
                 status="pending",
+                runtime_sequence=5,
                 created_at=now,
                 updated_at=now,
             )
@@ -350,6 +352,7 @@ async def test_reactivated_signal_bypasses_cursor_when_updated_after_last_consum
                 direction="buy_no",
                 dedupe_key="later-tail",
                 status="pending",
+                runtime_sequence=10,
                 created_at=now + timedelta(seconds=30),
                 updated_at=now + timedelta(seconds=30),
             )

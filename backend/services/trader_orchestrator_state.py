@@ -5848,7 +5848,7 @@ async def list_unconsumed_trade_signals(
             TradeSignal.id.asc(),
         )
     else:
-        query = query.order_by(signal_sort_ts.asc(), TradeSignal.id.asc())
+        query = query.order_by(TradeSignal.runtime_sequence.desc().nulls_last(), signal_sort_ts.asc(), TradeSignal.id.asc())
     return list((await session.execute(query)).scalars().all())
 
 

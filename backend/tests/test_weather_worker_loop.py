@@ -144,6 +144,6 @@ async def test_worker_bridges_dispatched_strategy_opportunities(monkeypatch):
         await weather_worker._run_loop()
 
     bridge_mock.assert_awaited_once()
-    bridged = bridge_mock.await_args.args[1]
+    bridged = bridge_mock.await_args.args[0]
     assert len(bridged) == 1
     assert bridged[0] is dispatched_opp

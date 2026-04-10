@@ -142,7 +142,7 @@ async def test_process_wallet_trade_uses_strategy_detect_and_bridge(monkeypatch)
     fake_strategy = _FakeStrategy()
     bridge_calls: list[dict] = []
 
-    async def _bridge(session, opportunities, source, **kwargs):
+    async def _bridge(opportunities, source, **kwargs):
         bridge_calls.append(
             {
                 "opportunities": opportunities,
@@ -242,7 +242,7 @@ async def test_copy_existing_open_positions_bootstraps_wallet_positions(monkeypa
 
     bridge_calls: list[dict] = []
 
-    async def _bridge(session, opportunities, source, **kwargs):
+    async def _bridge(opportunities, source, **kwargs):
         bridge_calls.append({"source": source, "kwargs": kwargs, "count": len(opportunities)})
         return len(opportunities)
 
