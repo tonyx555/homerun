@@ -5,6 +5,8 @@ from typing import Any
 
 from utils.utcnow import utcnow
 
+_UNSET = object()
+
 
 def _clone(value: Any) -> Any:
     return copy.deepcopy(value)
@@ -42,15 +44,15 @@ class RuntimeStatus:
     def update_crypto(
         self,
         *,
-        running: bool | None = None,
-        enabled: bool | None = None,
-        current_activity: str | None = None,
-        interval_seconds: int | None = None,
-        last_run_at: str | None = None,
-        lag_seconds: float | None = None,
-        last_error: str | None = None,
-        stats: dict[str, Any] | None = None,
-        control: dict[str, Any] | None = None,
+        running: Any = _UNSET,
+        enabled: Any = _UNSET,
+        current_activity: Any = _UNSET,
+        interval_seconds: Any = _UNSET,
+        last_run_at: Any = _UNSET,
+        lag_seconds: Any = _UNSET,
+        last_error: Any = _UNSET,
+        stats: Any = _UNSET,
+        control: Any = _UNSET,
     ) -> None:
         self._update(
             self._crypto,
@@ -68,15 +70,15 @@ class RuntimeStatus:
     def update_orchestrator(
         self,
         *,
-        running: bool | None = None,
-        enabled: bool | None = None,
-        current_activity: str | None = None,
-        interval_seconds: int | None = None,
-        last_run_at: str | None = None,
-        lag_seconds: float | None = None,
-        last_error: str | None = None,
-        stats: dict[str, Any] | None = None,
-        control: dict[str, Any] | None = None,
+        running: Any = _UNSET,
+        enabled: Any = _UNSET,
+        current_activity: Any = _UNSET,
+        interval_seconds: Any = _UNSET,
+        last_run_at: Any = _UNSET,
+        lag_seconds: Any = _UNSET,
+        last_error: Any = _UNSET,
+        stats: Any = _UNSET,
+        control: Any = _UNSET,
     ) -> None:
         self._update(
             self._orchestrator,
@@ -95,33 +97,33 @@ class RuntimeStatus:
         self,
         target: dict[str, Any],
         *,
-        running: bool | None = None,
-        enabled: bool | None = None,
-        current_activity: str | None = None,
-        interval_seconds: int | None = None,
-        last_run_at: str | None = None,
-        lag_seconds: float | None = None,
-        last_error: str | None = None,
-        stats: dict[str, Any] | None = None,
-        control: dict[str, Any] | None = None,
+        running: Any = _UNSET,
+        enabled: Any = _UNSET,
+        current_activity: Any = _UNSET,
+        interval_seconds: Any = _UNSET,
+        last_run_at: Any = _UNSET,
+        lag_seconds: Any = _UNSET,
+        last_error: Any = _UNSET,
+        stats: Any = _UNSET,
+        control: Any = _UNSET,
     ) -> None:
-        if running is not None:
+        if running is not _UNSET:
             target["running"] = bool(running)
-        if enabled is not None:
+        if enabled is not _UNSET:
             target["enabled"] = bool(enabled)
-        if current_activity is not None:
-            target["current_activity"] = str(current_activity)
-        if interval_seconds is not None:
+        if current_activity is not _UNSET:
+            target["current_activity"] = None if current_activity is None else str(current_activity)
+        if interval_seconds is not _UNSET:
             target["interval_seconds"] = int(interval_seconds)
-        if last_run_at is not None:
+        if last_run_at is not _UNSET:
             target["last_run_at"] = last_run_at
-        if lag_seconds is not None:
-            target["lag_seconds"] = float(lag_seconds)
-        if last_error is not None or last_error is None:
+        if lag_seconds is not _UNSET:
+            target["lag_seconds"] = None if lag_seconds is None else float(lag_seconds)
+        if last_error is not _UNSET:
             target["last_error"] = last_error
-        if stats is not None:
+        if stats is not _UNSET:
             target["stats"] = _clone(stats)
-        if control is not None:
+        if control is not _UNSET:
             target["control"] = _clone(control)
         target["updated_at"] = utcnow().isoformat().replace("+00:00", "Z")
 

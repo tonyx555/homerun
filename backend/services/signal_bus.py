@@ -10,6 +10,7 @@ read from one normalized contract.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import uuid
@@ -26,7 +27,7 @@ from models.database import (
     TradeSignalEmission,
 )
 from services.event_bus import event_bus
-from services.market_roster import ensure_market_roster_payload
+from services.market_roster import build_market_roster, ensure_market_roster_payload
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
 
@@ -410,12 +411,20 @@ def _uses_runtime_price_revalidation(payload: Any, strategy_context: Any) -> boo
     strategy_context_json = strategy_context if isinstance(strategy_context, dict) else {}
     runtime = payload_json.get("strategy_runtime")
     runtime_json = runtime if isinstance(runtime, dict) else {}
+    source_key = str(
+        runtime_json.get("source_key")
+        or strategy_context_json.get("source_key")
+        or payload_json.get("source_key")
+        or ""
+    ).strip().lower()
     activation = str(
         runtime_json.get("execution_activation")
         or strategy_context_json.get("execution_activation")
         or ""
     ).strip().lower()
-    return activation == "ws_post_arm_tick"
+    if source_key == "scanner":
+        return True
+    return activation in {"ws_current", "ws_post_arm_tick"}
 
 
 def _strategy_runtime_metadata(opportunity: Opportunity) -> dict[str, Any]:
@@ -438,7 +447,12 @@ def _strategy_runtime_metadata(opportunity: Opportunity) -> dict[str, Any]:
             if str(subscription or "").strip()
         }
     )
-    execution_activation = "immediate" if source_key == "crypto" else "ws_post_arm_tick"
+    if source_key == "crypto":
+        execution_activation = "immediate"
+    elif source_key == "scanner":
+        execution_activation = "ws_current"
+    else:
+        execution_activation = "ws_post_arm_tick"
     return {
         "strategy_slug": strategy_slug,
         "source_key": source_key,
@@ -500,6 +514,35 @@ def _execution_profile_for_opportunity(opportunity: Opportunity, legs_count: int
     }
 
 
+def _merge_position_execution_contract(
+    plan: dict[str, Any],
+    positions: list[dict[str, Any]],
+) -> dict[str, Any]:
+    legs = [dict(leg) for leg in (plan.get("legs") or []) if isinstance(leg, dict)]
+    if not legs or not positions:
+        return dict(plan)
+    for index, position in enumerate(positions):
+        if index >= len(legs) or not isinstance(position, dict):
+            continue
+        leg = legs[index]
+        for key in (
+            "max_execution_price",
+            "max_entry_price",
+            "min_execution_price",
+            "min_exit_price",
+            "allow_taker_limit_buy_above_signal",
+            "aggressive_limit_buy_submit_as_gtc",
+            "price_policy",
+            "time_in_force",
+        ):
+            if key in position:
+                leg[key] = position.get(key)
+        legs[index] = leg
+    merged = dict(plan)
+    merged["legs"] = legs
+    return merged
+
+
 def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None:
     positions = [position for position in (getattr(opportunity, "positions_to_take", None) or []) if isinstance(position, dict)]
     expected_leg_count = len(positions)
@@ -510,11 +553,11 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
             if isinstance(dumped, dict) and list(dumped.get("legs") or []):
                 existing_legs = [leg for leg in (dumped.get("legs") or []) if isinstance(leg, dict)]
                 if expected_leg_count <= 1 or len(existing_legs) >= expected_leg_count:
-                    return dumped
+                    return _merge_position_execution_contract(dumped, positions)
         elif isinstance(existing, dict) and list(existing.get("legs") or []):
             existing_legs = [leg for leg in (existing.get("legs") or []) if isinstance(leg, dict)]
             if expected_leg_count <= 1 or len(existing_legs) >= expected_leg_count:
-                return dict(existing)
+                return _merge_position_execution_contract(dict(existing), positions)
 
     if not positions:
         return None
@@ -574,8 +617,14 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
                 "side": "sell" if action.startswith("sell") else "buy",
                 "outcome": str(position.get("outcome") or "").strip().lower() or None,
                 "limit_price": parsed_price,
+                "max_execution_price": position.get("max_execution_price"),
+                "max_entry_price": position.get("max_entry_price"),
+                "min_execution_price": position.get("min_execution_price"),
+                "min_exit_price": position.get("min_exit_price"),
                 "price_policy": str(position.get("price_policy") or profile["price_policy"]),
                 "time_in_force": str(position.get("time_in_force") or profile["time_in_force"]),
+                "allow_taker_limit_buy_above_signal": position.get("allow_taker_limit_buy_above_signal"),
+                "aggressive_limit_buy_submit_as_gtc": position.get("aggressive_limit_buy_submit_as_gtc"),
                 "notional_weight": max(0.0001, float(position.get("notional_weight") or 1.0)),
                 "min_fill_ratio": max(
                     0.0,
@@ -670,6 +719,135 @@ def _primary_plan_leg(plan: dict[str, Any] | None) -> dict[str, Any] | None:
     return legs[0]
 
 
+def _opportunity_field(opportunity: Opportunity, key: str) -> Any:
+    if isinstance(opportunity, dict):
+        return opportunity.get(key)
+    return getattr(opportunity, key, None)
+
+
+def _market_field(market: Any, key: str) -> Any:
+    if isinstance(market, dict):
+        return market.get(key)
+    return getattr(market, key, None)
+
+
+def _safe_list_copy(value: Any) -> list[Any]:
+    if isinstance(value, list):
+        return copy.deepcopy(value)
+    if isinstance(value, tuple):
+        return copy.deepcopy(list(value))
+    return []
+
+
+def _normalize_signal_market_entry(market: Any) -> dict[str, Any] | None:
+    market_id = str(_market_field(market, "id") or _market_field(market, "market_id") or "").strip()
+    if not market_id:
+        return None
+
+    token_ids = _safe_list_copy(_market_field(market, "clob_token_ids"))
+    outcome_prices = _safe_list_copy(_market_field(market, "outcome_prices"))
+    outcome_labels = _safe_list_copy(_market_field(market, "outcome_labels"))
+    tags = _market_field(market, "tags")
+    if isinstance(tags, list):
+        normalized_tags = [str(tag or "").strip() for tag in tags if str(tag or "").strip()]
+    else:
+        single_tag = str(tags or "").strip()
+        normalized_tags = [single_tag] if single_tag else []
+
+    entry = {
+        "id": market_id,
+        "condition_id": str(_market_field(market, "condition_id") or _market_field(market, "conditionId") or "").strip() or None,
+        "question": str(_market_field(market, "question") or _market_field(market, "market_question") or "").strip() or None,
+        "slug": str(_market_field(market, "slug") or _market_field(market, "market_slug") or "").strip() or None,
+        "group_item_title": str(_market_field(market, "group_item_title") or "").strip() or None,
+        "event_slug": str(_market_field(market, "event_slug") or "").strip() or None,
+        "event_ticker": str(_market_field(market, "event_ticker") or "").strip() or None,
+        "sports_market_type": str(_market_field(market, "sports_market_type") or "").strip() or None,
+        "game_start_time": _market_field(market, "game_start_time"),
+        "line": _market_field(market, "line"),
+        "platform": str(_market_field(market, "platform") or "polymarket").strip().lower() or "polymarket",
+        "neg_risk": bool(_market_field(market, "neg_risk")),
+        "active": bool(_market_field(market, "active")) if _market_field(market, "active") is not None else None,
+        "closed": bool(_market_field(market, "closed")) if _market_field(market, "closed") is not None else None,
+        "accepting_orders": (
+            bool(_market_field(market, "accepting_orders"))
+            if _market_field(market, "accepting_orders") is not None
+            else None
+        ),
+        "resolved": bool(_market_field(market, "resolved")) if _market_field(market, "resolved") is not None else None,
+        "winner": bool(_market_field(market, "winner")) if _market_field(market, "winner") is not None else None,
+        "winning_outcome": str(_market_field(market, "winning_outcome") or "").strip() or None,
+        "status": str(_market_field(market, "status") or "").strip() or None,
+        "clob_token_ids": [str(token_id or "").strip() for token_id in token_ids if str(token_id or "").strip()],
+        "outcome_prices": outcome_prices,
+        "outcome_labels": outcome_labels,
+        "yes_price": _market_field(market, "yes_price"),
+        "no_price": _market_field(market, "no_price"),
+        "current_yes_price": _market_field(market, "current_yes_price"),
+        "current_no_price": _market_field(market, "current_no_price"),
+        "liquidity": _market_field(market, "liquidity"),
+        "volume": _market_field(market, "volume"),
+        "price_updated_at": _market_field(market, "price_updated_at"),
+        "price_age_seconds": _market_field(market, "price_age_seconds"),
+        "is_price_fresh": _market_field(market, "is_price_fresh"),
+    }
+    if normalized_tags:
+        entry["tags"] = normalized_tags
+    return entry
+
+
+def _select_signal_markets(
+    opportunity: Opportunity,
+    *,
+    primary_market_id: str,
+    plan: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[Any], bool]:
+    raw_markets = list(_opportunity_field(opportunity, "markets") or [])
+    raw_roster = _opportunity_field(opportunity, "market_roster")
+    roster_markets = list(raw_roster.get("markets") or []) if isinstance(raw_roster, dict) else []
+    candidate_markets = raw_markets or roster_markets
+    full_roster_markets = roster_markets or raw_markets
+
+    planned_market_ids: list[str] = []
+    seen_market_ids: set[str] = set()
+    for leg in list((plan or {}).get("legs") or []):
+        if not isinstance(leg, dict):
+            continue
+        market_id = str(leg.get("market_id") or "").strip()
+        if not market_id or market_id in seen_market_ids:
+            continue
+        seen_market_ids.add(market_id)
+        planned_market_ids.append(market_id)
+    if not planned_market_ids and primary_market_id:
+        planned_market_ids.append(primary_market_id)
+
+    selected_raw_markets: list[Any] = []
+    selected_market_ids = set(planned_market_ids)
+    if selected_market_ids:
+        for market in candidate_markets:
+            market_id = str(_market_field(market, "id") or _market_field(market, "market_id") or "").strip()
+            if market_id and market_id in selected_market_ids:
+                selected_raw_markets.append(market)
+    if not selected_raw_markets and candidate_markets:
+        selected_raw_markets = [candidate_markets[0]]
+
+    payload_markets: list[dict[str, Any]] = []
+    seen_payload_market_ids: set[str] = set()
+    for market in selected_raw_markets:
+        normalized = _normalize_signal_market_entry(market)
+        if normalized is None:
+            continue
+        market_id = str(normalized.get("id") or "").strip()
+        if not market_id or market_id in seen_payload_market_ids:
+            continue
+        seen_payload_market_ids.add(market_id)
+        payload_markets.append(normalized)
+
+    keep_full_event_roster = bool(_opportunity_field(opportunity, "is_guaranteed")) and len(planned_market_ids) > 1
+    roster_source_markets = full_roster_markets if keep_full_event_roster else selected_raw_markets
+    return payload_markets, roster_source_markets, keep_full_event_roster
+
+
 def build_signal_contract_from_opportunity(
     opportunity: Opportunity,
 ) -> tuple[str, str | None, float | None, str | None, dict[str, Any], dict[str, Any] | None]:
@@ -685,26 +863,93 @@ def build_signal_contract_from_opportunity(
         first_position = (opportunity.positions_to_take or [{}])[0]
         entry_price = first_position.get("price")
 
-    opportunity_market_roster = getattr(opportunity, "market_roster", None)
-    roster_markets = (
-        list(opportunity_market_roster.get("markets") or [])
-        if isinstance(opportunity_market_roster, dict)
-        else list(getattr(opportunity, "markets", None) or [])
+    payload_markets, roster_source_markets, keep_full_event_roster = _select_signal_markets(
+        opportunity,
+        primary_market_id=market_id,
+        plan=plan,
     )
-    payload = opportunity.model_dump(mode="json")
+    first_payload_market = payload_markets[0] if payload_markets else {}
+    strategy_context = dict(opportunity.strategy_context or {})
+    event_id = str(getattr(opportunity, "event_id", "") or "") or None
+    event_slug = str(getattr(opportunity, "event_slug", "") or "") or None
+    event_title = str(getattr(opportunity, "event_title", "") or "") or None
+    category = str(getattr(opportunity, "category", "") or "") or None
+
+    payload: dict[str, Any] = {
+        "id": str(getattr(opportunity, "id", "") or ""),
+        "stable_id": str(getattr(opportunity, "stable_id", "") or ""),
+        "strategy": str(getattr(opportunity, "strategy", "") or ""),
+        "title": str(getattr(opportunity, "title", "") or ""),
+        "description": str(getattr(opportunity, "description", "") or ""),
+        "market_id": market_id,
+        "market_question": market_question,
+        "market_slug": str(first_payload_market.get("slug") or "") or None,
+        "event_id": event_id,
+        "event_slug": event_slug,
+        "event_title": event_title,
+        "category": category,
+        "detected_at": getattr(opportunity, "detected_at", None),
+        "first_detected_at": getattr(opportunity, "first_detected_at", None),
+        "last_detected_at": getattr(opportunity, "last_detected_at", None),
+        "last_priced_at": getattr(opportunity, "last_priced_at", None),
+        "last_seen_at": getattr(opportunity, "last_seen_at", None),
+        "last_updated_at": getattr(opportunity, "last_updated_at", None),
+        "resolution_date": getattr(opportunity, "resolution_date", None),
+        "total_cost": getattr(opportunity, "total_cost", None),
+        "expected_payout": getattr(opportunity, "expected_payout", None),
+        "gross_profit": getattr(opportunity, "gross_profit", None),
+        "fee": getattr(opportunity, "fee", None),
+        "net_profit": getattr(opportunity, "net_profit", None),
+        "guaranteed_profit": getattr(opportunity, "guaranteed_profit", None),
+        "roi_percent": getattr(opportunity, "roi_percent", None),
+        "roi_type": getattr(opportunity, "roi_type", None),
+        "is_guaranteed": bool(getattr(opportunity, "is_guaranteed", False)),
+        "mispricing_type": getattr(opportunity, "mispricing_type", None),
+        "risk_score": getattr(opportunity, "risk_score", None),
+        "risk_factors": copy.deepcopy(list(getattr(opportunity, "risk_factors", None) or [])),
+        "confidence": getattr(opportunity, "confidence", None),
+        "max_position_size": getattr(opportunity, "max_position_size", None),
+        "min_liquidity": getattr(opportunity, "min_liquidity", None),
+        "capture_ratio": getattr(opportunity, "capture_ratio", None),
+        "revision": getattr(opportunity, "revision", None),
+        "polymarket_url": getattr(opportunity, "polymarket_url", None),
+        "kalshi_url": getattr(opportunity, "kalshi_url", None),
+        "markets": payload_markets,
+        "positions_to_take": copy.deepcopy(list(getattr(opportunity, "positions_to_take", None) or [])),
+        "strategy_context": copy.deepcopy(strategy_context),
+    }
     if plan is not None:
         payload["execution_plan"] = plan
-    payload = ensure_market_roster_payload(
-        payload,
-        markets=roster_markets,
-        market_id=market_id,
-        market_question=market_question,
-        event_id=str(getattr(opportunity, "event_id", "") or "") or None,
-        event_slug=str(getattr(opportunity, "event_slug", "") or "") or None,
-        event_title=str(getattr(opportunity, "event_title", "") or "") or None,
-        category=str(getattr(opportunity, "category", "") or "") or None,
+
+    roster_scope = "event" if keep_full_event_roster and (event_id or event_slug) else "signal"
+    roster = build_market_roster(
+        list(roster_source_markets or []),
+        scope=roster_scope,
+        event_id=event_id,
+        event_slug=event_slug,
+        event_title=event_title,
+        category=category,
     )
-    strategy_context = dict(opportunity.strategy_context or {})
+    if roster is None:
+        payload = ensure_market_roster_payload(
+            payload,
+            markets=payload_markets,
+            market_id=market_id,
+            market_question=market_question,
+            event_id=event_id,
+            event_slug=event_slug,
+            event_title=event_title,
+            category=category,
+        )
+    else:
+        payload["market_roster"] = roster
+    if event_id or event_slug or event_title or category:
+        payload["event"] = {
+            "id": event_id,
+            "slug": event_slug,
+            "title": event_title,
+            "category": category,
+        }
     runtime_metadata = _strategy_runtime_metadata(opportunity)
     if runtime_metadata:
         payload["strategy_runtime"] = dict(runtime_metadata)
@@ -713,6 +958,19 @@ def build_signal_contract_from_opportunity(
         strategy_context.setdefault("execution_activation", runtime_metadata.get("execution_activation"))
     if plan is not None:
         strategy_context["execution_plan"] = plan
+    selected_token_id = str(
+        primary_leg.get("token_id")
+        or (payload.get("positions_to_take") or [{}])[0].get("token_id")
+        or ""
+    ).strip()
+    if selected_token_id:
+        payload["selected_token_id"] = selected_token_id
+        payload["token_id"] = selected_token_id
+    first_market_token_ids = list(first_payload_market.get("clob_token_ids") or [])
+    if first_market_token_ids:
+        payload["yes_token_id"] = str(first_market_token_ids[0] or "").strip() or None
+    if len(first_market_token_ids) > 1:
+        payload["no_token_id"] = str(first_market_token_ids[1] or "").strip() or None
 
     return (
         market_id,
@@ -1002,16 +1260,9 @@ async def upsert_trade_signal(
                         reason=emission_reason,
                     )
         else:
-            emission_event_type = "upsert_ignored_terminal"
-            emission_reason = f"terminal_status:{previous_status}"
-            if runtime_sequence is not _RUNTIME_SEQUENCE_UNSET:
-                row.runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None
-            await _record_signal_emission(
-                session,
-                row,
-                event_type="upsert_ignored_terminal",
-                reason=f"terminal_status:{previous_status}",
-            )
+            emission_event_type = "upsert_ignored_nonreactivable"
+            emission_reason = f"nonreactivable_status:{previous_status}"
+            publish_signal_emission = False
 
     if row is not None and runtime_sequence is not _RUNTIME_SEQUENCE_UNSET:
         row.runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None

@@ -1614,23 +1614,25 @@ class SmartWalletPoolService:
                 if str(address or "").strip()
             )
 
-            ranked_rows = (
-                await session.execute(
-                    select(DiscoveredWallet.address)
-                    .order_by(
-                        DiscoveredWallet.composite_score.desc().nullslast(),
-                        DiscoveredWallet.rank_score.desc().nullslast(),
-                        DiscoveredWallet.total_pnl.desc().nullslast(),
-                        DiscoveredWallet.address.asc(),
+            remaining_ranked_slots = max(0, candidate_ring_depth - len(candidate_addresses))
+            if remaining_ranked_slots > 0:
+                ranked_rows = (
+                    await session.execute(
+                        select(DiscoveredWallet.address)
+                        .order_by(
+                            DiscoveredWallet.composite_score.desc().nullslast(),
+                            DiscoveredWallet.rank_score.desc().nullslast(),
+                            DiscoveredWallet.total_pnl.desc().nullslast(),
+                            DiscoveredWallet.address.asc(),
+                        )
+                        .limit(remaining_ranked_slots)
                     )
-                    .limit(candidate_ring_depth)
+                ).scalars()
+                candidate_addresses.update(
+                    str(address).strip().lower()
+                    for address in ranked_rows
+                    if str(address or "").strip()
                 )
-            ).scalars()
-            candidate_addresses.update(
-                str(address).strip().lower()
-                for address in ranked_rows
-                if str(address or "").strip()
-            )
 
             manual_flag_rows = (
                 await session.execute(

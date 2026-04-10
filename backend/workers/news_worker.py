@@ -64,7 +64,6 @@ def _is_db_disconnect_error(exc: Exception) -> bool:
 
 async def emit_news_intent_signals(session, opportunities: list) -> int:
     return await bridge_opportunities_to_signals(
-        session,
         opportunities,
         source="news",
         sweep_missing=True,

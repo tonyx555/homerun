@@ -23,8 +23,6 @@ from services import discovery_shared_state, shared_state
 from services.news import shared_state as news_shared_state
 from services.pause_state import global_pause_state
 from services.trader_orchestrator_state import (
-    ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
-    read_orchestrator_snapshot,
     read_orchestrator_control,
     write_orchestrator_snapshot,
     update_orchestrator_control,
@@ -215,21 +213,6 @@ async def _collect_workers(session: AsyncSession) -> list[dict]:
     weather_control = await _weather_control_payload(session)
     discovery_control = await _discovery_control_payload(session)
     orchestrator_control = await read_orchestrator_control(session)
-    orchestrator_snapshot = await read_orchestrator_snapshot(session)
-    snapshots["trader_orchestrator"] = {
-        "worker_name": "trader_orchestrator",
-        "running": bool(orchestrator_snapshot.get("running")),
-        "enabled": bool(orchestrator_snapshot.get("enabled")),
-        "current_activity": orchestrator_snapshot.get("current_activity"),
-        "interval_seconds": int(orchestrator_snapshot.get("interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
-        "last_run_at": orchestrator_snapshot.get("last_run_at"),
-        "lag_seconds": None,
-        "last_error": orchestrator_snapshot.get("last_error"),
-        "stats": summarize_worker_stats(orchestrator_snapshot.get("stats", {})),
-        "updated_at": orchestrator_snapshot.get("updated_at"),
-        "control": orchestrator_control,
-    }
-
     detail: list[dict] = []
     for worker_name in WORKER_DISPLAY_ORDER:
         snapshot = dict(snapshots.get(worker_name) or {"worker_name": worker_name, "stats": {}})

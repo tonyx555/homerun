@@ -251,6 +251,76 @@ async def test_unconsumed_signals_can_filter_by_source_strategy_type(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_unconsumed_signals_exclude_cold_scanner_rows_until_runtime_ready(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            scanner_cold = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="scanner-cold",
+                signal_type="scanner_opportunity",
+                strategy_type="generic_strategy",
+                market_id="scanner-cold-market",
+                direction="buy_no",
+                dedupe_key="scanner-cold",
+                status="pending",
+                runtime_sequence=None,
+                created_at=now,
+                updated_at=now,
+            )
+            weather_pending = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="weather",
+                source_item_id="weather-pending",
+                signal_type="weather_intent",
+                strategy_type="weather_primary",
+                market_id="weather-market",
+                direction="buy_yes",
+                dedupe_key="weather-pending",
+                status="pending",
+                runtime_sequence=None,
+                created_at=now + timedelta(seconds=1),
+                updated_at=now + timedelta(seconds=1),
+            )
+            trader = Trader(
+                id=trader_id,
+                name="Scanner Runtime Ready Trader",
+                source_configs_json=[
+                    {"source_key": "scanner", "strategy_key": "generic_strategy", "strategy_params": {}},
+                    {"source_key": "weather", "strategy_key": "weather_primary", "strategy_params": {}},
+                ],
+            )
+            session.add_all([trader, scanner_cold, weather_pending])
+            await session.commit()
+
+            initial_rows = await list_unconsumed_trade_signals(
+                session,
+                trader_id=trader_id,
+                sources=["scanner", "weather"],
+                statuses=["pending"],
+                limit=10,
+            )
+            assert [row.id for row in initial_rows] == [weather_pending.id]
+
+            scanner_cold.runtime_sequence = 7
+            await session.commit()
+
+            runtime_ready_rows = await list_unconsumed_trade_signals(
+                session,
+                trader_id=trader_id,
+                sources=["scanner", "weather"],
+                statuses=["pending"],
+                limit=10,
+            )
+            assert [row.id for row in runtime_ready_rows] == [scanner_cold.id, weather_pending.id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_reactivated_signal_bypasses_cursor_when_updated_after_last_consumption(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = uuid.uuid4().hex
@@ -524,7 +594,7 @@ async def test_unconsumed_signals_can_filter_specific_ids_and_runtime_sequence(t
 
 
 @pytest.mark.asyncio
-async def test_unconsumed_signals_can_exclude_open_market_ids(tmp_path):
+async def test_unconsumed_signals_return_pending_markets_without_fetch_exclusion(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = uuid.uuid4().hex
     try:
@@ -560,7 +630,7 @@ async def test_unconsumed_signals_can_exclude_open_market_ids(tmp_path):
             )
             trader = Trader(
                 id=trader_id,
-                name="Open Market Exclusion Trader",
+                name="Signal Cursor Trader",
                 source_configs_json=[{"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}}],
             )
             session.add_all([trader, open_market_signal, fresh_signal])
@@ -572,9 +642,87 @@ async def test_unconsumed_signals_can_exclude_open_market_ids(tmp_path):
                 sources=["scanner"],
                 statuses=["pending"],
                 strategy_types_by_source={"scanner": ["tail_end_carry"]},
-                exclude_market_ids=["market-open"],
                 limit=10,
             )
-            assert [row.id for row in rows] == [fresh_signal.id]
+            assert [row.id for row in rows] == [fresh_signal.id, open_market_signal.id]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_unconsumed_signals_require_runtime_release_for_scanner_runtime_activation(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            unreleased_scanner = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="scanner-unreleased",
+                signal_type="scanner_opportunity",
+                strategy_type="tail_end_carry",
+                market_id="scanner-market-1",
+                direction="buy_no",
+                dedupe_key="scanner-unreleased",
+                status="pending",
+                payload_json={"strategy_runtime": {"execution_activation": "ws_current"}},
+                strategy_context_json={"execution_activation": "ws_current"},
+                runtime_sequence=None,
+                created_at=now,
+                updated_at=now,
+            )
+            released_scanner = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="scanner-released",
+                signal_type="scanner_opportunity",
+                strategy_type="tail_end_carry",
+                market_id="scanner-market-2",
+                direction="buy_no",
+                dedupe_key="scanner-released",
+                status="pending",
+                payload_json={"strategy_runtime": {"execution_activation": "ws_current"}},
+                strategy_context_json={"execution_activation": "ws_current"},
+                runtime_sequence=17,
+                created_at=now + timedelta(seconds=1),
+                updated_at=now + timedelta(seconds=1),
+            )
+            immediate_crypto = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="crypto",
+                source_item_id="crypto-immediate",
+                signal_type="crypto_worker_15m",
+                strategy_type="crypto_15m",
+                market_id="crypto-market-1",
+                direction="buy_yes",
+                dedupe_key="crypto-immediate",
+                status="pending",
+                payload_json={"strategy_runtime": {"execution_activation": "immediate"}},
+                runtime_sequence=None,
+                created_at=now + timedelta(seconds=2),
+                updated_at=now + timedelta(seconds=2),
+            )
+            trader = Trader(
+                id=trader_id,
+                name="Runtime Release Trader",
+                source_configs_json=[
+                    {"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}},
+                    {"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}},
+                ],
+            )
+            session.add_all([trader, unreleased_scanner, released_scanner, immediate_crypto])
+            await session.commit()
+
+            rows = await list_unconsumed_trade_signals(
+                session,
+                trader_id=trader_id,
+                sources=["scanner", "crypto"],
+                statuses=["pending"],
+                limit=20,
+            )
+
+            assert [row.id for row in rows] == [released_scanner.id, immediate_crypto.id]
+    finally:
+        await engine.dispose()
+

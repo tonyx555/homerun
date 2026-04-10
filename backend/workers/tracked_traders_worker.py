@@ -729,7 +729,6 @@ async def _run_loop() -> None:
             async def _bridge_and_snapshot() -> int:
                 async with AsyncSessionLocal() as session:
                     _emitted = await bridge_opportunities_to_signals(
-                        session,
                         deduped_opportunities,
                         source="traders",
                         sweep_missing=True,

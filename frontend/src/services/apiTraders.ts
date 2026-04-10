@@ -799,10 +799,12 @@ export const getTraderOrchestratorStatus = async (): Promise<TraderOrchestratorS
 
 export const startTraderOrchestrator = async (payload?: {
   mode?: string
+  selected_account_id: string
   requested_by?: string
 }): Promise<TraderOrchestratorControlResponse> => {
   const { data } = await api.post('/trader-orchestrator/start', {
     mode: payload?.mode || 'shadow',
+    selected_account_id: payload?.selected_account_id,
     requested_by: payload?.requested_by,
   })
   return unwrapApiData(data)
@@ -840,11 +842,13 @@ export const armTraderOrchestratorLiveStart = async (payload: {
 export const startTraderOrchestratorLive = async (payload: {
   arm_token: string
   mode?: string
+  selected_account_id: string
   requested_by?: string
 }) => {
   const { data } = await api.post('/trader-orchestrator/live/start', {
     arm_token: payload.arm_token,
     mode: payload.mode || 'live',
+    selected_account_id: payload.selected_account_id,
     requested_by: payload.requested_by,
   })
   return unwrapApiData(data)

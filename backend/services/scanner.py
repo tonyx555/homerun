@@ -14,7 +14,7 @@ from config import settings
 from interfaces import MarketDataProvider
 from models import Opportunity, OpportunityFilter
 from models.opportunity import AIAnalysis, MispricingType
-from models.database import AsyncSessionLocal, ScannerSettings, ScannerSnapshot
+from models.database import AsyncSessionLocal, ScannerSettings
 from services.strategy_loader import strategy_loader
 from services.opportunity_strategy_catalog import ensure_system_opportunity_strategies_seeded
 from services.strategy_sdk import StrategySDK
@@ -149,6 +149,7 @@ class ArbitrageScanner:
         self._market_outcome_token_ids: dict[str, tuple[str, ...]] = {}
         self._market_history_backfill_done: set[str] = set()
         self._market_history_backfill_attempt_ms: dict[str, int] = {}
+        self._persisted_market_history_signatures: dict[str, tuple[int, float, float, str]] = {}
         # Set of market IDs that are in active opportunities — only these get
         # price history recorded.  Updated after each scan cycle.
         self._opportunity_market_ids: set[str] = set()
@@ -786,37 +787,6 @@ class ArbitrageScanner:
                 out.append(token)
         return out
 
-    def _collect_targeted_ws_tokens(self, markets: list) -> list[str]:
-        """Collect WS tokens for crypto binary markets + active opportunity markets only."""
-        seen: set[str] = set()
-        out: list[str] = []
-
-        def _add_token(token: str) -> None:
-            t = token.strip()
-            if t and len(t) > 20 and t not in seen:
-                seen.add(t)
-                out.append(t)
-
-        # 1) Crypto binary markets from MarketRuntime (HF trader always needs these)
-        try:
-            from services.market_runtime import get_market_runtime
-            for row in get_market_runtime().get_crypto_markets():
-                for tid in row.get("clob_token_ids") or []:
-                    _add_token(str(tid or ""))
-        except Exception:
-            pass
-
-        # 2) Markets with active strategy-generated opportunities
-        for opp in self._opportunities:
-            for mkt in opp.markets or []:
-                platform = str(mkt.get("platform", "polymarket") or "polymarket").lower()
-                if platform != "polymarket":
-                    continue
-                for tid in mkt.get("clob_token_ids") or []:
-                    _add_token(str(tid or ""))
-
-        return out
-
     @staticmethod
     def _collect_live_token_ids(markets: list) -> list[str]:
         """Collect unique token IDs from markets in stable order (Polymarket + Kalshi)."""
@@ -844,8 +814,16 @@ class ArbitrageScanner:
             feed_mgr = get_feed_manager()
             if not feed_mgr._started:
                 return prices
+            scanner_strict_age_seconds = max(
+                float(getattr(settings, "WS_PRICE_STALE_SECONDS", 30.0) or 30.0),
+                max(100.0, float(getattr(settings, "SCANNER_STRICT_WS_MAX_AGE_MS", 30000) or 30000.0)) / 1000.0,
+            )
             for token_id in clean_token_ids:
-                if not feed_mgr.is_fresh(token_id):
+                if not feed_mgr.has_current_subscription_price(
+                    token_id,
+                    max_age_seconds=scanner_strict_age_seconds,
+                    allow_stale_subscribed=True,
+                ):
                     continue
                 mid = feed_mgr.cache.get_mid_price(token_id)
                 if mid is None:
@@ -1149,6 +1127,7 @@ class ArbitrageScanner:
             self._market_price_history = {}
             self._market_token_ids = {}
             self._market_outcome_token_ids = {}
+            self._persisted_market_history_signatures = {}
             self._event_to_market_order = {}
             self._verified_event_keys = set()
             self._market_id_to_condition_id = {}
@@ -1198,6 +1177,11 @@ class ArbitrageScanner:
         self._market_history_backfill_attempt_ms = {
             market_id: ts
             for market_id, ts in self._market_history_backfill_attempt_ms.items()
+            if market_id in active_with_aliases
+        }
+        self._persisted_market_history_signatures = {
+            market_id: signature
+            for market_id, signature in self._persisted_market_history_signatures.items()
             if market_id in active_with_aliases
         }
         self._rebuild_opportunity_market_ids()
@@ -1843,6 +1827,27 @@ class ArbitrageScanner:
         self._market_price_history[market_id] = merged
         return len(merged)
 
+    @staticmethod
+    def _market_history_signature(points: list[dict[str, object]]) -> Optional[tuple[int, float, float, str]]:
+        if len(points) < 2:
+            return None
+        first_point = points[0] if isinstance(points[0], dict) else {}
+        last_point = points[-1] if isinstance(points[-1], dict) else {}
+        try:
+            first_t = float(first_point.get("t", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            first_t = 0.0
+        try:
+            last_t = float(last_point.get("t", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            last_t = 0.0
+        return (
+            len(points),
+            first_t,
+            last_t,
+            json.dumps(last_point, sort_keys=True, separators=(",", ":"), default=str),
+        )
+
     async def _backfill_market_history_for_opportunities(self, opportunities: list[Opportunity], now: datetime) -> None:
         """Backfill multi-hour outcome history for visible opportunities."""
         if not opportunities:
@@ -2139,31 +2144,35 @@ class ArbitrageScanner:
         history = self.get_market_history_for_opportunities(opportunities)
         if not history:
             return
+        changed_history: dict[str, list[dict[str, object]]] = {}
+        changed_signatures: dict[str, tuple[int, float, float, str]] = {}
+        for market_id, points in history.items():
+            signature = self._market_history_signature(points)
+            if signature is None:
+                continue
+            if self._persisted_market_history_signatures.get(market_id) == signature:
+                continue
+            changed_history[market_id] = points
+            changed_signatures[market_id] = signature
+        if not changed_history:
+            return
 
-        from services.shared_state import SNAPSHOT_ID
+        from services.shared_state import upsert_scanner_market_history
 
-        async with AsyncSessionLocal() as session:
-            try:
-                result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
-                row = result.scalar_one_or_none()
-                if row is None:
+        items = list(changed_history.items())
+        batch_size = 25
+        for start in range(0, len(items), batch_size):
+            batch_items = items[start : start + batch_size]
+            batch_history = {market_id: points for market_id, points in batch_items}
+            async with AsyncSessionLocal() as session:
+                try:
+                    await upsert_scanner_market_history(session, batch_history)
+                    await session.commit()
+                except (OperationalError, TimeoutError, asyncio.TimeoutError):
+                    await session.rollback()
                     return
-                persisted = row.market_history_json if isinstance(row.market_history_json, dict) else {}
-                changed = False
-                for market_id, points in history.items():
-                    if not isinstance(points, list) or len(points) < 2:
-                        continue
-                    previous = persisted.get(market_id)
-                    if previous == points:
-                        continue
-                    persisted[market_id] = points
-                    changed = True
-                if not changed:
-                    return
-                row.market_history_json = persisted
-                await session.commit()
-            except OperationalError:
-                await session.rollback()
+            for market_id, _points in batch_items:
+                self._persisted_market_history_signatures[market_id] = changed_signatures[market_id]
 
     def get_market_history_for_opportunities(
         self, opportunities: list[Opportunity], max_points: Optional[int] = None
@@ -2282,65 +2291,23 @@ class ArbitrageScanner:
         return attached
 
     async def _hydrate_history_from_db(self, market_ids: set[str]) -> int:
-        """Load persisted market history from the scanner snapshot into local cache."""
-        from models.database import AsyncSessionLocal, ScannerSnapshot
-        from services.shared_state import SNAPSHOT_ID
-        from sqlalchemy import select
+        """Load persisted market history from the dedicated market-history table into local cache."""
+        from services.shared_state import read_scanner_market_history
 
         async with AsyncSessionLocal() as session:
-            result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
-            row = result.scalar_one_or_none()
-            if row is None:
-                return 0
-            db_history = row.market_history_json if isinstance(row.market_history_json, dict) else {}
-            fallback_history: dict[str, list[dict[str, object]]] = {}
-            history_alias_map: dict[str, str] = {}
-            if isinstance(row.opportunities_json, list):
-                needed_market_ids = set(market_ids)
-                for item in row.opportunities_json:
-                    if not isinstance(item, dict):
-                        continue
-                    markets = item.get("markets")
-                    if not isinstance(markets, list):
-                        continue
-                    for market in markets:
-                        if not isinstance(market, dict):
-                            continue
-                        market_id = str(market.get("id", "") or "").strip()
-                        condition_id = str(market.get("condition_id") or market.get("conditionId") or "").strip()
-                        if market_id and condition_id and market_id != condition_id:
-                            history_alias_map[market_id] = condition_id
-                            history_alias_map[condition_id] = market_id
-                        history = market.get("price_history")
-                        if not isinstance(history, list) or len(history) < 2:
-                            continue
-                        for candidate in (market_id, condition_id):
-                            if not candidate:
-                                continue
-                            if candidate not in needed_market_ids:
-                                continue
-                            if candidate in fallback_history:
-                                continue
-                            fallback_history[candidate] = history
+            db_history = await read_scanner_market_history(session, market_ids=market_ids)
 
         now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
         hydrated = 0
         for mid in market_ids:
             points = db_history.get(mid)
             if not isinstance(points, list) or len(points) < 2:
-                alias = history_alias_map.get(mid)
-                if alias:
-                    points = db_history.get(alias)
-            if not isinstance(points, list) or len(points) < 2:
-                points = fallback_history.get(mid)
-                if not isinstance(points, list) or len(points) < 2:
-                    alias = history_alias_map.get(mid)
-                    if alias:
-                        points = fallback_history.get(alias)
-            if not isinstance(points, list) or len(points) < 2:
                 continue
             merged = self._merge_market_history_points(mid, points, now_ms)
             if merged >= 2:
+                signature = self._market_history_signature(points)
+                if signature is not None:
+                    self._persisted_market_history_signatures[mid] = signature
                 hydrated += 1
         return hydrated
 
@@ -2773,18 +2740,7 @@ class ArbitrageScanner:
                 None, _update_caches_after_catalog, self, events, markets, prices, now
             )
 
-            # Phase 5 — Subscribe WS feeds to crypto + opportunity tokens only
-            if settings.WS_FEED_ENABLED:
-                try:
-                    feed_mgr = get_feed_manager()
-                    if feed_mgr._started:
-                        poly_tokens = self._collect_targeted_ws_tokens(markets)
-                        if poly_tokens:
-                            await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens)
-                except Exception as e:
-                    logger.warning(f"  WS subscription failed (non-critical): {e}", exc_info=e)
-
-            # Keep MarketMonitor priorities current without triggering extra upstream fetches.
+            # Phase 5 — Keep MarketMonitor priorities current without triggering extra upstream fetches.
             try:
                 from services.market_monitor import market_monitor
 
@@ -3096,16 +3052,6 @@ class ArbitrageScanner:
             None, _update_incremental_caches, self, merged_events, merged_markets, prices, now
         )
 
-        if settings.WS_FEED_ENABLED:
-            try:
-                feed_mgr = get_feed_manager()
-                if feed_mgr._started:
-                    poly_tokens = self._collect_targeted_ws_tokens(merged_markets)
-                    if poly_tokens:
-                        await feed_mgr.polymarket_feed.subscribe(token_ids=poly_tokens)
-            except Exception as e:
-                logger.warning(f"  WS subscription sync failed (non-critical): {e}", exc_info=e)
-
         try:
             from services.market_monitor import market_monitor
 
@@ -3374,6 +3320,13 @@ class ArbitrageScanner:
 
                 candidate_token_ids = self._collect_live_token_ids(candidate_markets)
                 live_prices: dict[str, dict] = {}
+                if settings.WS_FEED_ENABLED and candidate_token_ids:
+                    try:
+                        feed_mgr = get_feed_manager()
+                        if feed_mgr._started:
+                            await feed_mgr.polymarket_feed.subscribe(token_ids=candidate_token_ids)
+                    except Exception as exc:
+                        logger.debug("Fast-scan WS subscription sync failed", exc_info=exc)
                 if reactive_mode:
                     ws_prices = await self._snapshot_ws_prices(candidate_token_ids)
                     live_prices.update(ws_prices)

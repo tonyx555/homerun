@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -706,7 +707,7 @@ async def test_build_cached_live_signal_contexts_accepts_runtime_redis_strict_sn
     market_id = "runtime-scanner-market-1"
     yes_token = "121212121212121212"
     no_token = "343434343434343434"
-    observed_at = "2026-03-10T02:39:50Z"
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     monkeypatch.setattr(
         "services.trader_orchestrator.live_market_context.get_feed_manager",
@@ -751,6 +752,127 @@ async def test_build_cached_live_signal_contexts_accepts_runtime_redis_strict_sn
     assert ctx["market_data_source"] == "redis_strict"
     assert ctx["live_selected_price"] == pytest.approx(0.44)
     assert ctx["selected_token_id"] == yes_token
+
+
+@pytest.mark.asyncio
+async def test_build_cached_live_signal_contexts_rejects_market_snapshot_for_scanner_in_strict_ws_only(
+    monkeypatch,
+):
+    market_id = "runtime-scanner-market-snapshot"
+    yes_token = "565656565656565656"
+    no_token = "787878787878787878"
+    observed_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_feed_manager",
+        lambda: SimpleNamespace(_started=False),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_market_runtime",
+        lambda: SimpleNamespace(
+            get_market_snapshot=lambda lookup_id, hint=None: (
+                {
+                    "condition_id": "0x" + ("d" * 64),
+                    "question": "Runtime snapshot scanner market",
+                    "clob_token_ids": [yes_token, no_token],
+                    "outcome_labels": ["Yes", "No"],
+                    "yes_price": 0.44,
+                    "no_price": 0.56,
+                    "yes_price_source": "market_snapshot",
+                    "no_price_source": "market_snapshot",
+                    "yes_price_updated_at": observed_at,
+                    "no_price_updated_at": observed_at,
+                }
+                if lookup_id == market_id
+                else None
+            )
+        ),
+    )
+
+    signal = SimpleNamespace(
+        id="sig_runtime_market_snapshot",
+        market_id=market_id,
+        market_question="Runtime snapshot scanner market",
+        source="scanner",
+        direction="buy_yes",
+        entry_price=0.43,
+        edge_percent=1.0,
+        payload_json={},
+    )
+
+    contexts = await build_cached_live_signal_contexts([signal], strict_ws_only=True)
+    assert "sig_runtime_market_snapshot" not in contexts
+
+
+@pytest.mark.asyncio
+async def test_build_cached_live_signal_contexts_accepts_current_scanner_subscription_without_recent_tick(
+    monkeypatch,
+):
+    market_id = "runtime-scanner-market-current"
+    yes_token = "909090909090909090"
+    no_token = "808080808080808080"
+
+    class _Cache:
+        def get_mid_price(self, token_id: str):
+            if token_id == yes_token:
+                return 0.41
+            if token_id == no_token:
+                return 0.59
+            return None
+
+        def staleness(self, token_id: str):
+            if token_id in {yes_token, no_token}:
+                return 31.0
+            return None
+
+    class _FeedManager:
+        _started = True
+
+        def __init__(self):
+            self.cache = _Cache()
+
+        def has_current_subscription_price(self, token_id: str, max_age_seconds: float, allow_stale_subscribed: bool = False):
+            return bool(allow_stale_subscribed and token_id in {yes_token, no_token} and max_age_seconds >= 30.0)
+
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_feed_manager",
+        lambda: _FeedManager(),
+    )
+    monkeypatch.setattr(
+        "services.trader_orchestrator.live_market_context.get_market_runtime",
+        lambda: SimpleNamespace(
+            get_market_snapshot=lambda lookup_id, hint=None: (
+                {
+                    "condition_id": "0x" + ("e" * 64),
+                    "question": "Runtime subscribed scanner market",
+                    "clob_token_ids": [yes_token, no_token],
+                    "outcome_labels": ["Yes", "No"],
+                }
+                if lookup_id == market_id
+                else None
+            )
+        ),
+    )
+
+    signal = SimpleNamespace(
+        id="sig_runtime_subscription_current",
+        market_id=market_id,
+        market_question="Runtime subscribed scanner market",
+        source="scanner",
+        direction="buy_yes",
+        entry_price=0.40,
+        edge_percent=2.0,
+        payload_json={},
+    )
+
+    contexts = await build_cached_live_signal_contexts([signal], strict_ws_only=True)
+    ctx = contexts["sig_runtime_subscription_current"]
+    assert ctx["available"] is True
+    assert ctx["market_data_source"] == "ws_strict"
+    assert ctx["live_selected_price"] == pytest.approx(0.41)
+    assert ctx["selected_token_id"] == yes_token
+    assert ctx["ws_subscription_current"] is True
+    assert ctx["market_data_age_ms"] == pytest.approx(31000.0)
 
 
 def test_runtime_trade_signal_view_overrides_runtime_fields():

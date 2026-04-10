@@ -9,6 +9,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from config import settings
+from services.trader_orchestrator import decision_gates as decision_gates_module
 from services.trader_orchestrator.decision_gates import apply_platform_decision_gates
 
 
@@ -47,7 +48,7 @@ def test_portfolio_allocator_caps_selected_size_before_risk_gate():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=lambda _size: {
             "allowed": True,
             "reason": "Portfolio capped for source budget",
@@ -85,7 +86,7 @@ def test_portfolio_allocator_blocks_signal_when_allocation_not_allowed():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=lambda _size: {
             "allowed": False,
             "reason": "Portfolio blocked: no remaining gross exposure budget",
@@ -124,7 +125,7 @@ def test_min_exit_notional_guard_blocks_under_min_feasible_size(monkeypatch):
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -154,7 +155,7 @@ def test_min_exit_notional_guard_respects_strategy_override_ratio(monkeypatch):
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -181,7 +182,7 @@ def test_min_exit_notional_guard_can_be_disabled_by_strategy_config(monkeypatch)
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -213,7 +214,7 @@ def test_min_exit_notional_guard_prefers_stop_loss_price_when_available(monkeypa
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -244,7 +245,7 @@ def test_min_exit_notional_guard_uses_ratio_floor_when_stop_loss_is_near_close_o
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -281,7 +282,7 @@ def test_min_exit_notional_guard_arms_stop_loss_when_inside_close_window(monkeyp
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_risk_evaluator,
         invoke_hooks=False,
@@ -313,7 +314,7 @@ def test_pending_live_exit_guard_is_disabled_when_max_allowed_is_zero():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=2,
         pending_live_exit_summary={
             "count": 2,
@@ -347,7 +348,7 @@ def test_pending_live_exit_guard_blocks_when_positive_cap_is_exceeded():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=2,
         pending_live_exit_summary={
             "count": 2,
@@ -383,7 +384,7 @@ def test_pending_live_exit_identity_guard_blocks_matching_market_direction_signa
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={
             "count": 0,
@@ -425,7 +426,7 @@ def test_pending_live_exit_guard_allows_configured_inflight_limit():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=2,
         pending_live_exit_summary={
             "count": 2,
@@ -462,7 +463,7 @@ def test_pending_live_exit_identity_guard_can_be_disabled():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={
             "count": 0,
@@ -511,7 +512,7 @@ def test_directional_min_timeframe_blocks_crypto_sub_5m_signal():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -552,7 +553,7 @@ def test_market_data_freshness_blocks_stale_scanner_signal():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -570,6 +571,50 @@ def test_market_data_freshness_blocks_stale_scanner_signal():
         gate["gate"] == "market_data_freshness" and gate["status"] == "blocked"
         for gate in result["platform_gates"]
     )
+
+
+def test_market_data_freshness_allows_current_scanner_subscription_without_recent_tick():
+    runtime_signal = SimpleNamespace(
+        id="signal-scanner-current-1",
+        market_id="market-1",
+        direction="buy_yes",
+        source="scanner",
+        payload_json={
+            "source_observed_at": "2026-02-28T00:00:00Z",
+            "strategy_context": {"source": "scanner"},
+            "live_market": {
+                "market_data_source": "ws_strict",
+                "market_data_age_ms": 3500,
+                "ws_subscription_current": True,
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "max_market_data_age_ms": 1000,
+            "require_live_market_revalidation": False,
+        },
+    )
+
+    assert result["final_decision"] == "selected"
+    freshness_gate = next(gate for gate in result["platform_gates"] if gate["gate"] == "market_data_freshness")
+    assert freshness_gate["status"] == "passed"
+    assert freshness_gate["payload"]["ws_subscription_current"] is True
 
 
 def test_live_market_revalidation_blocks_crypto_when_freshness_is_unprovable():
@@ -598,7 +643,7 @@ def test_live_market_revalidation_blocks_crypto_when_freshness_is_unprovable():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -641,7 +686,7 @@ def test_live_market_revalidation_allows_crypto_with_trusted_live_source():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -683,7 +728,7 @@ def test_live_market_revalidation_keeps_explicit_zero_age_without_fallback():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -726,7 +771,7 @@ def test_strict_ws_pricing_blocks_non_ws_market_source():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -771,7 +816,7 @@ def test_strict_ws_pricing_allows_ws_source_with_fresh_age():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -816,7 +861,7 @@ def test_strict_ws_pricing_blocks_scanner_signal_when_age_exceeds_strategy_budge
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -833,6 +878,153 @@ def test_strict_ws_pricing_blocks_scanner_signal_when_age_exceeds_strategy_budge
     assert result["final_decision"] == "blocked"
     assert "strict ws pricing required" in result["final_reason"].lower()
     assert any(g["gate"] == "strict_ws_pricing" and g["status"] == "blocked" for g in result["platform_gates"])
+
+
+def test_strict_ws_pricing_allows_current_scanner_subscription_without_recent_tick():
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime_signal = SimpleNamespace(
+        id="signal-strict-ws-scanner-current",
+        market_id="market-1",
+        direction="buy_no",
+        source="scanner",
+        payload_json={
+            "strategy_context": {"source": "scanner"},
+            "live_market": {
+                "live_selected_price": 0.905,
+                "fetched_at": now_iso,
+                "source_observed_at": now_iso,
+                "market_data_source": "ws_strict",
+                "market_data_age_ms": 16000,
+                "ws_subscription_current": True,
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(2.25),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "require_strict_ws_pricing": True,
+            "strict_ws_price_sources": ["ws_strict"],
+            "max_market_data_age_ms": 15000,
+            "enforce_market_data_freshness": False,
+        },
+    )
+
+    assert result["final_decision"] == "selected"
+    strict_gate = next(g for g in result["platform_gates"] if g["gate"] == "strict_ws_pricing")
+    assert strict_gate["status"] == "passed"
+    assert strict_gate["payload"]["ws_subscription_current"] is True
+
+
+def test_strict_ws_pricing_rechecks_current_scanner_subscription_when_payload_flag_is_missing(monkeypatch):
+    monkeypatch.setattr(decision_gates_module, "_has_current_live_subscription", lambda *_args, **_kwargs: True)
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime_signal = SimpleNamespace(
+        id="signal-strict-ws-scanner-live-recheck",
+        market_id="market-1",
+        direction="buy_no",
+        source="scanner",
+        payload_json={
+            "strategy_context": {"source": "scanner"},
+            "live_market": {
+                "selected_token_id": "token-no",
+                "live_selected_price": 0.905,
+                "fetched_at": now_iso,
+                "source_observed_at": now_iso,
+                "market_data_source": "ws_strict",
+                "market_data_age_ms": 16000,
+                "ws_subscription_current": False,
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(2.25),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "require_strict_ws_pricing": True,
+            "strict_ws_price_sources": ["ws_strict"],
+            "max_market_data_age_ms": 15000,
+        },
+    )
+
+    assert result["final_decision"] == "selected"
+    strict_gate = next(g for g in result["platform_gates"] if g["gate"] == "strict_ws_pricing")
+    assert strict_gate["status"] == "passed"
+    assert strict_gate["payload"]["ws_subscription_current"] is True
+
+
+def test_strict_ws_pricing_does_not_relax_crypto_staleness_with_subscription_recheck(monkeypatch):
+    monkeypatch.setattr(decision_gates_module, "_has_current_live_subscription", lambda *_args, **_kwargs: True)
+    now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    runtime_signal = SimpleNamespace(
+        id="signal-strict-ws-crypto-stale",
+        market_id="market-1",
+        direction="buy_yes",
+        source="crypto",
+        payload_json={
+            "strategy_context": {"timeframe": "5m", "source": "crypto"},
+            "live_market": {
+                "selected_token_id": "token-yes",
+                "live_selected_price": 0.52,
+                "fetched_at": now_iso,
+                "source_observed_at": now_iso,
+                "market_data_source": "ws_strict",
+                "market_data_age_ms": 1200,
+                "ws_subscription_current": False,
+            },
+        },
+    )
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(25.0),
+        runtime_signal=runtime_signal,
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        pending_live_exit_count=0,
+        pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={
+            "require_strict_ws_pricing": True,
+            "strict_ws_price_sources": ["ws_strict"],
+            "max_market_data_age_ms": 1000,
+        },
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "strict ws pricing required" in result["final_reason"].lower()
 
 
 def test_backtest_mode_skips_live_execution_freshness_gates():
@@ -854,7 +1046,7 @@ def test_backtest_mode_skips_live_execution_freshness_gates():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -899,7 +1091,7 @@ def test_max_risk_score_guard_blocks_high_risk_signal():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -934,7 +1126,7 @@ def test_max_risk_score_guard_skips_when_signal_risk_unavailable():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         pending_live_exit_count=0,
         pending_live_exit_summary={"count": 0, "order_ids": [], "market_ids": [], "statuses": {}},
         portfolio_allocator=None,
@@ -979,7 +1171,7 @@ def test_generic_skipped_reason_includes_failed_check_detail():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=None,
         invoke_hooks=False,
@@ -1018,7 +1210,7 @@ def test_generic_risk_block_reason_includes_failed_risk_detail():
         global_limits={"max_gross_exposure_usd": 5000.0},
         effective_risk_limits={"max_trade_notional_usd": 1000.0},
         allow_averaging=True,
-        open_market_ids=set(),
+        occupied_market_ids=set(),
         portfolio_allocator=None,
         risk_evaluator=_blocked_risk_evaluator,
         invoke_hooks=False,
@@ -1027,3 +1219,4 @@ def test_generic_risk_block_reason_includes_failed_risk_detail():
     assert result["final_decision"] == "blocked"
     assert result["final_reason"].startswith("Risk blocked: trader_open_positions")
     assert "next=2 max=1" in result["final_reason"]
+

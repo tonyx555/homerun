@@ -1,6 +1,8 @@
+import asyncio
 import sys
 from datetime import timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -21,6 +23,9 @@ class _FakeScalarResult:
         self._scalars_list = list(scalars_list or [])
 
     def scalar_one_or_none(self):
+        return self._scalar_value
+
+    def one_or_none(self):
         return self._scalar_value
 
     def scalars(self):
@@ -121,9 +126,11 @@ async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opport
             }
         ]
     )
+    history_upsert_mock = AsyncMock(return_value=0)
     monkeypatch.setattr(shared_state.event_bus, "publish", publish_mock)
     monkeypatch.setattr(shared_state, "_commit_with_retry", commit_mock)
     monkeypatch.setattr(shared_state, "_persist_incremental_state", persist_mock)
+    monkeypatch.setattr(shared_state, "upsert_scanner_market_history", history_upsert_mock)
 
     session = _FakeSession()
     opportunity = _build_opportunity(market_id="market-1")
@@ -137,12 +144,15 @@ async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opport
     }
 
     await shared_state.write_scanner_snapshot(session, [opportunity], status)
+    await asyncio.sleep(0)
 
     assert isinstance(session.snapshot_row, ScannerSnapshot)
     assert session.snapshot_row.opportunities_count == 1
+    assert session.snapshot_row.opportunities_json == []
     assert not any(isinstance(row, OpportunityEvent) for row in session.added)
     commit_mock.assert_awaited_once()
     persist_mock.assert_awaited_once()
+    history_upsert_mock.assert_not_awaited()
 
     published_types = [call.args[0] for call in publish_mock.await_args_list]
     assert "scanner_status" in published_types
@@ -208,3 +218,44 @@ async def test_persist_incremental_state_marks_missing_opportunities_expired_wit
     assert event_messages[0]["event_type"] == "expired"
     assert event_messages[0]["stable_id"] == opportunity.stable_id
     assert not any(isinstance(row, OpportunityEvent) for row in session.added)
+
+
+@pytest.mark.asyncio
+async def test_read_scanner_snapshot_reads_active_opportunities_from_state_rows():
+    opportunity = _build_opportunity(market_id="market-9")
+    payload = opportunity.model_dump(mode="json")
+    snapshot_row = SimpleNamespace(
+        running=True,
+        enabled=True,
+        interval_seconds=60,
+        last_scan_at=utcnow(),
+        current_activity="Fast scan complete - 1 found, 1 total",
+        strategies_json=[{"name": "Tail End Carry", "type": "tail_end_carry"}],
+        strategy_diagnostics_json={},
+        tiered_scanning_json={},
+        ws_feeds_json={},
+        opportunities_count=1,
+    )
+    session = _FakeSession(
+        execute_results=[
+            {"scalar_value": snapshot_row},
+            {"scalars_list": [payload]},
+            {
+                "scalars_list": [
+                    (
+                        "market-9",
+                        [
+                            {"t": 1.0, "yes": 0.11, "no": 0.89},
+                            {"t": 2.0, "yes": 0.09, "no": 0.91},
+                        ],
+                    )
+                ]
+            },
+        ]
+    )
+
+    opportunities, status = await shared_state.read_scanner_snapshot(session)
+
+    assert len(opportunities) == 1
+    assert len(opportunities[0].markets[0].get("price_history") or []) == 2
+    assert status["opportunities_count"] == 1

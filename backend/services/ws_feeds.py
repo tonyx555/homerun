@@ -634,6 +634,12 @@ class PolymarketWSFeed:
     def state(self) -> ConnectionState:
         return self._state
 
+    def is_subscribed(self, token_id: str) -> bool:
+        normalized = str(token_id or "").strip().lower()
+        if not normalized:
+            return False
+        return normalized in self._subscribed_assets or str(token_id or "").strip() in self._subscribed_assets
+
     async def start(self) -> None:
         """Start the feed in the background.  Idempotent."""
         if not WEBSOCKETS_AVAILABLE:
@@ -791,6 +797,8 @@ class PolymarketWSFeed:
             reconnect_at_connect = self._reconnect_attempt
 
             logger.info("Polymarket WS connected", url=self._ws_url, attempt=reconnect_at_connect)
+            if reconnect_at_connect > 0:
+                self._cache.clear()
 
             # Re-subscribe to everything tracked, in chunks to avoid
             # overwhelming the server with a single massive subscribe message.
@@ -1338,6 +1346,46 @@ class KalshiWSFeed:
 # ---------------------------------------------------------------------------
 
 
+async def _build_polymarket_http_fallback_order_book(token_id: str) -> Optional[OrderBook]:
+    normalized = str(token_id or "").strip()
+    if not normalized:
+        return None
+    try:
+        from services.polymarket import polymarket_client
+    except Exception:
+        return None
+    try:
+        payload = await polymarket_client.get_order_book(normalized)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    def _parse_levels(raw_levels: Any, *, reverse: bool) -> List[OrderBookLevel]:
+        levels: List[OrderBookLevel] = []
+        if not isinstance(raw_levels, list):
+            return levels
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, dict):
+                continue
+            try:
+                price = float(raw_level.get("price", 0.0))
+                size = float(raw_level.get("size", 0.0))
+            except (TypeError, ValueError):
+                continue
+            if price <= 0.0 or size <= 0.0:
+                continue
+            levels.append(OrderBookLevel(price=price, size=size))
+        levels.sort(key=lambda level: level.price, reverse=reverse)
+        return levels
+
+    bids = _parse_levels(payload.get("bids"), reverse=True)
+    asks = _parse_levels(payload.get("asks"), reverse=False)
+    if not bids and not asks:
+        return None
+    return OrderBook(bids=bids, asks=asks)
+
+
 class FeedManager:
     """Singleton orchestrator for all WebSocket feeds.
 
@@ -1361,6 +1409,7 @@ class FeedManager:
         self._kalshi_feed = KalshiWSFeed(cache=self._cache)
         self._http_fallback_fn: Optional[Callable[[str], Coroutine[Any, Any, Optional[OrderBook]]]] = None
         self._started = False
+        self._start_lock = asyncio.Lock()
         # Reactive scan: accumulate changed tokens and debounce trigger
         self._changed_tokens: Set[str] = set()
         self._reactive_scan_callback: Optional[Callable[[Set[str]], Coroutine[Any, Any, None]]] = None
@@ -1423,23 +1472,28 @@ class FeedManager:
         """Start both feeds.  Idempotent."""
         if self._started:
             return
-        await self._polymarket_feed.start()
-        await self._kalshi_feed.start()
-        self._started = True
-        loop = asyncio.get_running_loop()
-        self._loop = loop  # store for thread-safe scheduling from callbacks
-        self._eviction_task = loop.create_task(self._cache_eviction_loop())
-        # Wire PositionMarkState to receive every price tick
-        from services.position_mark_state import get_position_mark_state
+        async with self._start_lock:
+            if self._started:
+                return
+            if self._http_fallback_fn is None:
+                self._http_fallback_fn = _build_polymarket_http_fallback_order_book
+            await self._polymarket_feed.start()
+            await self._kalshi_feed.start()
+            self._started = True
+            loop = asyncio.get_running_loop()
+            self._loop = loop  # store for thread-safe scheduling from callbacks
+            self._eviction_task = loop.create_task(self._cache_eviction_loop())
+            # Wire PositionMarkState to receive every price tick
+            from services.position_mark_state import get_position_mark_state
 
-        pms = get_position_mark_state()
-        self._cache.add_on_update_callback(pms.on_price_update)
-        logger.info(
-            "FeedManager started: loop=%s, on_update_callbacks=%d, pms_callback=%s, pms_on_marks_changed=%s",
-            id(loop), len(self._cache._on_update_callbacks),
-            "wired" if pms.on_price_update in self._cache._on_update_callbacks else "MISSING",
-            "set" if pms._on_marks_changed else "NOT SET",
-        )
+            pms = get_position_mark_state()
+            self._cache.add_on_update_callback(pms.on_price_update)
+            logger.info(
+                "FeedManager started: loop=%s, on_update_callbacks=%d, pms_callback=%s, pms_on_marks_changed=%s",
+                id(loop), len(self._cache._on_update_callbacks),
+                "wired" if pms.on_price_update in self._cache._on_update_callbacks else "MISSING",
+                "set" if pms._on_marks_changed else "NOT SET",
+            )
 
     async def stop(self) -> None:
         """Stop both feeds and clear cache."""
@@ -1774,6 +1828,27 @@ class FeedManager:
     def is_fresh(self, token_id: str, *, max_age_seconds: float | None = None) -> bool:
         """Check whether cached data for *token_id* is within TTL."""
         return self._cache.is_fresh(token_id, max_age_seconds=max_age_seconds)
+
+    def has_current_subscription_price(
+        self,
+        token_id: str,
+        *,
+        max_age_seconds: float | None = None,
+        allow_stale_subscribed: bool = False,
+    ) -> bool:
+        normalized = str(token_id or "").strip().lower()
+        if not normalized:
+            return False
+        if self._cache.get_mid_price(normalized) is None:
+            return False
+        if self._cache.is_fresh(normalized, max_age_seconds=max_age_seconds):
+            return True
+        if not allow_stale_subscribed:
+            return False
+        return (
+            self._polymarket_feed.state == ConnectionState.CONNECTED
+            and self._polymarket_feed.is_subscribed(normalized)
+        )
 
     async def get_best_bid_ask(self, token_id: str) -> Optional[tuple[float, float]]:
         """Return ``(best_bid, best_ask)`` with HTTP fallback."""

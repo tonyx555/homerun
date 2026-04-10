@@ -8,8 +8,6 @@ from __future__ import annotations
 
 from typing import Optional, Any
 
-from sqlalchemy.ext.asyncio import AsyncSession
-
 from models.opportunity import Opportunity
 from services.intent_runtime import get_intent_runtime
 from utils.logger import get_logger
@@ -18,7 +16,6 @@ logger = get_logger(__name__)
 
 
 async def bridge_opportunities_to_signals(
-    session: AsyncSession,
     opportunities: list[Opportunity],
     source: str,
     *,
@@ -30,11 +27,7 @@ async def bridge_opportunities_to_signals(
     refresh_prices: bool = True,
 ) -> int:
     """Publish opportunities to the in-process intent runtime.
-
-    ``session`` remains in the signature so existing call sites do not need
-    transport-specific plumbing, but the runtime hot path no longer uses it.
     """
-    del session
     runtime = get_intent_runtime()
     if not runtime.started:
         await runtime.start()

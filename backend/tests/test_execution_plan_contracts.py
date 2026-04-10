@@ -76,3 +76,38 @@ def test_normalize_execution_plan_rebuilds_malformed_same_market_multileg_plan()
     assert len(repaired["legs"]) == 2
     assert {leg["market_id"] for leg in repaired["legs"]} == {"market-1"}
     assert {leg["outcome"] for leg in repaired["legs"]} == {"yes", "no"}
+
+
+def test_normalize_execution_plan_preserves_leg_level_execution_contract():
+    strategy = DummyExecutionPlanStrategy()
+    opportunity = strategy.create_opportunity(
+        title="Single leg",
+        description="Preserve execution fields",
+        total_cost=0.91,
+        markets=[_market()],
+        positions=[
+            {
+                "action": "BUY",
+                "outcome": "YES",
+                "price": 0.91,
+                "token_id": "token-yes",
+                "max_execution_price": 0.94,
+                "max_entry_price": 0.94,
+                "price_policy": "taker_limit",
+                "time_in_force": "IOC",
+                "allow_taker_limit_buy_above_signal": True,
+                "aggressive_limit_buy_submit_as_gtc": True,
+            }
+        ],
+        is_guaranteed=False,
+    )
+
+    normalized = _normalize_execution_plan(opportunity)
+
+    assert normalized is not None
+    assert len(normalized["legs"]) == 1
+    leg = normalized["legs"][0]
+    assert leg["max_execution_price"] == 0.94
+    assert leg["max_entry_price"] == 0.94
+    assert leg["allow_taker_limit_buy_above_signal"] is True
+    assert leg["aggressive_limit_buy_submit_as_gtc"] is True

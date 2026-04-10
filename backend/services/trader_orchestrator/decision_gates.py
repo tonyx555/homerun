@@ -108,6 +108,27 @@ def _runtime_signal_seconds_left(runtime_payload: Any) -> float | None:
     return None
 
 
+def _has_current_live_subscription(token_id: Any, *, max_age_ms: float | None) -> bool:
+    token = str(token_id or "").strip()
+    if not token:
+        return False
+    try:
+        from services.ws_feeds import get_feed_manager
+
+        max_age_seconds = None
+        if max_age_ms is not None and max_age_ms > 0.0:
+            max_age_seconds = max(0.05, float(max_age_ms) / 1000.0)
+        return bool(
+            get_feed_manager().has_current_subscription_price(
+                token,
+                max_age_seconds=max_age_seconds,
+                allow_stale_subscribed=True,
+            )
+        )
+    except Exception:
+        return False
+
+
 _TIMEFRAME_PARAM_SUFFIXES: dict[str, tuple[str, ...]] = {
     "1m": ("1m", "1min"),
     "3m": ("3m", "3min"),
@@ -258,6 +279,7 @@ def _runtime_signal_market_data_context(runtime_signal: Any) -> dict[str, Any]:
         "timeframe": timeframe,
         "age_ms": age_ms,
         "observed_at": observed_at.isoformat().replace("+00:00", "Z") if observed_at is not None else None,
+        "ws_subscription_current": _coerce_bool(live_market.get("ws_subscription_current"), False),
     }
 
 
@@ -479,7 +501,7 @@ def apply_platform_decision_gates(
     global_limits: dict[str, Any],
     effective_risk_limits: dict[str, Any],
     allow_averaging: bool,
-    open_market_ids: set[str],
+    occupied_market_ids: set[str],
     portfolio_allocator: Callable[[float], dict[str, Any]] | None,
     risk_evaluator: Callable[[float], tuple[Any, dict[str, Any]]] | None,
     invoke_hooks: bool,
@@ -644,6 +666,14 @@ def apply_platform_decision_gates(
         if live_age_raw is None:
             live_age_raw = live_market_payload.get("age_ms")
         live_age_ms = safe_float(live_age_raw, None)
+        ws_subscription_current = _coerce_bool(live_market_payload.get("ws_subscription_current"), False)
+        selected_token_id = str(
+            live_market_payload.get("selected_token_id")
+            or runtime_payload.get("selected_token_id")
+            or getattr(runtime_signal, "token_id", "")
+            or ""
+        ).strip()
+        signal_source = str(getattr(runtime_signal, "source", "") or source or "").strip().lower()
         trusted_live_age_sources = {
             "ws_strict",
             "http_batch",
@@ -664,6 +694,15 @@ def apply_platform_decision_gates(
                 0.0,
                 (datetime.now(timezone.utc) - live_fetched_at.astimezone(timezone.utc)).total_seconds() * 1000.0,
             )
+        if (
+            signal_source == "scanner"
+            and not ws_subscription_current
+            and market_data_source in set(strict_ws_price_sources)
+            and live_selected_price is not None
+            and live_selected_price > 0.0
+            and _has_current_live_subscription(selected_token_id, max_age_ms=live_age_ms or float(max_age_ms))
+        ):
+            ws_subscription_current = True
 
         if not live_execution_gates_enabled:
             checks_payload.append(
@@ -754,8 +793,10 @@ def apply_platform_decision_gates(
                     live_selected_price is not None
                     and live_selected_price > 0.0
                     and market_data_source in set(strict_ws_price_sources)
-                    and live_age_ms is not None
-                    and live_age_ms <= max_age_ms
+                    and (
+                        ws_subscription_current
+                        or (live_age_ms is not None and live_age_ms <= max_age_ms)
+                    )
                 )
             )
             checks_payload.append(
@@ -783,6 +824,7 @@ def apply_platform_decision_gates(
                         "strict_ws_price_sources": strict_ws_price_sources,
                         "live_selected_price": live_selected_price,
                         "live_age_ms": live_age_ms,
+                        "ws_subscription_current": ws_subscription_current,
                         "execution_mode": execution_mode,
                     },
                 }
@@ -811,6 +853,7 @@ def apply_platform_decision_gates(
                             "strict_ws_price_sources": strict_ws_price_sources,
                             "live_selected_price": live_selected_price,
                             "live_age_ms": live_age_ms,
+                            "ws_subscription_current": ws_subscription_current,
                             "execution_mode": execution_mode,
                         },
                     }
@@ -835,6 +878,7 @@ def apply_platform_decision_gates(
                             "strict_ws_price_sources": strict_ws_price_sources,
                             "live_selected_price": live_selected_price,
                             "live_age_ms": live_age_ms,
+                            "ws_subscription_current": ws_subscription_current,
                             "execution_mode": execution_mode,
                         },
                     }
@@ -852,9 +896,14 @@ def apply_platform_decision_gates(
                 or (
                     live_selected_price is not None
                     and live_selected_price > 0.0
-                    and live_fetched_at is not None
-                    and live_age_ms is not None
-                    and live_age_ms <= max_age_ms
+                    and (
+                        ws_subscription_current
+                        or (
+                            live_fetched_at is not None
+                            and live_age_ms is not None
+                            and live_age_ms <= max_age_ms
+                        )
+                    )
                 )
             )
             checks_payload.append(
@@ -885,6 +934,7 @@ def apply_platform_decision_gates(
                             live_observed_at.isoformat().replace("+00:00", "Z") if live_observed_at is not None else None
                         ),
                         "live_age_ms": live_age_ms,
+                        "ws_subscription_current": ws_subscription_current,
                         "max_age_ms": max_age_ms,
                         "market_data_source": market_data_source,
                         "execution_mode": execution_mode,
@@ -917,6 +967,7 @@ def apply_platform_decision_gates(
                                 else None
                             ),
                             "live_age_ms": live_age_ms,
+                            "ws_subscription_current": ws_subscription_current,
                             "max_age_ms": max_age_ms,
                             "market_data_source": market_data_source,
                             "execution_mode": execution_mode,
@@ -947,6 +998,7 @@ def apply_platform_decision_gates(
                                 else None
                             ),
                             "live_age_ms": live_age_ms,
+                            "ws_subscription_current": ws_subscription_current,
                             "max_age_ms": max_age_ms,
                             "market_data_source": market_data_source,
                             "execution_mode": execution_mode,
@@ -976,8 +1028,16 @@ def apply_platform_decision_gates(
         timeframe = str(market_data_context.get("timeframe") or "")
         age_ms = safe_float(market_data_context.get("age_ms"), None)
         observed_at = market_data_context.get("observed_at")
+        ws_subscription_current = _coerce_bool(market_data_context.get("ws_subscription_current"), False)
         max_age_ms = _resolve_market_data_age_budget_ms(params, timeframe)
         age_required = bool(source and source in set(required_sources))
+        if (
+            signal_source == "scanner"
+            and not ws_subscription_current
+            and market_data_source in set(strict_ws_price_sources)
+            and _has_current_live_subscription(selected_token_id, max_age_ms=age_ms or float(max_age_ms))
+        ):
+            ws_subscription_current = True
 
         if not live_execution_gates_enabled:
             checks_payload.append(
@@ -997,6 +1057,7 @@ def apply_platform_decision_gates(
                         "required_sources": required_sources,
                         "freshness_enforced": freshness_enforced,
                         "market_data_source": market_data_source,
+                        "ws_subscription_current": ws_subscription_current,
                         "execution_mode": execution_mode,
                     },
                 }
@@ -1027,6 +1088,7 @@ def apply_platform_decision_gates(
                     "check_label": "Market data freshness",
                     "passed": (
                         not freshness_enforced
+                        or ws_subscription_current
                         or (age_ms is not None and age_ms <= max_age_ms)
                         or (age_ms is None and not age_required)
                     ),
@@ -1051,6 +1113,7 @@ def apply_platform_decision_gates(
                         "required_sources": required_sources,
                         "freshness_enforced": freshness_enforced,
                         "market_data_source": market_data_source,
+                        "ws_subscription_current": ws_subscription_current,
                         "execution_mode": execution_mode,
                     },
                 }
@@ -1058,6 +1121,7 @@ def apply_platform_decision_gates(
 
             freshness_passed = (
                 (not freshness_enforced)
+                or ws_subscription_current
                 or (age_ms is not None and age_ms <= max_age_ms)
                 or (age_ms is None and not age_required)
             )
@@ -1085,6 +1149,7 @@ def apply_platform_decision_gates(
                             "required_sources": required_sources,
                             "freshness_enforced": freshness_enforced,
                             "market_data_source": market_data_source,
+                            "ws_subscription_current": ws_subscription_current,
                             "execution_mode": execution_mode,
                         },
                     }
@@ -1110,6 +1175,7 @@ def apply_platform_decision_gates(
                             "required_sources": required_sources,
                             "freshness_enforced": freshness_enforced,
                             "market_data_source": market_data_source,
+                            "ws_subscription_current": ws_subscription_current,
                             "execution_mode": execution_mode,
                         },
                     }
@@ -1825,7 +1891,7 @@ def apply_platform_decision_gates(
 
     if final_decision == "selected" and not allow_averaging:
         signal_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
-        stacking_blocked = bool(signal_market_id) and signal_market_id in open_market_ids
+        stacking_blocked = bool(signal_market_id) and signal_market_id in occupied_market_ids
         checks_payload.append(
             {
                 "check_key": "stacking_guard",
@@ -1833,9 +1899,9 @@ def apply_platform_decision_gates(
                 "passed": not stacking_blocked,
                 "score": None,
                 "detail": (
-                    "allow_averaging=false and market already has an open position"
+                    "allow_averaging=false and market is already occupied by an open position or active order"
                     if stacking_blocked
-                    else "allow_averaging=false and no open position exists for this market"
+                    else "allow_averaging=false and market is not occupied"
                 ),
                 "payload": {
                     "allow_averaging": False,
@@ -1845,7 +1911,7 @@ def apply_platform_decision_gates(
         )
         if stacking_blocked:
             final_decision = "blocked"
-            final_reason = "Stacking guard: market already open while allow_averaging=false"
+            final_reason = "Stacking guard: market already occupied while allow_averaging=false"
             platform_gates.append(
                 {
                     "gate": "stacking_guard",
@@ -1861,7 +1927,7 @@ def apply_platform_decision_gates(
                 {
                     "gate": "stacking_guard",
                     "status": "passed",
-                    "detail": "No existing open position for market",
+                    "detail": "No existing occupied market for signal",
                 }
             )
     else:

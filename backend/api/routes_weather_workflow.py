@@ -39,7 +39,6 @@ def _resolve_query_bool(value) -> bool:
 
 async def emit_weather_intent_signals(session: AsyncSession, opportunities: list) -> int:
     return await bridge_opportunities_to_signals(
-        session,
         opportunities,
         source="weather",
         refresh_prices=False,

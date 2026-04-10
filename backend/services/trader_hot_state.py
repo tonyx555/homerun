@@ -147,7 +147,7 @@ class _TraderSnapshot:
     open_order_keys: set[tuple[str, str, str]] = field(default_factory=set)
     open_order_ids: set[str] = field(default_factory=set)
     open_order_count: int = 0
-    open_market_ids: set[str] = field(default_factory=set)
+    occupied_market_ids: set[str] = field(default_factory=set)
     gross_notional: float = 0.0
     market_notional: dict[str, float] = field(default_factory=dict)
     source_notional: dict[str, float] = field(default_factory=dict)
@@ -265,7 +265,7 @@ def _rebuild_snapshot_order_views(snap: _TraderSnapshot) -> None:
         if tracked.is_unfilled
     }
     snap.open_order_count = len(snap.open_order_ids)
-    snap.open_market_ids = set(snap.open_position_market_ids)
+    snap.occupied_market_ids = set(snap.open_position_market_ids)
     snap.gross_notional = 0.0
     snap.market_notional = {}
     snap.source_notional = {}
@@ -273,7 +273,7 @@ def _rebuild_snapshot_order_views(snap: _TraderSnapshot) -> None:
     snap.active_order_legs = {}
     for order_id, tracked in snap.active_orders.items():
         if tracked.market_id:
-            snap.open_market_ids.add(tracked.market_id)
+            snap.occupied_market_ids.add(tracked.market_id)
         if tracked.notional > 0.0:
             snap.gross_notional += tracked.notional
             if tracked.market_id:
@@ -593,8 +593,8 @@ async def _seed_from_db(session: AsyncSession) -> None:
             snap.cursor_signal_id = cursor_signal_id
             snap.cursor_runtime_sequence = int(cursor.last_runtime_sequence) if cursor.last_runtime_sequence is not None else None
 
-    # ── Merge & swap: preserve open_market_ids from live updates ─
-    # During the DB query, record_order_created() may have added
+    # ── Merge & swap: preserve occupied_market_ids from live updates ─
+    # During the DB query, upsert_active_order() may have added
     # market_ids to the OLD snapshots that the DB query didn't see
     # (e.g., order committed by another session after our SELECT).
     # Merge these into the shadow snapshots so they're not lost —
@@ -672,11 +672,15 @@ def _effective_reentry_cooldown() -> float:
         return _REENTRY_COOLDOWN_SECONDS
 
 
-def get_open_market_ids(trader_id: str, mode: str) -> set[str]:
+def get_occupied_market_ids(trader_id: str, mode: str) -> set[str]:
     mode_key = _normalize_mode_key(mode)
     snap = _snapshots.get((trader_id, mode_key))
-    result = set(snap.open_market_ids) if snap is not None else set()
-    # Include recently-closed markets to prevent re-entry churn
+    return set(snap.occupied_market_ids) if snap is not None else set()
+
+
+def get_reentry_cooldown_market_ids(trader_id: str, mode: str) -> set[str]:
+    mode_key = _normalize_mode_key(mode)
+    result: set[str] = set()
     now = time.monotonic()
     cooldown = _effective_reentry_cooldown()
     for (tid, m, mid), closed_at in _recently_closed_markets.items():
@@ -807,7 +811,7 @@ async def get_unrealized_pnl(trader_id: Optional[str], mode: str, *, ws_only: bo
 # ── Hot mutations (called inline after order operations) ──────────
 
 
-def record_order_created(
+def upsert_active_order(
     *,
     trader_id: str,
     mode: str,
@@ -902,9 +906,9 @@ def record_order_resolved(
         if snapshot_mode == mode_key
     )
 
-    # Track recently-closed market to prevent re-entry churn
+    filled_shares, filled_notional_usd, _average_fill_price = _extract_live_fill_metrics(payload)
     market_id_clean = str(market_id or "").strip()
-    if market_id_clean:
+    if market_id_clean and (status_key in REALIZED_ORDER_STATUSES or filled_shares > 0.0 or filled_notional_usd > 0.0):
         _recently_closed_markets[(trader_id, mode_key, market_id_clean)] = time.monotonic()
 
     # Update PnL / loss streak
@@ -948,11 +952,6 @@ def record_order_cancelled(
         for (_, snapshot_mode), snapshot in _snapshots.items()
         if snapshot_mode == mode_key
     )
-
-    # Track recently-closed market to prevent re-entry churn
-    market_id_clean = str(market_id or "").strip()
-    if market_id_clean:
-        _recently_closed_markets[(trader_id, mode_key, market_id_clean)] = time.monotonic()
 
 def update_signal_cursor(
     trader_id: str,

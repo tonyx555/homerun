@@ -8,6 +8,7 @@ import os
 import signal
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 os.environ["HOMERUN_PROCESS_ROLE"] = "worker"
@@ -45,6 +46,13 @@ setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
 if not os.environ.get("HF_TOKEN"):
     logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 logger = get_logger("workers.host")
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
+
+_LOCKS_DIR = Path(__file__).resolve().parents[1] / ".runtime" / "locks"
 
 _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
     "all": {
@@ -103,6 +111,51 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+class _WorkerPlaneLock:
+    def __init__(self, plane_name: str) -> None:
+        self._plane_name = plane_name
+        self._path = _LOCKS_DIR / f"worker-plane.{plane_name}.lock"
+        self._handle = None
+
+    def acquire(self) -> None:
+        _LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+        handle = self._path.open("a+", encoding="utf-8")
+        try:
+            handle.seek(0)
+            handle.write("0")
+            handle.flush()
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            handle.seek(0)
+            handle.truncate()
+            handle.write(str(os.getpid()))
+            handle.flush()
+        except OSError:
+            handle.close()
+            raise RuntimeError(f"Worker plane '{self._plane_name}' is already running")
+        except Exception:
+            handle.close()
+            raise
+        self._handle = handle
+
+    def release(self) -> None:
+        handle = self._handle
+        self._handle = None
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+
+
 class WorkerHost:
     def __init__(self, plane_name: str) -> None:
         if plane_name not in _PLANE_CONFIGS:
@@ -128,9 +181,29 @@ class WorkerHost:
         self._position_monitor_started = False
         self._fill_monitor_started = False
         self._restart_grace: dict[str, float] = {}  # module_name -> monotonic time of last restart
+        self._plane_lock = _WorkerPlaneLock(self._plane_name)
 
     def _enabled(self, key: str) -> bool:
         return bool(self._plane_config.get(key, False))
+
+    async def _acquire_plane_lock(self) -> None:
+        self._plane_lock.acquire()
+        logger.info(
+            "Worker plane lock acquired",
+            plane=self._plane_name,
+            lock_path=str(self._plane_lock._path),
+        )
+
+    async def _release_plane_lock(self) -> None:
+        try:
+            self._plane_lock.release()
+        except Exception as exc:
+            logger.warning(
+                "Worker plane lock release failed",
+                plane=self._plane_name,
+                lock_path=str(self._plane_lock._path),
+                exc_info=exc,
+            )
 
     async def _spawn_worker_task(self, module_name: str) -> asyncio.Task:
         module = importlib.import_module(module_name)
@@ -678,6 +751,7 @@ class WorkerHost:
             self._cpu_executor = None
 
     async def run(self) -> None:
+        await self._acquire_plane_lock()
         await self._start_plane()
         loop = asyncio.get_running_loop()
 
@@ -707,7 +781,10 @@ class WorkerHost:
         await self._stop_event.wait()
 
     async def shutdown(self) -> None:
-        await self._stop_plane()
+        try:
+            await self._stop_plane()
+        finally:
+            await self._release_plane_lock()
 
 
 def _parse_args() -> argparse.Namespace:

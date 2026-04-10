@@ -160,6 +160,58 @@ async def test_submit_execution_leg_live_taker_limit_caps_execution_to_dynamic_p
 
 
 @pytest.mark.asyncio
+async def test_submit_execution_leg_live_prefers_leg_level_execution_flags(monkeypatch):
+    execution_mock = AsyncMock(
+        return_value=LiveOrderExecution(
+            status="open",
+            effective_price=0.91,
+            error_message=None,
+            payload={"order_id": "ord-leg-flags"},
+            order_id="ord-leg-flags",
+        )
+    )
+    monkeypatch.setattr(order_manager, "execute_live_order", execution_mock)
+
+    signal = SimpleNamespace(
+        id="sig-leg-flags",
+        market_id="123456789012345678",
+        direction="buy_yes",
+        entry_price=0.90,
+        market_question="Will leg flags override strategy defaults?",
+        payload_json={"selected_token_id": "123456789012345678901"},
+    )
+
+    result = await order_manager.submit_execution_leg(
+        mode="live",
+        signal=signal,
+        leg={
+            "leg_id": "leg_1",
+            "market_id": signal.market_id,
+            "market_question": signal.market_question,
+            "side": "buy",
+            "outcome": "yes",
+            "limit_price": signal.entry_price,
+            "price_policy": "taker_limit",
+            "allow_taker_limit_buy_above_signal": True,
+            "aggressive_limit_buy_submit_as_gtc": True,
+            "max_execution_price": 0.94,
+        },
+        notional_usd=90.0,
+        strategy_params={
+            "allow_taker_limit_buy_above_signal": False,
+            "aggressive_limit_buy_submit_as_gtc": False,
+        },
+    )
+
+    assert result.status == "open"
+    execution_mock.assert_awaited_once()
+    submit_kwargs = execution_mock.await_args.kwargs
+    assert submit_kwargs["allow_taker_limit_buy_above_signal"] is True
+    assert submit_kwargs["aggressive_limit_buy_submit_as_gtc"] is True
+    assert submit_kwargs["max_execution_price"] == pytest.approx(0.94)
+
+
+@pytest.mark.asyncio
 async def test_submit_execution_leg_live_resolves_outcome_specific_token_and_price(monkeypatch):
     execution_mock = AsyncMock(
         return_value=LiveOrderExecution(

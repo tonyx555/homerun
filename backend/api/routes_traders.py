@@ -14,9 +14,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models.database import AsyncSessionLocal, MarketCatalog, ScannerSnapshot, TraderOrder, get_db_session
+from models.database import AsyncSessionLocal, MarketCatalog, OpportunityState, TraderOrder, get_db_session
 from services.live_price_snapshot import normalize_binary_price_history
 from services.pause_state import global_pause_state
+from services import shared_state as scanner_shared_state
 from services.traders_copy_trade_signal_service import traders_copy_trade_signal_service
 from services.strategy_tune_agent import run_strategy_tune_agent
 from services.trader_orchestrator.position_lifecycle import (
@@ -654,9 +655,14 @@ async def get_trader_market_history(
     # Use at least 960 points to fill the 7d/3d/24h chart windows properly.
     normalize_max_points = max(limit, scanner_max_points, 960)
 
-    row = (await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))).scalar_one_or_none()
-    history_map = row.market_history_json if row is not None and isinstance(row.market_history_json, dict) else {}
-    opportunities = row.opportunities_json if row is not None and isinstance(row.opportunities_json, list) else []
+    history_map = await scanner_shared_state.read_scanner_market_history(session)
+    opportunities = list(
+        (
+            await session.execute(
+                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
+            )
+        ).scalars().all()
+    )
     market_catalog = (
         (
             await session.execute(

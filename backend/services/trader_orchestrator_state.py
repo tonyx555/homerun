@@ -1962,6 +1962,57 @@ def _should_adopt_terminal_live_order_status(
     return True
 
 
+def _sync_recovered_order_hot_state(row: TraderOrder) -> None:
+    import services.trader_hot_state as _hs
+
+    payload = dict(row.payload_json or {})
+    token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
+    status_key = _normalize_status_key(row.status)
+    copy_source_wallet = _extract_copy_source_wallet_from_payload(payload)
+
+    if status_key in LIVE_ACTIVE_ORDER_STATUSES:
+        _hs.upsert_active_order(
+            trader_id=str(row.trader_id or ""),
+            mode=str(row.mode or "live"),
+            order_id=str(row.id or ""),
+            status=str(row.status or "open"),
+            market_id=str(row.market_id or ""),
+            direction=str(row.direction or ""),
+            source=str(row.source or ""),
+            notional_usd=float(row.notional_usd or 0.0),
+            entry_price=float(row.entry_price or row.effective_price or 0.0),
+            token_id=token_id,
+            filled_shares=0.0,
+            payload=payload,
+            copy_source_wallet=copy_source_wallet,
+        )
+        return
+
+    if status_key in REALIZED_ORDER_STATUSES or status_key.startswith("closed"):
+        _hs.record_order_resolved(
+            trader_id=str(row.trader_id or ""),
+            mode=str(row.mode or "live"),
+            order_id=str(row.id or ""),
+            market_id=str(row.market_id or ""),
+            direction=str(row.direction or ""),
+            source=str(row.source or ""),
+            status=str(row.status or ""),
+            actual_profit=float(row.actual_profit or 0.0),
+            payload=payload,
+            copy_source_wallet=copy_source_wallet,
+        )
+        return
+
+    _hs.record_order_cancelled(
+        trader_id=str(row.trader_id or ""),
+        mode=str(row.mode or "live"),
+        order_id=str(row.id or ""),
+        market_id=str(row.market_id or ""),
+        source=str(row.source or ""),
+        copy_source_wallet=copy_source_wallet,
+    )
+
+
 def _cleanup_timeout_reason(note_reason: str) -> bool:
     normalized = str(note_reason or "").strip().lower()
     return normalized.startswith("max_open_order_timeout")
@@ -2406,7 +2457,8 @@ async def recover_missing_live_trader_orders(
     recovered_sell_rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_without_authority: list[TraderOrder] = []
-    existing_active_markets: set[tuple[str, str]] = set()
+    existing_occupied_markets: set[tuple[str, str]] = set()
+    recently_closed_recovery_guard_markets: set[tuple[str, str]] = set()
     affected_traders: set[str] = set()
     for row in existing_rows:
         payload = dict(row.payload_json or {})
@@ -2428,7 +2480,7 @@ async def recover_missing_live_trader_orders(
         row_market_id = str(row.market_id or "").strip()
         if row_trader_id and row_market_id and not is_recovered_sell_authority:
             if row_status in OPEN_ORDER_STATUSES:
-                existing_active_markets.add((row_trader_id, row_market_id))
+                existing_occupied_markets.add((row_trader_id, row_market_id))
             # Also block recovery for recently closed/resolved orders to prevent
             # phantom duplicates when a sell exit creates a new LiveTradingOrder
             # that the recovery sees as unmatched.
@@ -2438,7 +2490,7 @@ async def recover_missing_live_trader_orders(
                     if row_updated.tzinfo is None:
                         row_updated = row_updated.replace(tzinfo=timezone.utc)
                     if (now - row_updated).total_seconds() < 600:  # 10 minutes
-                        existing_active_markets.add((row_trader_id, row_market_id))
+                        recently_closed_recovery_guard_markets.add((row_trader_id, row_market_id))
 
     collapsed_duplicates = 0
     for group in rows_by_authority_key.values():
@@ -2499,6 +2551,7 @@ async def recover_missing_live_trader_orders(
             existing_rows_by_live_order_id[provider_order_id.lower()] = row
 
     recovered_rows: list[TraderOrder] = []
+    hot_state_sync_rows: dict[str, TraderOrder] = {}
     ambiguous_orders = 0
     adopted_existing_orders = 0
     candidate_cache: dict[tuple[str, int, tuple[str, ...] | None], dict[str, Any] | None] = {}
@@ -2653,16 +2706,6 @@ async def recover_missing_live_trader_orders(
                 existing_row.payload_json = merged_payload
             if payload_changed or status_changed or verification_changed or field_changed:
                 existing_row.updated_at = now
-                if _normalize_status_key(existing_row.status) in {"cancelled", "failed", "rejected", "error"}:
-                    import services.trader_hot_state as _hs
-                    _hs.record_order_cancelled(
-                        trader_id=str(existing_row.trader_id or ""),
-                        mode=str(existing_row.mode or ""),
-                        order_id=str(existing_row.id or ""),
-                        market_id=str(existing_row.market_id or ""),
-                        source=str(existing_row.source or ""),
-                        copy_source_wallet=_extract_copy_source_wallet_from_payload(merged_payload),
-                    )
                 append_trader_order_verification_event(
                     session,
                     trader_order_id=str(existing_row.id),
@@ -2682,6 +2725,7 @@ async def recover_missing_live_trader_orders(
                     created_at=now,
                 )
                 adopted_existing_orders += 1
+                hot_state_sync_rows[str(existing_row.id or "")] = existing_row
             if clob_order_id:
                 existing_provider_rows_by_clob_id[clob_order_id] = existing_row
             if live_order_id:
@@ -2714,7 +2758,10 @@ async def recover_missing_live_trader_orders(
 
         candidate_trader_id = str(candidate["trader_id"]).strip()
         candidate_market_id = str(candidate["market_id"]).strip()
-        if (candidate_trader_id, candidate_market_id) in existing_active_markets:
+        if (
+            (candidate_trader_id, candidate_market_id) in existing_occupied_markets
+            or (candidate_trader_id, candidate_market_id) in recently_closed_recovery_guard_markets
+        ):
             ambiguous_orders += 1
             continue
 
@@ -2783,7 +2830,11 @@ async def recover_missing_live_trader_orders(
             created_at=now,
         )
         recovered_rows.append(recovered_row)
-        existing_active_markets.add((candidate_trader_id, candidate_market_id))
+        hot_state_sync_rows[str(recovered_row.id or "")] = recovered_row
+        if _normalize_status_key(recovered_row.status) in LIVE_ACTIVE_ORDER_STATUSES:
+            existing_occupied_markets.add((candidate_trader_id, candidate_market_id))
+        else:
+            recently_closed_recovery_guard_markets.add((candidate_trader_id, candidate_market_id))
         affected_traders.add(str(candidate["trader_id"]))
         if clob_order_id:
             existing_provider_rows_by_clob_id[clob_order_id] = recovered_row
@@ -2829,26 +2880,10 @@ async def recover_missing_live_trader_orders(
     else:
         await session.flush()
 
-    # Notify hot state so the stacking guard blocks re-entry immediately
+    # Notify hot state so occupancy and cooldown reflect authority reconciliation immediately.
     try:
-        import services.trader_hot_state as _hs
-        for row in recovered_rows:
-            payload = dict(row.payload_json or {})
-            token_id = str(payload.get("token_id") or payload.get("selected_token_id") or "").strip()
-            _hs.record_order_created(
-                trader_id=str(row.trader_id or ""),
-                mode=str(row.mode or "live"),
-                order_id=str(row.id or ""),
-                status=str(row.status or "open"),
-                market_id=str(row.market_id or ""),
-                direction=str(row.direction or ""),
-                source=str(row.source or ""),
-                notional_usd=float(row.notional_usd or 0.0),
-                entry_price=float(row.entry_price or row.effective_price or 0.0),
-                token_id=token_id,
-                filled_shares=0.0,
-                payload=payload,
-            )
+        for row in hot_state_sync_rows.values():
+            _sync_recovered_order_hot_state(row)
     except Exception:
         pass
 
@@ -5688,10 +5723,13 @@ async def list_unconsumed_trade_signals(
     cursor_created_at: Optional[datetime] = None,
     cursor_signal_id: Optional[str] = None,
     signal_ids: Optional[list[str]] = None,
-    exclude_market_ids: Optional[list[str]] = None,
     limit: int = 200,
 ) -> list[TradeSignal]:
     now = _now().replace(tzinfo=None)
+    scanner_runtime_ready_clause = or_(
+        func.lower(func.coalesce(TradeSignal.source, "")) != "scanner",
+        TradeSignal.runtime_sequence.is_not(None),
+    )
     normalized_cursor_runtime_sequence = safe_int(cursor_runtime_sequence, None)
     normalized_cursor_created_at = cursor_created_at
     if isinstance(normalized_cursor_created_at, datetime) and normalized_cursor_created_at.tzinfo is not None:
@@ -5721,6 +5759,7 @@ async def list_unconsumed_trade_signals(
             )
         )
         .where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now))
+        .where(scanner_runtime_ready_clause)
         .limit(max(1, min(limit, 5000)))
     )
     normalized_signal_ids = [str(signal_id or "").strip() for signal_id in (signal_ids or []) if str(signal_id or "").strip()]
@@ -5728,13 +5767,6 @@ async def list_unconsumed_trade_signals(
         if not normalized_signal_ids:
             return []
         query = query.where(TradeSignal.id.in_(normalized_signal_ids))
-    normalized_excluded_market_ids = [
-        str(market_id or "").strip()
-        for market_id in (exclude_market_ids or [])
-        if str(market_id or "").strip()
-    ]
-    if normalized_excluded_market_ids:
-        query = query.where(~TradeSignal.market_id.in_(normalized_excluded_market_ids))
     if normalized_cursor_runtime_sequence is not None:
         query = query.where(
             or_(
@@ -6248,7 +6280,24 @@ async def reconcile_live_provider_orders(
                 },
                 created_at=now,
             )
-        if order_status_to_persist in {"cancelled", "failed"}:
+        if _is_active_order_status(str(order.mode or ""), order_status_to_persist):
+            import services.trader_hot_state as _hs
+            _hs.upsert_active_order(
+                trader_id=trader_id,
+                mode=str(order.mode or ""),
+                order_id=str(order.id or ""),
+                status=order_status_to_persist,
+                market_id=str(order.market_id or ""),
+                direction=str(order.direction or ""),
+                source=str(order.source or ""),
+                notional_usd=float(order.notional_usd or 0.0),
+                entry_price=float(order.effective_price or order.entry_price or 0.0),
+                token_id=str(payload.get("token_id") or payload.get("selected_token_id") or ""),
+                filled_shares=float(filled_size or 0.0),
+                payload=dict(order.payload_json or {}),
+                copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+            )
+        elif order_status_to_persist in {"cancelled", "failed"}:
             import services.trader_hot_state as _hs
             _hs.record_order_cancelled(
                 trader_id=trader_id,
@@ -7123,57 +7172,6 @@ async def get_open_position_count_for_trader(
             active_order_position_keys.add(key)
 
     return max(len(active_position_keys), len(active_order_position_keys))
-
-
-async def get_open_market_ids_for_trader(
-    session: AsyncSession,
-    trader_id: str,
-    mode: Optional[str] = None,
-) -> set[str]:
-    position_query = (
-        select(TraderPosition.market_id)
-        .where(TraderPosition.trader_id == trader_id)
-        .where(func.lower(func.coalesce(TraderPosition.status, "")) == ACTIVE_POSITION_STATUS)
-    )
-    if mode is not None:
-        mode_key = _normalize_mode_key(mode)
-        if mode_key == "other":
-            position_query = position_query.where(
-                func.lower(func.coalesce(TraderPosition.mode, "")).not_in(list(_TRADER_MODES))
-            )
-        else:
-            position_query = position_query.where(func.lower(func.coalesce(TraderPosition.mode, "")) == mode_key)
-
-    rows = (await session.execute(position_query)).all()
-    open_market_ids: set[str] = set()
-    for row in rows:
-        market_id = str(row.market_id or "").strip()
-        if market_id:
-            open_market_ids.add(market_id)
-
-    order_status_expr = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
-    order_query = (
-        select(TraderOrder)
-        .where(TraderOrder.trader_id == trader_id)
-        .where(order_status_expr.in_(tuple(OPEN_ORDER_STATUSES)))
-        .where(_visible_trader_order_query_clause())
-    )
-    if mode is not None:
-        mode_key = _normalize_mode_key(mode)
-        if mode_key == "other":
-            order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == "")
-        else:
-            order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
-
-    order_rows = _dedupe_live_authority_rows(list((await session.execute(order_query)).scalars().all()))
-    for row in order_rows:
-        row_mode = _normalize_mode_key(mode if mode is not None else row.mode)
-        if not _is_active_order_status(row_mode, row.status):
-            continue
-        market_id = str(row.market_id or "").strip()
-        if market_id:
-            open_market_ids.add(market_id)
-    return open_market_ids
 
 
 async def get_open_position_summary_for_trader(session: AsyncSession, trader_id: str) -> dict[str, int]:

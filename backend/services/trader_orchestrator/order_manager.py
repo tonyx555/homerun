@@ -193,6 +193,40 @@ def _allow_taker_limit_buy_above_signal(strategy_params: dict[str, Any] | None) 
     return StrategySDK.allow_taker_limit_buy_above_signal_price(strategy_params or {}, default=False)
 
 
+def _aggressive_limit_buy_submit_as_gtc(strategy_params: dict[str, Any] | None) -> bool:
+    return StrategySDK.aggressive_limit_buy_submit_as_gtc(strategy_params or {}, default=False)
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return None
+
+
+def _resolve_leg_execution_bool(
+    *,
+    leg: dict[str, Any],
+    key: str,
+    strategy_default: bool,
+) -> bool:
+    leg_value = _coerce_optional_bool(leg.get(key))
+    if leg_value is not None:
+        return leg_value
+    metadata = leg.get("metadata")
+    if isinstance(metadata, dict):
+        metadata_value = _coerce_optional_bool(metadata.get(key))
+        if metadata_value is not None:
+            return metadata_value
+    return strategy_default
+
+
 def _resolve_execution_price_bounds(
     *,
     leg: dict[str, Any],
@@ -547,7 +581,16 @@ async def submit_execution_leg(
     time_in_force = str(leg.get("time_in_force") or "GTC").strip().upper()
     post_only = bool(leg.get("post_only", False))
     params = dict(strategy_params or {})
-    allow_taker_limit_buy_above_signal = _allow_taker_limit_buy_above_signal(params)
+    allow_taker_limit_buy_above_signal = _resolve_leg_execution_bool(
+        leg=leg,
+        key="allow_taker_limit_buy_above_signal",
+        strategy_default=_allow_taker_limit_buy_above_signal(params),
+    )
+    aggressive_limit_buy_submit_as_gtc = _resolve_leg_execution_bool(
+        leg=leg,
+        key="aggressive_limit_buy_submit_as_gtc",
+        strategy_default=_aggressive_limit_buy_submit_as_gtc(params),
+    )
 
     if mode_key == "shadow":
         quote_price = None
@@ -650,6 +693,7 @@ async def submit_execution_leg(
         max_execution_price=max_execution_price,
         min_execution_price=min_execution_price,
         allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
+        aggressive_limit_buy_submit_as_gtc=aggressive_limit_buy_submit_as_gtc,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
     )
 
@@ -678,6 +722,7 @@ async def submit_execution_leg(
                     max_execution_price=max_execution_price,
                     min_execution_price=min_execution_price,
                     allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
+                    aggressive_limit_buy_submit_as_gtc=aggressive_limit_buy_submit_as_gtc,
                     skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
                 )
                 if retry_execution.status != "failed":

@@ -35,7 +35,6 @@ async def test_bridge_publishes_stream_before_commit(monkeypatch):
     )
 
     emitted = await strategy_signal_bridge.bridge_opportunities_to_signals(
-        session,
         [opportunity],
         "crypto",
         refresh_prices=False,

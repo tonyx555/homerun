@@ -29,10 +29,6 @@ logger = get_logger(__name__)
 _WS_REACTIVE_DEBOUNCE_SECONDS = max(0.01, float(getattr(settings, "CRYPTO_WS_REACTIVE_DEBOUNCE_SECONDS", 0.05) or 0.05))
 _CATALOG_REFRESH_SECONDS = 5.0
 _CRYPTO_SNAPSHOT_PERSIST_INTERVAL_SECONDS = 5.0
-_CRYPTO_SNAPSHOT_MARKETS_LIMIT = 64
-_CRYPTO_SNAPSHOT_HISTORY_TAIL_LIMIT = 12
-_CRYPTO_SNAPSHOT_ORACLE_HISTORY_LIMIT = 24
-_CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT = 8
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
 _LOOP_ITERATION_TIMEOUT_SECONDS = 30.0
 _ASYNC_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
@@ -86,35 +82,6 @@ def _metadata_updated_at_iso(value: Any) -> str | None:
             return None
     text = str(value or "").strip()
     return text or None
-
-
-def _compact_crypto_snapshot_markets(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    compact_rows: list[dict[str, Any]] = []
-    for raw_row in markets[:_CRYPTO_SNAPSHOT_MARKETS_LIMIT]:
-        if not isinstance(raw_row, dict):
-            continue
-        row = dict(raw_row)
-
-        history_tail = row.get("history_tail")
-        if isinstance(history_tail, list):
-            row["history_tail"] = copy.deepcopy(history_tail[-_CRYPTO_SNAPSHOT_HISTORY_TAIL_LIMIT:])
-        else:
-            row.pop("history_tail", None)
-
-        oracle_history = row.get("oracle_history")
-        if isinstance(oracle_history, list):
-            row["oracle_history"] = copy.deepcopy(oracle_history[-_CRYPTO_SNAPSHOT_ORACLE_HISTORY_LIMIT:])
-        else:
-            row.pop("oracle_history", None)
-
-        upcoming_markets = row.get("upcoming_markets")
-        if isinstance(upcoming_markets, list):
-            row["upcoming_markets"] = copy.deepcopy(upcoming_markets[:_CRYPTO_SNAPSHOT_UPCOMING_MARKETS_LIMIT])
-        else:
-            row.pop("upcoming_markets", None)
-
-        compact_rows.append(row)
-    return compact_rows
 
 
 def _near_market_boundary() -> bool:
@@ -286,6 +253,8 @@ class MarketRuntime:
         self._loop_iteration_task: asyncio.Task[None] | None = None
         self._reactive_task: asyncio.Task[None] | None = None
         self._opportunity_dispatch_task: asyncio.Task[None] | None = None
+        self._ml_pipeline_task: asyncio.Task[None] | None = None
+        self._snapshot_persist_task: asyncio.Task[None] | None = None
         self._feed_manager = None
         self._reference_runtime = get_reference_runtime()
         self._crypto_markets: list[dict[str, Any]] = []
@@ -318,6 +287,13 @@ class MarketRuntime:
         self._pending_opportunity_trigger: str | None = None
         self._pending_opportunity_full_source_sweep = False
         self._pending_opportunity_lock = asyncio.Lock()
+        self._pending_ml_payload: list[dict[str, Any]] | None = None
+        self._pending_ml_allow_record = False
+        self._pending_ml_lock = asyncio.Lock()
+        self._pending_snapshot_persist = False
+        self._pending_snapshot_control: dict[str, Any] | None = None
+        self._pending_snapshot_force = False
+        self._pending_snapshot_lock = asyncio.Lock()
         # Dispatch telemetry — visible via worker snapshot stats
         self._dispatch_count: int = 0
         self._dispatch_last_at: str | None = None
@@ -343,6 +319,10 @@ class MarketRuntime:
     def _clear_event_catalog_refresh_task(self, task: asyncio.Task[Any]) -> None:
         if self._event_catalog_refresh_task is task:
             self._event_catalog_refresh_task = None
+
+    def _clear_snapshot_persist_task(self, task: asyncio.Task[Any]) -> None:
+        if self._snapshot_persist_task is task:
+            self._snapshot_persist_task = None
 
     def _cached_ml_runtime_state(self, *, allow_record: bool) -> dict[str, bool]:
         return {
@@ -466,6 +446,18 @@ class MarketRuntime:
                 await self._opportunity_dispatch_task
             except asyncio.CancelledError:
                 pass
+        if self._ml_pipeline_task is not None and not self._ml_pipeline_task.done():
+            self._ml_pipeline_task.cancel()
+            try:
+                await self._ml_pipeline_task
+            except asyncio.CancelledError:
+                pass
+        if self._snapshot_persist_task is not None and not self._snapshot_persist_task.done():
+            self._snapshot_persist_task.cancel()
+            try:
+                await self._snapshot_persist_task
+            except asyncio.CancelledError:
+                pass
         if self._main_task is not None and not self._main_task.done():
             self._main_task.cancel()
             try:
@@ -545,9 +537,7 @@ class MarketRuntime:
         resolved_control = dict(control or await self._read_crypto_control())
         stats = self._build_crypto_stats(include_markets=False)
         persisted_stats = summarize_worker_stats(stats)
-        if self._crypto_markets:
-            persisted_stats["markets"] = _compact_crypto_snapshot_markets(self._crypto_markets)
-            persisted_stats["markets_count"] = len(self._crypto_markets)
+        persisted_stats["markets_count"] = len(self._crypto_markets)
         oracle_prices = stats.get("oracle_prices")
         if isinstance(oracle_prices, dict) and oracle_prices:
             persisted_stats["oracle_prices"] = copy.deepcopy(oracle_prices)
@@ -579,6 +569,42 @@ class MarketRuntime:
                 stats=persisted_stats,
             )
         self._last_snapshot_persist_mono = now_mono
+
+    async def _queue_crypto_worker_snapshot_persist(
+        self,
+        *,
+        control: dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> None:
+        async with self._pending_snapshot_lock:
+            self._pending_snapshot_persist = True
+            self._pending_snapshot_control = dict(control) if isinstance(control, dict) else None
+            self._pending_snapshot_force = self._pending_snapshot_force or bool(force)
+        if self._snapshot_persist_task is None or self._snapshot_persist_task.done():
+            task = asyncio.create_task(
+                self._run_snapshot_persist_loop(),
+                name="market-runtime-snapshot-persist",
+            )
+            self._snapshot_persist_task = task
+            task.add_done_callback(self._clear_snapshot_persist_task)
+
+    async def _run_snapshot_persist_loop(self) -> None:
+        while True:
+            async with self._pending_snapshot_lock:
+                pending = bool(self._pending_snapshot_persist)
+                control = self._pending_snapshot_control
+                force = bool(self._pending_snapshot_force)
+                self._pending_snapshot_persist = False
+                self._pending_snapshot_control = None
+                self._pending_snapshot_force = False
+            if not pending:
+                return
+            try:
+                await self._persist_crypto_worker_snapshot(control=control, force=force)
+            except asyncio.CancelledError:
+                raise
+            except Exception as snapshot_exc:
+                logger.warning("Failed to persist crypto worker snapshot after refresh", exc_info=snapshot_exc)
 
     def get_market_snapshot(self, market_id: str, *, hint: dict[str, Any] | None = None) -> dict[str, Any] | None:
         normalized = _normalize_market_id(market_id)
@@ -1016,6 +1042,33 @@ class MarketRuntime:
             except Exception as exc:
                 logger.warning("Failed to prune ML training snapshots", exc_info=exc)
 
+    async def _queue_ml_pipeline_refresh(self, payload: list[dict[str, Any]], *, allow_record: bool) -> None:
+        async with self._pending_ml_lock:
+            self._pending_ml_payload = payload
+            self._pending_ml_allow_record = self._pending_ml_allow_record or bool(allow_record)
+        if self._ml_pipeline_task is None or self._ml_pipeline_task.done():
+            self._ml_pipeline_task = asyncio.create_task(
+                self._run_ml_pipeline_loop(),
+                name="market-runtime-ml-pipeline",
+            )
+
+    async def _run_ml_pipeline_loop(self) -> None:
+        while True:
+            async with self._pending_ml_lock:
+                payload = self._pending_ml_payload
+                allow_record = self._pending_ml_allow_record
+                self._pending_ml_payload = None
+                self._pending_ml_allow_record = False
+            if not payload:
+                return
+            try:
+                payload_copy = await asyncio.to_thread(copy.deepcopy, payload)
+                await self._refresh_ml_pipeline(payload_copy, allow_record=allow_record)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Market runtime ML pipeline refresh failed", exc_info=exc)
+
     async def _resolve_ml_runtime_state(self, *, allow_record: bool) -> dict[str, bool] | None:
         now_mono = time.monotonic()
         if now_mono < self._ml_runtime_retry_not_before_mono:
@@ -1080,14 +1133,19 @@ class MarketRuntime:
         full_source_sweep: bool,
         force_refresh: bool = False,
     ) -> None:
+        step_started = time.monotonic()
         svc = get_crypto_service()
         markets = await self._await_with_cancel_grace(
             asyncio.to_thread(svc.get_live_markets, bool(force_refresh)),
             timeout=_CRYPTO_MARKET_FETCH_TIMEOUT_SECONDS,
             task_name="market-runtime-crypto-market-fetch",
         )
+        fetch_elapsed = time.monotonic() - step_started
+        step_started = time.monotonic()
         payload = self._build_crypto_market_payload(markets or [])
-        await self._refresh_ml_pipeline(payload, allow_record=True)
+        await self._queue_ml_pipeline_refresh(payload, allow_record=True)
+        ml_queue_elapsed = time.monotonic() - step_started
+        step_started = time.monotonic()
         self._crypto_markets = payload
         self._crypto_markets_by_lookup = {}
         self._crypto_token_to_market_ids = {}
@@ -1104,6 +1162,8 @@ class MarketRuntime:
             )
         except asyncio.TimeoutError:
             logger.info("Crypto subscription sync exceeded runtime budget; keeping existing subscriptions")
+        subscription_elapsed = time.monotonic() - step_started
+        step_started = time.monotonic()
         try:
             await self._await_with_cancel_grace(
                 self._publish_crypto_snapshot(payload, trigger=trigger),
@@ -1112,11 +1172,26 @@ class MarketRuntime:
             )
         except asyncio.TimeoutError:
             logger.info("Crypto snapshot publish exceeded runtime budget; continuing with in-memory state")
+        publish_elapsed = time.monotonic() - step_started
+        step_started = time.monotonic()
         await self._queue_opportunity_dispatch(
             payload,
             trigger=trigger,
             full_source_sweep=full_source_sweep,
         )
+        dispatch_elapsed = time.monotonic() - step_started
+        total_elapsed = fetch_elapsed + ml_queue_elapsed + subscription_elapsed + publish_elapsed + dispatch_elapsed
+        if total_elapsed >= 5.0:
+            logger.warning(
+                "Market runtime refresh timing",
+                trigger=trigger,
+                fetch_seconds=round(fetch_elapsed, 3),
+                ml_queue_seconds=round(ml_queue_elapsed, 3),
+                subscription_seconds=round(subscription_elapsed, 3),
+                publish_seconds=round(publish_elapsed, 3),
+                dispatch_seconds=round(dispatch_elapsed, 3),
+                total_seconds=round(total_elapsed, 3),
+            )
 
     async def _sync_crypto_subscriptions(self) -> None:
         feed_manager = self._feed_manager
@@ -1140,14 +1215,11 @@ class MarketRuntime:
         trigger: str,
     ) -> None:
         try:
-            await event_bus.publish("crypto_markets_update", {"markets": copy.deepcopy(payload), "trigger": str(trigger)})
+            await event_bus.publish("crypto_markets_update", {"markets": [dict(row) for row in payload], "trigger": str(trigger)})
         except Exception:
             pass
         self._last_error = None
-        try:
-            await self._persist_crypto_worker_snapshot()
-        except Exception as snapshot_exc:
-            logger.warning("Failed to persist crypto worker snapshot after refresh", exc_info=snapshot_exc)
+        await self._queue_crypto_worker_snapshot_persist()
 
     async def _queue_opportunity_dispatch(
         self,
@@ -1290,7 +1362,7 @@ class MarketRuntime:
         if not selected_rows:
             return
         refreshed_rows = self._rebuild_crypto_rows_from_cache(selected_rows)
-        await self._refresh_ml_pipeline(refreshed_rows, allow_record=False)
+        await self._queue_ml_pipeline_refresh(refreshed_rows, allow_record=False)
         merged_by_id = {
             _normalize_market_id(row.get("id") or row.get("slug")): row
             for row in self._crypto_markets

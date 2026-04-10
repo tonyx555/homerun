@@ -208,11 +208,12 @@ class TailEndCarryStrategy(BaseStrategy):
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
         "allow_taker_limit_buy_above_signal": True,
+        "aggressive_limit_buy_submit_as_gtc": True,
         "immediate_break_even_stop_enabled": True,
         "immediate_break_even_stop_buffer_pct": 0.5,
         "max_market_data_age_ms": 15000,
         "require_strict_ws_pricing": True,
-        "strict_ws_price_sources": ["ws_strict", "redis_strict", "http_batch", "market_snapshot"],
+        "strict_ws_price_sources": ["ws_strict", "redis_strict"],
     }
 
     def __init__(self) -> None:
@@ -486,6 +487,7 @@ class TailEndCarryStrategy(BaseStrategy):
         skip_live_games = _is_bool_true(cfg.get("skip_live_games", True))
         live_game_buffer_minutes = max(0.0, safe_float(cfg.get("live_game_buffer_minutes"), 15.0))
         allow_taker_limit_buy_above_signal = _is_bool_true(cfg.get("allow_taker_limit_buy_above_signal", True))
+        aggressive_limit_buy_submit_as_gtc = _is_bool_true(cfg.get("aggressive_limit_buy_submit_as_gtc", True))
 
         return {
             "min_probability": min_probability,
@@ -506,6 +508,7 @@ class TailEndCarryStrategy(BaseStrategy):
             "skip_live_games": skip_live_games,
             "live_game_buffer_minutes": live_game_buffer_minutes,
             "allow_taker_limit_buy_above_signal": allow_taker_limit_buy_above_signal,
+            "aggressive_limit_buy_submit_as_gtc": aggressive_limit_buy_submit_as_gtc,
             "price_policy": str(cfg.get("price_policy", "taker_limit") or "taker_limit"),
             "time_in_force": str(cfg.get("time_in_force", "IOC") or "IOC"),
         }
@@ -797,6 +800,7 @@ class TailEndCarryStrategy(BaseStrategy):
                         "price_policy": limits["price_policy"],
                         "time_in_force": limits["time_in_force"],
                         "allow_taker_limit_buy_above_signal": allow_taker_limit_buy_above_signal,
+                        "aggressive_limit_buy_submit_as_gtc": bool(limits["aggressive_limit_buy_submit_as_gtc"]),
                         "_tail_end": {
                             "days_to_resolution": days_to_res,
                             "spread": spread,
@@ -878,6 +882,7 @@ class TailEndCarryStrategy(BaseStrategy):
                 opp.strategy_context["max_entry_price"] = target_price if allow_taker_limit_buy_above_signal else price
                 opp.strategy_context["execution_max_price"] = target_price if allow_taker_limit_buy_above_signal else price
                 opp.strategy_context["allow_taker_limit_buy_above_signal"] = allow_taker_limit_buy_above_signal
+                opp.strategy_context["aggressive_limit_buy_submit_as_gtc"] = bool(limits["aggressive_limit_buy_submit_as_gtc"])
                 opp.strategy_context["max_settlement_upside_pct"] = max_settlement_upside_pct
                 opp.strategy_context["upside_ok"] = upside_ok
                 opp.strategy_context["raw_tail_candidate"] = True

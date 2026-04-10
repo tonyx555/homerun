@@ -8,8 +8,9 @@ quality and monitoring live orders.
 Inspired by terauss trade_monitor binary.
 """
 
-import uuid
 import asyncio
+import inspect
+import uuid
 from datetime import datetime
 from utils.utcnow import utcnow
 from dataclasses import dataclass
@@ -71,7 +72,7 @@ class FillMonitor:
         self._running = False
         self._poll_interval = 30  # seconds (fallback; WS provides real-time)
         self._callbacks: list[Callable] = []
-        self._known_fills: set[str] = set()  # order IDs already processed
+        self._reported_fill_size_by_order: dict[str, float] = {}
         self._ws_registered = False
 
     def add_callback(self, callback: Callable):
@@ -143,42 +144,45 @@ class FillMonitor:
 
             orders = await live_execution_service.get_open_orders()
             for order in orders:
-                if order.filled_size > 0 and order.id not in self._known_fills:
-                    fill = FillInfo(
-                        order_id=order.id,
-                        token_id=order.token_id,
-                        side=order.side.value,
-                        price=order.average_fill_price or order.price,
-                        size_filled=order.filled_size,
-                        size_requested=order.size,
-                        fill_percent=(order.filled_size / order.size * 100) if order.size > 0 else 0,
-                        fee=0.0,
-                        detected_at=utcnow(),
-                    )
+                filled_size = float(order.filled_size or 0.0)
+                if filled_size <= 0.0:
+                    continue
+                reported_size = float(self._reported_fill_size_by_order.get(order.id, 0.0) or 0.0)
+                if filled_size <= reported_size + 1e-9:
+                    continue
 
-                    logger.info(
-                        "Fill detected",
-                        order_id=order.id,
-                        token_id=order.token_id,
-                        fill_percent=f"{fill.fill_percent:.1f}%",
-                        price=fill.price,
-                    )
+                fill = FillInfo(
+                    order_id=order.id,
+                    token_id=order.token_id,
+                    side=order.side.value,
+                    price=order.average_fill_price or order.price,
+                    size_filled=filled_size,
+                    size_requested=float(order.size or 0.0),
+                    fill_percent=(filled_size / order.size * 100) if order.size > 0 else 0,
+                    fee=0.0,
+                    detected_at=utcnow(),
+                )
 
-                    # Persist
-                    await self._persist_fill(fill)
+                logger.info(
+                    "Fill detected",
+                    order_id=order.id,
+                    token_id=order.token_id,
+                    fill_percent=f"{fill.fill_percent:.1f}%",
+                    price=fill.price,
+                )
 
-                    # Notify callbacks
-                    for cb in self._callbacks:
-                        try:
-                            if asyncio.iscoroutinefunction(cb):
-                                await cb(fill)
-                            else:
-                                cb(fill)
-                        except Exception as e:
-                            logger.error("Fill callback error", error=str(e))
+                await self._persist_fill(fill)
 
-                    if order.filled_size >= order.size:
-                        self._known_fills.add(order.id)
+                for cb in self._callbacks:
+                    try:
+                        if inspect.iscoroutinefunction(cb):
+                            await cb(fill)
+                        else:
+                            cb(fill)
+                    except Exception as e:
+                        logger.error("Fill callback error", error=str(e))
+
+                self._reported_fill_size_by_order[order.id] = filled_size
         except Exception as e:
             logger.error("Check fills error", error=str(e))
 

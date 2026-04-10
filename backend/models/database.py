@@ -2085,6 +2085,13 @@ class DiscoveredWallet(Base):
         Index("idx_discovered_cluster", "cluster_id"),
         Index("idx_discovered_analyzed", "last_analyzed_at"),
         Index("idx_discovered_composite", "composite_score"),
+        Index(
+            "idx_discovered_pool_rank_order",
+            text("composite_score DESC NULLS LAST"),
+            text("rank_score DESC NULLS LAST"),
+            text("total_pnl DESC NULLS LAST"),
+            text("address ASC"),
+        ),
         Index("idx_discovered_in_pool", "in_top_pool"),
         Index("idx_discovered_last_trade", "last_trade_at"),
         Index("idx_discovered_insider_score", "insider_score"),
@@ -2495,8 +2502,14 @@ class ScannerSnapshot(Base):
     strategy_diagnostics_json = Column(JSON, default=dict)
     tiered_scanning_json = Column(JSON, nullable=True)
     ws_feeds_json = Column(JSON, nullable=True)
-    # market_id -> [{t: epoch_ms, yes: float, no: float}, ...]
-    market_history_json = Column(JSON, default=dict)
+
+
+class ScannerMarketHistory(Base):
+    __tablename__ = "scanner_market_history"
+
+    market_id = Column(String, primary_key=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow)
+    points_json = Column(JSON, default=list)
 
 
 class MarketCatalog(Base):
@@ -4046,10 +4059,10 @@ async def init_database():
             if attempt >= max_retries - 1:
                 raise
             _log.warning(
-                "Database connection failed (attempt %d/%d), retrying in 1s: %s",
+                "Database initialization failed (attempt %d/%d), retrying in 1s",
                 attempt + 1,
                 max_retries,
-                exc,
+                exc_info=exc,
             )
             await _asyncio.sleep(1)
 

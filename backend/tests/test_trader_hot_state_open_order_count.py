@@ -15,13 +15,14 @@ def _reset_hot_state() -> None:
     trader_hot_state._global_gross.clear()
     trader_hot_state._global_daily_pnl.clear()
     trader_hot_state._global_daily_pnl_date.clear()
+    trader_hot_state._recently_closed_markets.clear()
     trader_hot_state._seeded = False
 
 
 def test_executed_orders_do_not_increment_open_order_count():
     _reset_hot_state()
     try:
-        trader_hot_state.record_order_created(
+        trader_hot_state.upsert_active_order(
             trader_id="trader-1",
             mode="live",
             order_id="order-1",
@@ -45,7 +46,7 @@ def test_executed_orders_do_not_increment_open_order_count():
 def test_unfilled_orders_increment_and_cancelled_orders_clear_open_order_count():
     _reset_hot_state()
     try:
-        trader_hot_state.record_order_created(
+        trader_hot_state.upsert_active_order(
             trader_id="trader-1",
             mode="live",
             order_id="order-1",
@@ -78,7 +79,7 @@ def test_unfilled_orders_increment_and_cancelled_orders_clear_open_order_count()
 def test_cancelled_orders_clear_open_position_count():
     _reset_hot_state()
     try:
-        trader_hot_state.record_order_created(
+        trader_hot_state.upsert_active_order(
             trader_id="trader-1",
             mode="live",
             order_id="order-1",
@@ -104,5 +105,78 @@ def test_cancelled_orders_clear_open_position_count():
         )
 
         assert trader_hot_state.get_open_position_count("trader-1", "live") == 0
+    finally:
+        _reset_hot_state()
+
+
+def test_unfilled_cancelled_orders_do_not_enter_reentry_cooldown():
+    _reset_hot_state()
+    try:
+        trader_hot_state.upsert_active_order(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            status="open",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            notional_usd=25.0,
+            entry_price=0.5,
+            token_id="token-1",
+            filled_shares=0.0,
+            payload={"token_id": "token-1"},
+        )
+
+        trader_hot_state.record_order_cancelled(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            market_id="market-1",
+            source="scanner",
+        )
+
+        assert trader_hot_state.get_reentry_cooldown_market_ids("trader-1", "live") == set()
+    finally:
+        _reset_hot_state()
+
+
+def test_active_order_status_transition_to_executed_clears_open_order_count():
+    _reset_hot_state()
+    try:
+        trader_hot_state.upsert_active_order(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            status="open",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            notional_usd=25.0,
+            entry_price=0.5,
+            token_id="token-1",
+            filled_shares=0.0,
+            payload={"token_id": "token-1"},
+        )
+
+        assert trader_hot_state.get_open_order_count("trader-1", "live") == 1
+
+        trader_hot_state.upsert_active_order(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            status="executed",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            notional_usd=25.0,
+            entry_price=0.5,
+            token_id="token-1",
+            filled_shares=50.0,
+            payload={"token_id": "token-1", "filled_size": 50.0},
+        )
+
+        assert trader_hot_state.get_open_order_count("trader-1", "live") == 0
+        assert trader_hot_state.get_open_position_count("trader-1", "live") == 1
+        assert trader_hot_state.get_occupied_market_ids("trader-1", "live") == {"market-1"}
     finally:
         _reset_hot_state()

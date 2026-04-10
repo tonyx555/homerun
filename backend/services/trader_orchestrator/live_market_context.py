@@ -658,6 +658,8 @@ def _build_context_from_cached_market_state(
     max_history_seconds: int | None = None,
     yes_source: str | None = None,
     no_source: str | None = None,
+    yes_subscription_current: bool = False,
+    no_subscription_current: bool = False,
 ) -> dict[str, Any]:
     signal_market_id = _normalize_identifier(getattr(signal, "market_id", ""))
     signal_entry = safe_float(getattr(signal, "entry_price", None))
@@ -666,6 +668,7 @@ def _build_context_from_cached_market_state(
     selected_source: str | None = None
     selected_age_ms: float | None = None
     selected_observed_at: str | None = None
+    selected_subscription_current = False
     if yes_source is None:
         yes_source = "ws_strict" if yes_live is not None else None
     if no_source is None:
@@ -677,12 +680,14 @@ def _build_context_from_cached_market_state(
         selected_source = yes_source
         selected_age_ms = yes_age_ms
         selected_observed_at = yes_observed_at
+        selected_subscription_current = bool(yes_subscription_current)
     elif direction == "buy_no":
         selected_outcome = "no"
         selected_live = no_live
         selected_source = no_source
         selected_age_ms = no_age_ms
         selected_observed_at = no_observed_at
+        selected_subscription_current = bool(no_subscription_current)
     elif selected_token:
         selected_outcome = "yes" if selected_token == yes_token else "no"
         if selected_token == yes_token:
@@ -690,11 +695,13 @@ def _build_context_from_cached_market_state(
             selected_source = yes_source
             selected_age_ms = yes_age_ms
             selected_observed_at = yes_observed_at
+            selected_subscription_current = bool(yes_subscription_current)
         elif selected_token == no_token:
             selected_live = no_live
             selected_source = no_source
             selected_age_ms = no_age_ms
             selected_observed_at = no_observed_at
+            selected_subscription_current = bool(no_subscription_current)
 
     entry_delta = None
     entry_delta_pct = None
@@ -737,6 +744,7 @@ def _build_context_from_cached_market_state(
         "source_observed_at": selected_observed_at,
         "market_data_age_ms": selected_age_ms,
         "market_data_age_seconds": ((selected_age_ms / 1000.0) if selected_age_ms is not None else None),
+        "ws_subscription_current": selected_subscription_current,
         "signal_entry_price": signal_entry,
         "entry_price_delta": entry_delta,
         "entry_price_delta_pct": entry_delta_pct,
@@ -789,9 +797,6 @@ def _build_cached_signal_contexts(
     unresolved: list[dict[str, Any]] = []
     history_cache: dict[str, list[dict[str, float]]] = {}
     now_epoch = time.time()
-    # Collect tokens that need WS subscription for future cycles
-    tokens_to_subscribe: set[str] = set()
-
     for row in signal_rows:
         signal = row["signal"]
         signal_id = row["signal_id"]
@@ -817,27 +822,43 @@ def _build_cached_signal_contexts(
             unresolved.append(row)
             continue
 
-        def _cached_price(token_id: str | None) -> tuple[float | None, float | None, str | None]:
+        def _cached_price(token_id: str | None) -> tuple[float | None, float | None, str | None, bool]:
             if not token_id or not ws_available:
-                return None, None, None
+                return None, None, None, False
             try:
                 mid = safe_float(feed_manager.cache.get_mid_price(token_id))
                 age_s = safe_float(feed_manager.cache.staleness(token_id))
             except Exception:
-                return None, None, None
+                return None, None, None, False
             if mid is None:
-                # Token not in cache — needs WS subscription
-                tokens_to_subscribe.add(token_id)
-                return None, None, None
-            if age_s is not None and age_s > strict_ttl:
-                if strict_ws_only:
-                    return None, None, None
-                return None, None, None
-            observed_at_s = now_epoch - max(0.0, float(age_s or 0.0))
-            return float(mid), max(0.0, float(age_s or 0.0) * 1000.0), _iso_from_epoch_seconds(observed_at_s)
+                return None, None, None, False
+            subscription_current = False
+            if strict_ws_only:
+                try:
+                    quote_current = bool(age_s is not None and age_s <= strict_ttl)
+                    if quote_current:
+                        subscription_current = True
+                    if not quote_current:
+                        quote_current = bool(
+                            feed_manager.has_current_subscription_price(
+                                token_id,
+                                max_age_seconds=strict_ttl,
+                                allow_stale_subscribed=True,
+                            )
+                        )
+                        subscription_current = quote_current
+                    if not quote_current:
+                        return None, None, None, False
+                except Exception:
+                    return None, None, None, False
+            elif age_s is not None and age_s > strict_ttl:
+                return None, None, None, False
+            observed_at_s = None if age_s is None else (now_epoch - max(0.0, float(age_s)))
+            age_ms = None if age_s is None else max(0.0, float(age_s) * 1000.0)
+            return float(mid), age_ms, _iso_from_epoch_seconds(observed_at_s), subscription_current
 
-        yes_live, yes_age_ms, yes_observed_at = _cached_price(yes_token)
-        no_live, no_age_ms, no_observed_at = _cached_price(no_token)
+        yes_live, yes_age_ms, yes_observed_at, yes_subscription_current = _cached_price(yes_token)
+        no_live, no_age_ms, no_observed_at, no_subscription_current = _cached_price(no_token)
         yes_src: str | None = "ws_strict" if yes_live is not None else None
         no_src: str | None = "ws_strict" if no_live is not None else None
 
@@ -845,6 +866,7 @@ def _build_cached_signal_contexts(
         # when the WS cache is stale or empty.  Use the scanner price unless the
         # WS price is newer (i.e. has a smaller age_ms).
         is_scanner = row.get("source") == "scanner"
+        strict_sources = {"ws_strict", "redis_strict"}
         if is_scanner:
             def _hint_price_meta(
                 *,
@@ -890,7 +912,18 @@ def _build_cached_signal_contexts(
                     "live_market_fetched_at",
                 ),
             )
-            if hint_yes is not None and hint_yes_age_ms is not None:
+            hint_yes_allowed = (
+                hint_yes is not None
+                and hint_yes_age_ms is not None
+                and (
+                    not strict_ws_only
+                    or (
+                        hint_yes_source in strict_sources
+                        and hint_yes_age_ms <= max(0.0, strict_ttl * 1000.0)
+                    )
+                )
+            )
+            if hint_yes_allowed:
                 # Use scanner price if WS is missing, or scanner is fresher
                 if yes_live is None or (yes_age_ms is not None and hint_yes_age_ms < yes_age_ms):
                     yes_live = float(hint_yes)
@@ -911,7 +944,18 @@ def _build_cached_signal_contexts(
                     "live_market_fetched_at",
                 ),
             )
-            if hint_no is not None and hint_no_age_ms is not None:
+            hint_no_allowed = (
+                hint_no is not None
+                and hint_no_age_ms is not None
+                and (
+                    not strict_ws_only
+                    or (
+                        hint_no_source in strict_sources
+                        and hint_no_age_ms <= max(0.0, strict_ttl * 1000.0)
+                    )
+                )
+            )
+            if hint_no_allowed:
                 if no_live is None or (no_age_ms is not None and hint_no_age_ms < no_age_ms):
                     no_live = float(hint_no)
                     no_age_ms = hint_no_age_ms
@@ -954,17 +998,9 @@ def _build_cached_signal_contexts(
             max_history_seconds=max_history_seconds,
             yes_source=yes_src,
             no_source=no_src,
+            yes_subscription_current=yes_subscription_current,
+            no_subscription_current=no_subscription_current,
         )
-
-    # Auto-subscribe unresolved signal tokens so they'll be cached for next cycle
-    if tokens_to_subscribe and getattr(feed_manager, "_started", False):
-        try:
-            import asyncio as _asyncio
-            poly_feed = getattr(feed_manager, "polymarket_feed", None)
-            if poly_feed is not None:
-                _asyncio.ensure_future(poly_feed.subscribe(sorted(tokens_to_subscribe)))
-        except Exception:
-            pass
 
     return resolved, unresolved
 
@@ -1186,6 +1222,7 @@ async def build_live_signal_contexts(
         mid: Any,
         source: str,
         observed_at_s: float | None,
+        subscription_current: bool = False,
     ) -> None:
         norm = _normalize_identifier(token_id)
         if not norm:
@@ -1221,6 +1258,7 @@ async def build_live_signal_contexts(
             "observed_at_s": float(observed_at_s) if observed_at_s is not None else None,
             "observed_at": _iso_from_epoch_seconds(observed_at_s),
             "age_ms": age_ms,
+            "subscription_current": bool(subscription_current),
         }
 
     for market_id in market_ids:
@@ -1336,9 +1374,31 @@ async def build_live_signal_contexts(
                         exc_info=exc,
                     )
                     age_s = None
+                subscription_current = False
                 if age_s is not None:
-                    if age_s > strict_ttl and not strict_ws_only:
-                        continue
+                    if age_s > strict_ttl:
+                        if not strict_ws_only:
+                            continue
+                        try:
+                            subscription_current = bool(
+                                feed_manager.has_current_subscription_price(
+                                    token_norm,
+                                    max_age_seconds=strict_ttl,
+                                    allow_stale_subscribed=True,
+                                )
+                            )
+                        except Exception as exc:
+                            logger.warning(
+                                "WebSocket subscription-current check failed",
+                                token_id=token_norm,
+                                stale_seconds=strict_ttl,
+                                exc_info=exc,
+                            )
+                            subscription_current = False
+                        if not subscription_current:
+                            continue
+                    else:
+                        subscription_current = True
                     source = "ws_strict"
                     observed_at_s = now_epoch - max(0.0, float(age_s))
                 else:
@@ -1353,6 +1413,7 @@ async def build_live_signal_contexts(
                         )
                         strict_fresh = False
                     if strict_fresh:
+                        subscription_current = True
                         source = "ws_strict"
                         observed_at_s = now_epoch
                     else:
@@ -1362,6 +1423,7 @@ async def build_live_signal_contexts(
                     mid=parsed_mid,
                     source=source,
                     observed_at_s=observed_at_s,
+                    subscription_current=subscription_current,
                 )
 
         unresolved = [token_id for token_id in token_list if token_id not in live_prices]
@@ -1631,6 +1693,7 @@ async def build_live_signal_contexts(
             "source_observed_at": selected_observed_at,
             "market_data_age_ms": selected_age_ms,
             "market_data_age_seconds": ((selected_age_ms / 1000.0) if selected_age_ms is not None else None),
+            "ws_subscription_current": bool(selected_meta.get("subscription_current", False)),
             "signal_entry_price": signal_entry,
             "entry_price_delta": entry_delta,
             "entry_price_delta_pct": entry_delta_pct,

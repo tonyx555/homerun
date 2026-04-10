@@ -131,10 +131,10 @@ async def test_intent_runtime_hydrate_republishes_bootstrap_pending_signals(monk
                 [
                     {
                         "id": "sig-bootstrap-1",
-                        "source": "scanner",
+                        "source": "crypto",
                         "source_item_id": "stable-1",
-                        "signal_type": "scanner_opportunity",
-                        "strategy_type": "tail",
+                        "signal_type": "crypto_worker_15m",
+                        "strategy_type": "btc_eth_highfreq",
                         "market_id": "market-1",
                         "market_question": "Question?",
                         "direction": "no",
@@ -146,7 +146,7 @@ async def test_intent_runtime_hydrate_republishes_bootstrap_pending_signals(monk
                         "expires_at": now,
                         "status": "pending",
                         "payload_json": {"signal_emitted_at": now.isoformat().replace("+00:00", "Z")},
-                        "strategy_context_json": {},
+                        "strategy_context_json": {"source_key": "crypto", "execution_activation": "immediate"},
                         "quality_passed": True,
                         "dedupe_key": "dedupe-1",
                         "runtime_sequence": None,
@@ -176,7 +176,7 @@ async def test_intent_runtime_hydrate_republishes_bootstrap_pending_signals(monk
 
     assert publish_mock.await_count == 1
     assert publish_mock.await_args.kwargs["event_type"] == "upsert_reactivated"
-    assert publish_mock.await_args.kwargs["source"] == "scanner"
+    assert publish_mock.await_args.kwargs["source"] == "crypto"
     assert publish_mock.await_args.kwargs["signal_ids"] == ["sig-bootstrap-1"]
     assert publish_mock.await_args.kwargs["reason"] == "bootstrap_pending_signals"
     assert runtime._signals_by_id["sig-bootstrap-1"]["runtime_sequence"] == 1

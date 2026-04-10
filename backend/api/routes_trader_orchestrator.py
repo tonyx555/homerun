@@ -43,7 +43,16 @@ def _clear_orchestrator_caches() -> None:
 
 class StartRequest(BaseModel):
     mode: Optional[str] = Field(default=None, description="shadow | live")
+    selected_account_id: str = Field(..., min_length=1)
     requested_by: Optional[str] = None
+
+    @field_validator("selected_account_id")
+    @classmethod
+    def _validate_selected_account_id(cls, value: str) -> str:
+        account_id = str(value or "").strip()
+        if not account_id:
+            raise ValueError("selected_account_id is required")
+        return account_id
 
 
 class KillSwitchRequest(BaseModel):
@@ -65,7 +74,16 @@ class LiveArmRequest(BaseModel):
 class LiveStartRequest(BaseModel):
     arm_token: str
     mode: str = Field(default="live")
+    selected_account_id: str = Field(..., min_length=1)
     requested_by: Optional[str] = None
+
+    @field_validator("selected_account_id")
+    @classmethod
+    def _validate_selected_account_id(cls, value: str) -> str:
+        account_id = str(value or "").strip()
+        if not account_id:
+            raise ValueError("selected_account_id is required")
+        return account_id
 
 
 class LiveStopRequest(BaseModel):
@@ -240,7 +258,7 @@ async def update_orchestrator_settings(
 
 @router.post("/start")
 async def start_orchestrator(
-    request: StartRequest = StartRequest(),
+    request: StartRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
     _assert_not_globally_paused()
@@ -258,6 +276,12 @@ async def start_orchestrator(
             status_code=422,
             detail="mode must be 'shadow'. Use /live/start for live mode.",
         )
+    selected_account_id = str(request.selected_account_id or "").strip()
+    if selected_account_id.startswith("live:"):
+        raise HTTPException(
+            status_code=422,
+            detail="Selected global account is live. Use /live/start for live trading.",
+        )
 
     control = await update_orchestrator_control(
         session,
@@ -265,6 +289,10 @@ async def start_orchestrator(
         is_paused=False,
         mode=mode,
         requested_run_at=utcnow(),
+        settings_json={
+            "selected_account_id": selected_account_id,
+            "shadow_account_id": selected_account_id,
+        },
     )
     await write_orchestrator_snapshot(
         session,
@@ -279,7 +307,7 @@ async def start_orchestrator(
         source="trader_orchestrator",
         operator=request.requested_by,
         message=f"Trader orchestrator started in {mode} mode",
-        payload={"mode": mode},
+        payload={"mode": mode, "selected_account_id": selected_account_id},
     )
     _clear_orchestrator_caches()
     return {"status": "started", "control": control}
@@ -294,6 +322,10 @@ async def stop_orchestrator(
         is_enabled=False,
         is_paused=True,
         requested_run_at=None,
+        settings_json={
+            "selected_account_id": None,
+            "shadow_account_id": None,
+        },
     )
     await write_orchestrator_snapshot(
         session,
@@ -376,6 +408,12 @@ async def start_live(
     session: AsyncSession = Depends(get_db_session),
 ):
     _assert_not_globally_paused()
+    selected_account_id = str(request.selected_account_id or "").strip()
+    if not selected_account_id.startswith("live:"):
+        raise HTTPException(
+            status_code=422,
+            detail="Selected global account is not live. Use /start for shadow trading.",
+        )
     preflight = await create_live_preflight(
         session,
         requested_mode="live",
@@ -396,6 +434,10 @@ async def start_live(
         is_enabled=True,
         is_paused=False,
         requested_run_at=utcnow(),
+        settings_json={
+            "selected_account_id": selected_account_id,
+            "shadow_account_id": None,
+        },
     )
     await write_orchestrator_snapshot(
         session,
@@ -410,7 +452,7 @@ async def start_live(
         source="trader_orchestrator",
         operator=request.requested_by,
         message="Live trading started",
-        payload={"mode": request.mode},
+        payload={"mode": request.mode, "selected_account_id": selected_account_id},
     )
     _clear_orchestrator_caches()
     return {"status": "started", "control": control}
@@ -427,6 +469,10 @@ async def stop_live(
         is_enabled=False,
         is_paused=True,
         requested_run_at=None,
+        settings_json={
+            "selected_account_id": None,
+            "shadow_account_id": None,
+        },
     )
     await write_orchestrator_snapshot(
         session,

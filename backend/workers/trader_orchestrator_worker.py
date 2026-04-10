@@ -21,6 +21,7 @@ from models.database import (
     AppSettings,
     AsyncSessionLocal,
     DiscoveredWallet,
+    TradeSignal,
     TraderEvent,
     TraderOrder,
     TraderOrchestratorSnapshot,
@@ -67,6 +68,7 @@ from services.strategies.news_edge import validate_news_edge_config
 from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.runtime_signal_queue import get_queue_depth, publish_signal_batch, wait_for_signal_batch
+from services.runtime_status import runtime_status
 from services.trader_orchestrator_state import (
     DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS,
     DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
@@ -103,7 +105,7 @@ from services.signal_bus import (
 import services.trader_hot_state as hot_state
 from services.ws_feeds import get_feed_manager
 from utils.utcnow import utcnow
-from utils.converters import coerce_bool as _coerce_bool, parse_iso_datetime, safe_float, safe_int
+from utils.converters import coerce_bool as _coerce_bool, parse_iso_datetime, safe_float, safe_int, to_iso
 from utils.logger import get_logger
 from utils.secrets import decrypt_secret
 
@@ -131,6 +133,7 @@ _STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="stra
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
 _inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
 _inflight_trader_cycle_start: dict[str, float] = {}  # trader_id -> monotonic start time
+_inflight_trader_cycle_process_signals: dict[str, bool] = {}
 _pending_runtime_cycle_specs: dict[str, dict[str, Any]] = {}
 _skip_log_last_at: dict[str, float] = {}  # trader_id -> last log monotonic time
 _skip_log_suppressed: dict[str, int] = {}  # trader_id -> suppressed count
@@ -146,6 +149,7 @@ def _discard_abandoned_trader_cycle(task: asyncio.Task) -> None:
 def _clear_inflight_trader_cycle_task(trader_id: str, task: asyncio.Task) -> None:
     if trader_id and _inflight_trader_cycle_tasks.get(trader_id) is task:
         _inflight_trader_cycle_tasks.pop(trader_id, None)
+        _inflight_trader_cycle_process_signals.pop(trader_id, None)
 
 
 def _merge_trigger_signal_ids_by_source(
@@ -193,49 +197,6 @@ def _merge_trigger_signal_snapshots_by_source(
                     continue
                 merged[source_key][signal_id] = copy.deepcopy(snapshot)
     return merged or None
-
-
-def _trader_has_runtime_queue_source(trader: dict[str, Any]) -> bool:
-    """Return True if any of the trader's sources publish to the runtime
-    signal queue (intent_runtime sources like tracked_traders, copy_trade).
-    Scanner-sourced traders do NOT — the scanner publishes to the event bus
-    only, so their signals must be consumed by the scheduled loop."""
-    source_configs = trader.get("source_configs") or trader.get("source_configs_json")
-    if isinstance(source_configs, str):
-        import json as _json
-        try:
-            source_configs = _json.loads(source_configs)
-        except Exception:
-            source_configs = None
-    if isinstance(source_configs, dict):
-        sources = source_configs
-    elif isinstance(source_configs, list):
-        sources = {
-            str(sc.get("source_key") or sc.get("source") or ""): sc
-            for sc in source_configs
-            if isinstance(sc, dict)
-        }
-    else:
-        return False
-    _SCANNER_ONLY_SOURCES = {"scanner"}
-    return any(
-        str(key or "").strip().lower() not in _SCANNER_ONLY_SOURCES
-        for key in sources
-    )
-
-
-def _runtime_hot_path_owns_signal_execution(
-    *,
-    lane_key: str,
-    process_runtime_triggers: bool,
-    trader: dict[str, Any],
-) -> bool:
-    return (
-        lane_key == _LANE_GENERAL
-        and not process_runtime_triggers
-        and not _is_crypto_source_trader(trader)
-        and _trader_has_runtime_queue_source(trader)
-    )
 
 
 def _queue_pending_runtime_cycle(
@@ -316,6 +277,19 @@ def _handle_trader_cycle_task_done(trader_id: str, task: asyncio.Task) -> None:
         return
 
 
+def _handle_runtime_trigger_dispatch_task_done(trader_id: str, task: asyncio.Task) -> None:
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        logger.warning(
+            "Runtime trigger trader cycle raised uncaught exception for trader=%s",
+            trader_id,
+            exc_info=exc,
+        )
+
+
 async def _pause_until_next_cycle(
     *,
     process_runtime_triggers: bool,
@@ -357,7 +331,14 @@ async def record_signal_consumption(session, *, trader_id, signal_id, outcome, r
 
 
 async def upsert_trader_signal_cursor(session, *, trader_id, last_signal_created_at, last_signal_id, commit=True):
-    last_runtime_sequence = get_intent_runtime().get_runtime_sequence(str(last_signal_id or ""))
+    last_runtime_sequence = None
+    normalized_signal_id = str(last_signal_id or "").strip()
+    if normalized_signal_id:
+        signal_row = await session.get(TradeSignal, normalized_signal_id)
+        if signal_row is not None:
+            last_runtime_sequence = safe_int(getattr(signal_row, "runtime_sequence", None), None)
+        if last_runtime_sequence is None:
+            last_runtime_sequence = get_intent_runtime().get_runtime_sequence(normalized_signal_id)
     hot_state.update_signal_cursor(trader_id, "live", last_signal_created_at, last_signal_id, last_runtime_sequence)
     await _persist_trader_signal_cursor(
         session,
@@ -512,7 +493,6 @@ async def list_unconsumed_trade_signals(
     cursor_runtime_sequence=None,
     cursor_created_at=None,
     cursor_signal_id=None,
-    exclude_market_ids=None,
     limit=200,
 ):
     return await _list_unconsumed_trade_signals_authoritative(
@@ -524,7 +504,6 @@ async def list_unconsumed_trade_signals(
         cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
         cursor_created_at=cursor_created_at,
         cursor_signal_id=cursor_signal_id,
-        exclude_market_ids=list(exclude_market_ids or []),
         limit=int(limit),
     )
 
@@ -571,8 +550,12 @@ async def get_open_order_count_for_trader(session, trader_id, mode=None):
     return hot_state.get_open_order_count(trader_id, mode or "live")
 
 
-async def get_open_market_ids_for_trader(session, trader_id, mode=None):
-    return hot_state.get_open_market_ids(trader_id, mode or "live")
+async def get_occupied_market_ids_for_trader(session, trader_id, mode=None):
+    return hot_state.get_occupied_market_ids(trader_id, mode or "live")
+
+
+async def get_reentry_cooldown_market_ids_for_trader(session, trader_id, mode=None):
+    return hot_state.get_reentry_cooldown_market_ids(trader_id, mode or "live")
 
 
 async def get_daily_realized_pnl(session, *, trader_id=None, mode=None):
@@ -1116,8 +1099,6 @@ async def _build_triggered_trade_signals(
         for row in eligible_rows
         if str(getattr(row, "id", "") or "").strip()
     }
-    if not eligible_rows_by_id:
-        return []
 
     snapshots = signal_snapshots_by_source or {}
     rows: list[Any] = []
@@ -1125,29 +1106,60 @@ async def _build_triggered_trade_signals(
     if "__all__" in signal_ids_by_source:
         source_order = ["__all__", *source_order]
     seen_row_ids: set[str] = set()
+    normalized_statuses = {
+        str(status or "").strip().lower()
+        for status in (statuses or [])
+        if str(status or "").strip()
+    }
     for source_key in source_order:
+        allowed_strategy_types = set(strategy_types_by_source.get(source_key) or [])
         for raw_signal_id in signal_ids_by_source.get(source_key) or []:
             signal_id = str(raw_signal_id or "").strip()
             if not signal_id or signal_id in seen_row_ids:
                 continue
             authoritative_row = eligible_rows_by_id.get(signal_id)
-            if authoritative_row is None:
-                continue
             snapshot = (snapshots.get(source_key) or {}).get(signal_id)
             if snapshot is None and source_key != "__all__":
                 snapshot = (snapshots.get("__all__") or {}).get(signal_id)
+            if authoritative_row is None and not isinstance(snapshot, dict):
+                continue
             if isinstance(snapshot, dict):
                 row = _coerce_runtime_signal_snapshot(snapshot)
-                row.status = str(getattr(authoritative_row, "status", "") or getattr(row, "status", "")).strip().lower()
-                row.runtime_sequence = getattr(authoritative_row, "runtime_sequence", getattr(row, "runtime_sequence", None))
-                if not str(getattr(row, "market_question", "") or "").strip():
-                    row.market_question = str(getattr(authoritative_row, "market_question", "") or "").strip()
-                if getattr(row, "expires_at", None) is None:
-                    row.expires_at = getattr(authoritative_row, "expires_at", None)
-                if getattr(row, "created_at", None) is None:
-                    row.created_at = getattr(authoritative_row, "created_at", None)
-                if getattr(row, "updated_at", None) is None:
-                    row.updated_at = getattr(authoritative_row, "updated_at", None)
+                if authoritative_row is not None:
+                    row.status = str(getattr(authoritative_row, "status", "") or getattr(row, "status", "")).strip().lower()
+                    row.runtime_sequence = getattr(authoritative_row, "runtime_sequence", getattr(row, "runtime_sequence", None))
+                    if not str(getattr(row, "market_question", "") or "").strip():
+                        row.market_question = str(getattr(authoritative_row, "market_question", "") or "").strip()
+                    if getattr(row, "expires_at", None) is None:
+                        row.expires_at = getattr(authoritative_row, "expires_at", None)
+                    if getattr(row, "created_at", None) is None:
+                        row.created_at = getattr(authoritative_row, "created_at", None)
+                    if getattr(row, "updated_at", None) is None:
+                        row.updated_at = getattr(authoritative_row, "updated_at", None)
+                else:
+                    row_strategy_type = str(getattr(row, "strategy_type", "") or "").strip().lower()
+                    if allowed_strategy_types and row_strategy_type not in allowed_strategy_types:
+                        continue
+                    if normalized_statuses and str(getattr(row, "status", "") or "").strip().lower() not in normalized_statuses:
+                        continue
+                row_runtime_sequence = _signal_runtime_sequence(row)
+                if cursor_runtime_sequence is not None and row_runtime_sequence is not None and row_runtime_sequence <= int(cursor_runtime_sequence):
+                    continue
+                row_timestamp = _signal_cursor_timestamp(row)
+                if (
+                    cursor_created_at is not None
+                    and row_timestamp is not None
+                    and row_timestamp < cursor_created_at
+                ):
+                    continue
+                if (
+                    cursor_created_at is not None
+                    and row_timestamp is not None
+                    and row_timestamp == cursor_created_at
+                    and cursor_signal_id
+                    and signal_id <= str(cursor_signal_id)
+                ):
+                    continue
             else:
                 row = authoritative_row
             seen_row_ids.add(signal_id)
@@ -1184,6 +1196,15 @@ def _session_dialect_name(session: Any) -> str:
 
 
 async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwargs: Any) -> None:
+    runtime_status.update_orchestrator(
+        running=snapshot_kwargs.get("running"),
+        enabled=snapshot_kwargs.get("enabled"),
+        current_activity=snapshot_kwargs.get("current_activity"),
+        interval_seconds=snapshot_kwargs.get("interval_seconds"),
+        last_run_at=to_iso(snapshot_kwargs.get("last_run_at")),
+        last_error=snapshot_kwargs.get("last_error"),
+        stats=dict(snapshot_kwargs.get("stats") or {}),
+    )
     try:
         await write_orchestrator_snapshot(session, **snapshot_kwargs)
     except OperationalError as exc:
@@ -1361,167 +1382,11 @@ def _compute_signal_latency_payload(
     return out
 
 
-def _build_scanner_signal_market_snapshot_live_context(signal: Any) -> dict[str, Any]:
+def _payload_live_market_context(signal: Any) -> dict[str, Any]:
     payload = getattr(signal, "payload_json", None)
     payload = payload if isinstance(payload, dict) else {}
-    markets = payload.get("markets")
-    markets = markets if isinstance(markets, list) else []
-    positions = payload.get("positions_to_take")
-    positions = positions if isinstance(positions, list) else []
-
-    direction = str(getattr(signal, "direction", "") or "").strip().lower()
-    target_market_id = str(getattr(signal, "market_id", "") or "").strip()
-    target_question = str(getattr(signal, "market_question", "") or "").strip()
-
-    selected_market: dict[str, Any] | None = None
-    for market in markets:
-        if not isinstance(market, dict):
-            continue
-        market_id = str(market.get("id") or market.get("market_id") or market.get("condition_id") or "").strip()
-        market_question = str(market.get("question") or market.get("market_question") or "").strip()
-        if target_market_id and market_id and market_id == target_market_id:
-            selected_market = market
-            break
-        if target_question and market_question and market_question == target_question:
-            selected_market = market
-            break
-    if selected_market is None and markets:
-        first_market = markets[0]
-        if isinstance(first_market, dict):
-            selected_market = first_market
-    if not isinstance(selected_market, dict):
-        return {}
-
-    token_ids = selected_market.get("clob_token_ids")
-    token_ids = token_ids if isinstance(token_ids, list) else []
-    yes_token_id = str(token_ids[0] or "").strip() if len(token_ids) > 0 else ""
-    no_token_id = str(token_ids[1] or "").strip() if len(token_ids) > 1 else ""
-
-    selected_outcome = "yes"
-    selected_token_id = yes_token_id
-    selected_price = safe_float(
-        selected_market.get("current_yes_price"),
-        safe_float(selected_market.get("yes_price"), None),
-    )
-    if direction.endswith("no"):
-        selected_outcome = "no"
-        selected_token_id = no_token_id
-        selected_price = safe_float(
-            selected_market.get("current_no_price"),
-            safe_float(selected_market.get("no_price"), None),
-        )
-
-    for position in positions:
-        if not isinstance(position, dict):
-            continue
-        position_token_id = str(position.get("token_id") or "").strip()
-        if position_token_id and position_token_id in {yes_token_id, no_token_id}:
-            selected_token_id = position_token_id
-            position_outcome = str(position.get("outcome") or "").strip().lower()
-            if position_outcome in {"yes", "no"}:
-                selected_outcome = position_outcome
-            position_price = safe_float(position.get("price"), None)
-            if position_price is not None and position_price > 0.0:
-                selected_price = position_price
-            break
-
-    if selected_price is None or selected_price <= 0.0:
-        return {}
-
-    selected_source = "market_snapshot"
-    if selected_outcome == "yes":
-        selected_source = str(
-            selected_market.get("yes_price_source")
-            or selected_market.get("up_price_source")
-            or selected_market.get("market_data_source")
-            or selected_market.get("live_selected_price_source")
-            or "market_snapshot"
-        ).strip().lower() or "market_snapshot"
-    elif selected_outcome == "no":
-        selected_source = str(
-            selected_market.get("no_price_source")
-            or selected_market.get("down_price_source")
-            or selected_market.get("market_data_source")
-            or selected_market.get("live_selected_price_source")
-            or "market_snapshot"
-        ).strip().lower() or "market_snapshot"
-
-    observed_at = _parse_iso(
-        str(
-            (
-                selected_market.get("yes_price_updated_at")
-                if selected_outcome == "yes"
-                else selected_market.get("no_price_updated_at")
-                if selected_outcome == "no"
-                else None
-            )
-            or (
-                selected_market.get("up_price_updated_at")
-                if selected_outcome == "yes"
-                else selected_market.get("down_price_updated_at")
-                if selected_outcome == "no"
-                else None
-            )
-            or selected_market.get("source_observed_at")
-            or selected_market.get("price_updated_at")
-            or payload.get("last_priced_at")
-            or payload.get("last_updated_at")
-            or payload.get("signal_emitted_at")
-            or payload.get("ingested_at")
-            or ""
-        )
-    )
-    if observed_at is None:
-        for raw_observed_at in (
-            getattr(signal, "updated_at", None),
-            getattr(signal, "created_at", None),
-        ):
-            if isinstance(raw_observed_at, datetime):
-                observed_at = (
-                    raw_observed_at
-                    if raw_observed_at.tzinfo is not None
-                    else raw_observed_at.replace(tzinfo=timezone.utc)
-                )
-                break
-            observed_at = _parse_iso(str(raw_observed_at or ""))
-            if observed_at is not None:
-                break
-    observed_at_iso = observed_at.isoformat() if observed_at is not None else None
-    age_ms: float | None = None
-    if observed_at is not None:
-        age_ms = max(0.0, (utcnow() - observed_at).total_seconds() * 1000.0)
-
-    return {
-        "available": True,
-        "fetched_at": observed_at_iso,
-        "live_market_fetched_at": observed_at_iso,
-        "market_id": str(
-            selected_market.get("id") or selected_market.get("market_id") or selected_market.get("condition_id") or ""
-        ).strip()
-        or target_market_id
-        or None,
-        "condition_id": str(selected_market.get("condition_id") or "").strip() or None,
-        "market_question": str(
-            selected_market.get("question") or selected_market.get("market_question") or target_question or ""
-        ).strip()
-        or None,
-        "direction": direction or None,
-        "selected_outcome": selected_outcome,
-        "token_ids": [token for token in (yes_token_id, no_token_id) if token],
-        "yes_token_id": yes_token_id or None,
-        "no_token_id": no_token_id or None,
-        "selected_token_id": selected_token_id or None,
-        "live_yes_price": safe_float(selected_market.get("current_yes_price"), safe_float(selected_market.get("yes_price"), None)),
-        "live_no_price": safe_float(selected_market.get("current_no_price"), safe_float(selected_market.get("no_price"), None)),
-        "live_selected_price": float(selected_price),
-        "live_selected_price_source": selected_source,
-        "market_data_source": selected_source,
-        "source_observed_at": observed_at_iso,
-        "market_data_age_ms": age_ms,
-        "market_data_age_seconds": ((age_ms / 1000.0) if age_ms is not None else None),
-        "liquidity_usd": safe_float(selected_market.get("liquidity"), None),
-        "volume_usd": safe_float(selected_market.get("volume"), None),
-    }
+    live_market = payload.get("live_market")
+    return dict(live_market) if isinstance(live_market, dict) else {}
 
 
 def _build_execution_latency_sample(
@@ -4139,7 +4004,8 @@ async def _run_trader_once(
                             reason="trader_orchestrator_trigger_batch_overflow",
                         )
         open_positions = 0
-        open_market_ids: set[str] = set()
+        occupied_market_ids: set[str] = set()
+        reentry_cooldown_market_ids: set[str] = set()
         timeout_cleanup = {
             "configured": 0,
             "updated": 0,
@@ -4439,7 +4305,8 @@ async def _run_trader_once(
                     )
         pending_live_exit_count = int(pending_live_exit_summary.get("count", 0) or 0)
         effective_open_positions = max(open_positions, open_order_count)
-        open_market_ids = await get_open_market_ids_for_trader(
+        occupied_market_ids = await get_occupied_market_ids_for_trader(session, trader_id, mode=run_mode)
+        reentry_cooldown_market_ids = await get_reentry_cooldown_market_ids_for_trader(
             session,
             trader_id,
             mode=run_mode,
@@ -4697,11 +4564,6 @@ async def _run_trader_once(
                     payload={"changes": live_risk_clamp_changes},
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
-        excluded_market_ids_for_signal_fetch = (
-            set(open_market_ids)
-            if run_mode == "live" and not allow_averaging and open_market_ids
-            else set()
-        )
         # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
@@ -4867,7 +4729,6 @@ async def _run_trader_once(
                     cursor_runtime_sequence=cursor_runtime_sequence,
                     cursor_created_at=cursor_created_at,
                     cursor_signal_id=cursor_signal_id,
-                    exclude_market_ids=excluded_market_ids_for_signal_fetch,
                     limit=batch_limit,
                 )
             if not signals:
@@ -5017,12 +4878,19 @@ async def _run_trader_once(
                     )
                 continue
             signals = scoped_signals
-            already_open_signal_ids: set[str] = set()
-            if run_mode == "live" and not allow_averaging and open_market_ids:
-                already_open_signal_ids = {
+            occupied_signal_ids: set[str] = set()
+            cooldown_signal_ids: set[str] = set()
+            if run_mode == "live" and not allow_averaging and occupied_market_ids:
+                occupied_signal_ids = {
                     str(signal.id)
                     for signal in signals
-                    if str(getattr(signal, "market_id", "") or "").strip() in open_market_ids
+                    if str(getattr(signal, "market_id", "") or "").strip() in occupied_market_ids
+                }
+            if run_mode == "live" and reentry_cooldown_market_ids:
+                cooldown_signal_ids = {
+                    str(signal.id)
+                    for signal in signals
+                    if str(getattr(signal, "market_id", "") or "").strip() in reentry_cooldown_market_ids
                 }
             await _ensure_prefetched_source_runtime_state(
                 session,
@@ -5042,10 +4910,10 @@ async def _run_trader_once(
                 context_candidates: list[Any] = []
                 fallback_candidates: list[Any] = []
                 for sig in signals:
-                    if str(sig.id) in already_open_signal_ids:
+                    if str(sig.id) in occupied_signal_ids or str(sig.id) in cooldown_signal_ids:
                         continue
                     sig_source = normalize_source_key(getattr(sig, "source", ""))
-                    if strict_ws_pricing_enforced and sig_source in ("crypto", "scanner"):
+                    if strict_ws_pricing_enforced and sig_source in {"crypto", "scanner"}:
                         context_candidates.append(sig)
                         continue
                     if strict_ws_pricing_enforced:
@@ -5228,17 +5096,17 @@ async def _run_trader_once(
                         str(prefetched_source_runtime.get("requested_strategy_version_error") or "").strip() or None
                     )
                     signal_market_id = str(getattr(signal, "market_id", "") or "").strip()
-                    if signal_id in already_open_signal_ids:
+                    if signal_id in occupied_signal_ids:
                         runtime_signal = RuntimeTradeSignalView(signal, live_context={})
                         runtime_signal.source = signal_source
-                        blocked_reason = "Stacking guard: market already open"
+                        blocked_reason = "Stacking guard: market already occupied"
                         checks_payload = [
                             {
-                                "check_key": "stacking_guard_open_market",
+                                "check_key": "stacking_guard_occupied_market",
                                 "check_label": "Stacking guard",
                                 "passed": False,
                                 "score": None,
-                                "detail": "Market already open for trader; skipped before live context refresh.",
+                                "detail": "Market already occupied by an open position or active order.",
                                 "payload": {
                                     "market_id": signal_market_id,
                                     "allow_averaging": False,
@@ -5259,7 +5127,7 @@ async def _run_trader_once(
                             payload={
                                 "source_key": signal_source,
                                 "source_config": source_config,
-                                "prefilter": "open_market",
+                                "prefilter": "occupied_market",
                             },
                             commit=False,
                         )
@@ -5314,127 +5182,110 @@ async def _run_trader_once(
                         cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
                         processed_signals += 1
                         prefiltered_signals += 1
-                        prefiltered_by_reason["open_market"] = prefiltered_by_reason.get("open_market", 0) + 1
+                        prefiltered_by_reason["occupied_market"] = prefiltered_by_reason.get("occupied_market", 0) + 1
+                        continue
+                    if signal_id in cooldown_signal_ids:
+                        runtime_signal = RuntimeTradeSignalView(signal, live_context={})
+                        runtime_signal.source = signal_source
+                        blocked_reason = "Reentry cooldown: market recently closed"
+                        checks_payload = [
+                            {
+                                "check_key": "reentry_cooldown_market",
+                                "check_label": "Reentry cooldown",
+                                "passed": False,
+                                "score": None,
+                                "detail": "Market is in trader reentry cooldown after a recent close.",
+                                "payload": {
+                                    "market_id": signal_market_id,
+                                    "allow_averaging": allow_averaging,
+                                },
+                            }
+                        ]
+                        decision_row = await create_trader_decision(
+                            session,
+                            trader_id=trader_id,
+                            signal=runtime_signal,
+                            strategy_key=strategy_key_for_output,
+                            strategy_version=requested_strategy_version,
+                            decision="blocked",
+                            reason=blocked_reason,
+                            score=0.0,
+                            checks_summary={"count": len(checks_payload)},
+                            risk_snapshot={},
+                            payload={
+                                "source_key": signal_source,
+                                "source_config": source_config,
+                                "prefilter": "reentry_cooldown",
+                            },
+                            commit=False,
+                        )
+                        decisions_written += 1
+                        await create_trader_decision_checks(
+                            session,
+                            decision_id=decision_row.id,
+                            checks=checks_payload,
+                            commit=False,
+                        )
+                        await set_trade_signal_status(
+                            session,
+                            signal_id=signal_id,
+                            status="skipped",
+                            commit=False,
+                        )
+                        await record_signal_consumption(
+                            session,
+                            trader_id=trader_id,
+                            signal_id=signal_id,
+                            decision_id=decision_row.id,
+                            outcome="blocked",
+                            reason=blocked_reason,
+                            commit=False,
+                        )
+                        await create_trader_event(
+                            session,
+                            trader_id=trader_id,
+                            event_type="decision",
+                            severity="info",
+                            source=signal_source,
+                            message=blocked_reason,
+                            payload={
+                                "decision_id": decision_row.id,
+                                "signal_id": signal.id,
+                                "decision": "blocked",
+                                "market_id": getattr(runtime_signal, "market_id", None),
+                                "market_question": getattr(runtime_signal, "market_question", None),
+                                "direction": getattr(runtime_signal, "direction", None),
+                            },
+                            commit=False,
+                        )
+                        await upsert_trader_signal_cursor(
+                            session,
+                            trader_id=trader_id,
+                            last_signal_created_at=_signal_cursor_timestamp(signal),
+                            last_signal_id=signal_id,
+                            commit=False,
+                        )
+                        cursor_created_at = _signal_cursor_timestamp(signal)
+                        cursor_signal_id = signal_id
+                        cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
+                        processed_signals += 1
+                        prefiltered_signals += 1
+                        prefiltered_by_reason["reentry_cooldown"] = (
+                            prefiltered_by_reason.get("reentry_cooldown", 0) + 1
+                        )
                         continue
                     live_context = live_contexts.get(signal_id, {})
+                    payload_live_context = _payload_live_market_context(signal)
+                    if not live_context and payload_live_context:
+                        live_context = payload_live_context
                     runtime_signal = RuntimeTradeSignalView(signal, live_context=live_context)
                     runtime_signal.source = signal_source
-                    if signal_source == "scanner" and strategy_key_for_output == "tail_end_carry":
-                        loaded_prefilter_strategy = strategy_db_loader.get_strategy(strategy_key_for_output)
-                        prefilter_strategy = _strategy_instance_from_loaded(loaded_prefilter_strategy)
-                        if prefilter_strategy is not None and hasattr(prefilter_strategy, "custom_checks"):
-                            prefilter_payload = (
-                                dict(getattr(runtime_signal, "payload_json", None) or {})
-                                if isinstance(getattr(runtime_signal, "payload_json", None), dict)
-                                else {}
-                            )
-                            prefilter_context = {
-                                "params": strategy_params,
-                                "trader": trader,
-                                "mode": control.get("mode", "shadow"),
-                                "live_market": live_context,
-                                "source_config": source_config,
-                            }
-                            prefilter_checks = prefilter_strategy.custom_checks(
-                                runtime_signal,
-                                prefilter_context,
-                                strategy_params,
-                                prefilter_payload,
-                            )
-                            if any(not getattr(check, "passed", False) for check in prefilter_checks):
-                                checks_payload = _checks_to_payload(prefilter_checks)
-                                failed_fragments = []
-                                for check_payload in checks_payload:
-                                    if bool(check_payload.get("passed", False)):
-                                        continue
-                                    label = str(check_payload.get("check_label") or "Check").strip()
-                                    detail = str(check_payload.get("detail") or "").strip()
-                                    failed_fragments.append(f"{label}: {detail}" if detail else label)
-                                skipped_reason = "Tail carry filters not met"
-                                if failed_fragments:
-                                    skipped_reason = f"{skipped_reason} | failed checks: {' | '.join(failed_fragments)}"
-                                decision_row = await create_trader_decision(
-                                    session,
-                                    trader_id=trader_id,
-                                    signal=runtime_signal,
-                                    strategy_key=strategy_key_for_output,
-                                    strategy_version=requested_strategy_version,
-                                    decision="skipped",
-                                    reason=skipped_reason,
-                                    score=0.0,
-                                    checks_summary={"count": len(checks_payload)},
-                                    risk_snapshot={},
-                                    payload={
-                                        "source_key": signal_source,
-                                        "source_config": source_config,
-                                        "prefilter": "shared_strategy_eligibility",
-                                    },
-                                    commit=False,
-                                )
-                                decisions_written += 1
-                                await create_trader_decision_checks(
-                                    session,
-                                    decision_id=decision_row.id,
-                                    checks=checks_payload,
-                                    commit=False,
-                                )
-                                await set_trade_signal_status(
-                                    session,
-                                    signal_id=signal_id,
-                                    status="skipped",
-                                    commit=False,
-                                )
-                                await record_signal_consumption(
-                                    session,
-                                    trader_id=trader_id,
-                                    signal_id=signal_id,
-                                    decision_id=decision_row.id,
-                                    outcome="skipped",
-                                    reason=skipped_reason,
-                                    commit=False,
-                                )
-                                await create_trader_event(
-                                    session,
-                                    trader_id=trader_id,
-                                    event_type="decision",
-                                    severity="info",
-                                    source=signal_source,
-                                    message=skipped_reason,
-                                    payload={
-                                        "decision_id": decision_row.id,
-                                        "signal_id": signal.id,
-                                        "decision": "skipped",
-                                        "market_id": getattr(runtime_signal, "market_id", None),
-                                        "market_question": getattr(runtime_signal, "market_question", None),
-                                        "direction": getattr(runtime_signal, "direction", None),
-                                    },
-                                    commit=False,
-                                )
-                                await upsert_trader_signal_cursor(
-                                    session,
-                                    trader_id=trader_id,
-                                    last_signal_created_at=_signal_cursor_timestamp(signal),
-                                    last_signal_id=signal_id,
-                                    commit=False,
-                                )
-                                cursor_created_at = _signal_cursor_timestamp(signal)
-                                cursor_signal_id = signal_id
-                                cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
-                                processed_signals += 1
-                                prefiltered_signals += 1
-                                prefiltered_by_reason["shared_strategy_eligibility"] = (
-                                    prefiltered_by_reason.get("shared_strategy_eligibility", 0) + 1
-                                )
-                                continue
-                    if strict_ws_pricing_enforced and signal_source in ("crypto", "scanner"):
+                    if strict_ws_pricing_enforced and signal_source == "crypto":
                         effective_strict_sources: list[str] = []
                         for raw_source in (strategy_params.get("strict_ws_price_sources") or strict_ws_price_sources):
                             normalized_source = str(raw_source or "").strip().lower()
                             if normalized_source and normalized_source not in effective_strict_sources:
                                 effective_strict_sources.append(normalized_source)
-                        if signal_source == "scanner":
-                            if "redis_strict" not in effective_strict_sources:
-                                effective_strict_sources.append("redis_strict")
                         effective_source_set = set(effective_strict_sources)
                         effective_max_age_ms = max(
                             25,
@@ -5454,24 +5305,6 @@ async def _run_trader_once(
                             and live_age_ms is not None
                             and live_age_ms <= effective_max_age_ms
                         )
-                        if not strict_context_ok and signal_source == "scanner":
-                            snapshot_live_context = _build_scanner_signal_market_snapshot_live_context(signal)
-                            if snapshot_live_context:
-                                live_context = dict(snapshot_live_context)
-                                live_source = str(
-                                    live_context.get("market_data_source")
-                                    or live_context.get("live_selected_price_source")
-                                    or ""
-                                ).strip().lower()
-                                live_price = safe_float(live_context.get("live_selected_price"), None)
-                                live_age_ms = safe_float(live_context.get("market_data_age_ms"), None)
-                                strict_context_ok = (
-                                    live_source in effective_source_set
-                                    and live_price is not None
-                                    and live_price > 0.0
-                                    and live_age_ms is not None
-                                    and live_age_ms <= effective_max_age_ms
-                                )
                         if not strict_context_ok:
                             live_reason_parts: list[str] = []
                             live_reason_parts.append(f"source={live_source or 'unknown'}")
@@ -6238,13 +6071,18 @@ async def _run_trader_once(
                             portfolio_allocator = _evaluate_portfolio
 
                     _pre_gate_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
-                    _pre_gate_blocked = (
+                    _pre_gate_occupied = (
                         _pre_gate_market_id
                         and not allow_averaging
                         and (
-                            _pre_gate_market_id in open_market_ids
+                            _pre_gate_market_id in occupied_market_ids
                             or _pre_gate_market_id in intra_cycle_seen_market_ids
                         )
+                        and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
+                    )
+                    _pre_gate_reentry_cooldown = (
+                        _pre_gate_market_id
+                        and _pre_gate_market_id in reentry_cooldown_market_ids
                         and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
                     # No-fill cooldown: skip markets that recently failed with FAK no-fill
@@ -6256,8 +6094,7 @@ async def _run_trader_once(
                         and _nofill_expiry > _time_mod.monotonic()
                         and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
-                    if _nofill_blocked:
-                        _pre_gate_blocked = True
+                    _pre_gate_blocked = bool(_pre_gate_occupied or _pre_gate_reentry_cooldown or _nofill_blocked)
 
                     if _pre_gate_blocked and _nofill_blocked:
                         gate_result = {
@@ -6277,10 +6114,28 @@ async def _run_trader_once(
                                 }
                             ],
                         }
+                    elif _pre_gate_reentry_cooldown:
+                        gate_result = {
+                            "final_decision": "blocked",
+                            "final_reason": "Reentry cooldown: market recently closed (pre-gate)",
+                            "score": getattr(decision_obj, "score", None),
+                            "size_usd": getattr(decision_obj, "size_usd", None),
+                            "checks_payload": checks_payload,
+                            "risk_snapshot": None,
+                            "strategy_decision": str(getattr(decision_obj, "decision", "blocked") or "blocked"),
+                            "strategy_reason": str(getattr(decision_obj, "reason", "") or ""),
+                            "platform_gates": [
+                                {
+                                    "gate": "reentry_cooldown_pre_gate",
+                                    "passed": False,
+                                    "reason": "Market is in reentry cooldown (pre-gate)",
+                                }
+                            ],
+                        }
                     elif _pre_gate_blocked:
                         gate_result = {
                             "final_decision": "blocked",
-                            "final_reason": "Stacking guard: market already open (pre-gate)",
+                            "final_reason": "Stacking guard: market already occupied (pre-gate)",
                             "score": getattr(decision_obj, "score", None),
                             "size_usd": getattr(decision_obj, "size_usd", None),
                             "checks_payload": checks_payload,
@@ -6291,7 +6146,7 @@ async def _run_trader_once(
                                 {
                                     "gate": "stacking_guard_pre_gate",
                                     "passed": False,
-                                    "reason": "Market already open (pre-gate)",
+                                    "reason": "Market already occupied (pre-gate)",
                                 }
                             ],
                         }
@@ -6306,7 +6161,7 @@ async def _run_trader_once(
                             global_limits=global_limits,
                             effective_risk_limits=effective_risk_limits,
                             allow_averaging=allow_averaging,
-                            open_market_ids=open_market_ids | intra_cycle_seen_market_ids,
+                            occupied_market_ids=occupied_market_ids | intra_cycle_seen_market_ids,
                             pending_live_exit_count=pending_live_exit_count,
                             pending_live_exit_summary=pending_live_exit_summary,
                             pending_live_exit_max_allowed=pending_live_exit_max_allowed,
@@ -6326,6 +6181,98 @@ async def _run_trader_once(
                     strategy_payload = (
                         dict(decision_obj.payload) if isinstance(decision_obj.payload, dict) else {}
                     )
+                    freshness_gate = next(
+                        (
+                            gate
+                            for gate in gate_result["platform_gates"]
+                            if isinstance(gate, dict) and str(gate.get("gate") or "") == "market_data_freshness"
+                        ),
+                        None,
+                    )
+                    live_revalidation_gate = next(
+                        (
+                            gate
+                            for gate in gate_result["platform_gates"]
+                            if isinstance(gate, dict) and str(gate.get("gate") or "") == "live_market_revalidation"
+                        ),
+                        None,
+                    )
+                    freshness_payload = (
+                        dict(freshness_gate.get("payload") or {})
+                        if isinstance(freshness_gate, dict) and isinstance(freshness_gate.get("payload"), dict)
+                        else {}
+                    )
+                    freshness_status = str((freshness_gate or {}).get("status") or "").strip().lower()
+                    if freshness_status not in {"passed", "blocked"}:
+                        live_revalidation_status = str((live_revalidation_gate or {}).get("status") or "").strip().lower()
+                        if live_revalidation_status == "blocked":
+                            freshness_status = "blocked"
+                            if not freshness_payload:
+                                freshness_payload = (
+                                    dict(live_revalidation_gate.get("payload") or {})
+                                    if isinstance(live_revalidation_gate, dict)
+                                    and isinstance(live_revalidation_gate.get("payload"), dict)
+                                    else {}
+                                )
+                    freshness_source = str(freshness_payload.get("source") or signal_source or "").strip().lower()
+                    order_status = None
+                    if final_decision == "selected":
+                        if _pre_gate_market_id:
+                            intra_cycle_seen_market_ids.add(_pre_gate_market_id)
+
+                        # ── DB-level stacking verification before execution ──
+                        # Final authoritative check against the database before
+                        # spending real money.  The hot-state pre-gate is fast but
+                        # can miss entries during reseed or after wallet_absent_close.
+                        if _pre_gate_market_id and not allow_averaging and run_mode == "live":
+                            _db_stacking_exists = (
+                                await session.execute(
+                                    select(func.count()).select_from(TraderOrder).where(
+                                        TraderOrder.trader_id == trader_id,
+                                        TraderOrder.market_id == _pre_gate_market_id,
+                                        TraderOrder.mode == "live",
+                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
+                                            ("submitted", "executed", "open")
+                                        ),
+                                    )
+                                )
+                            ).scalar_one()
+                            if _db_stacking_exists > 0:
+                                final_decision = "blocked"
+                                final_reason = "Stacking guard: market already occupied (DB verification)"
+                                checks_payload = list(checks_payload)
+                                checks_payload.append(
+                                    {
+                                        "check_key": "stacking_guard_db_verification",
+                                        "check_label": "Stacking guard",
+                                        "passed": False,
+                                        "score": None,
+                                        "detail": "Market already occupied by an open live order in DB verification.",
+                                        "payload": {
+                                            "market_id": _pre_gate_market_id,
+                                            "existing_live_orders": int(_db_stacking_exists),
+                                            "allow_averaging": False,
+                                        },
+                                    }
+                                )
+                                gate_result["platform_gates"] = list(gate_result["platform_gates"])
+                                gate_result["platform_gates"].append(
+                                    {
+                                        "gate": "stacking_guard_db_verification",
+                                        "passed": False,
+                                        "reason": "Market already occupied (DB verification)",
+                                        "payload": {
+                                            "market_id": _pre_gate_market_id,
+                                            "existing_live_orders": int(_db_stacking_exists),
+                                        },
+                                    }
+                                )
+                                logger.warning(
+                                    "DB stacking guard blocked order that passed hot-state check "
+                                    "trader=%s market=%s existing_orders=%d",
+                                    trader_id, _pre_gate_market_id, _db_stacking_exists,
+                                )
+
                     execution_plan_override = strategy_payload.get("execution_plan_override")
                     execution_plan_override_applied = False
                     if final_decision == "selected" and isinstance(execution_plan_override, dict):
@@ -6452,40 +6399,6 @@ async def _run_trader_once(
                         checks=checks_payload,
                         commit=False,
                     )
-                    freshness_gate = next(
-                        (
-                            gate
-                            for gate in gate_result["platform_gates"]
-                            if isinstance(gate, dict) and str(gate.get("gate") or "") == "market_data_freshness"
-                        ),
-                        None,
-                    )
-                    live_revalidation_gate = next(
-                        (
-                            gate
-                            for gate in gate_result["platform_gates"]
-                            if isinstance(gate, dict) and str(gate.get("gate") or "") == "live_market_revalidation"
-                        ),
-                        None,
-                    )
-                    freshness_payload = (
-                        dict(freshness_gate.get("payload") or {})
-                        if isinstance(freshness_gate, dict) and isinstance(freshness_gate.get("payload"), dict)
-                        else {}
-                    )
-                    freshness_status = str((freshness_gate or {}).get("status") or "").strip().lower()
-                    if freshness_status not in {"passed", "blocked"}:
-                        live_revalidation_status = str((live_revalidation_gate or {}).get("status") or "").strip().lower()
-                        if live_revalidation_status == "blocked":
-                            freshness_status = "blocked"
-                            if not freshness_payload:
-                                freshness_payload = (
-                                    dict(live_revalidation_gate.get("payload") or {})
-                                    if isinstance(live_revalidation_gate, dict)
-                                    and isinstance(live_revalidation_gate.get("payload"), dict)
-                                    else {}
-                                )
-                    freshness_source = str(freshness_payload.get("source") or signal_source or "").strip().lower()
                     if freshness_status in {"passed", "blocked"} and freshness_source in {"scanner", "crypto"}:
                         freshness_age_ms = safe_float(freshness_payload.get("age_ms"), None)
                         freshness_max_age_ms = safe_float(freshness_payload.get("max_age_ms"), None)
@@ -6519,38 +6432,38 @@ async def _run_trader_once(
                             commit=False,
                         )
 
-                    order_status = None
                     if final_decision == "selected":
-                        if _pre_gate_market_id:
-                            intra_cycle_seen_market_ids.add(_pre_gate_market_id)
-
-                        # ── DB-level stacking verification before execution ──
-                        # Final authoritative check against the database before
-                        # spending real money.  The hot-state pre-gate is fast but
-                        # can miss entries during reseed or after wallet_absent_close.
-                        if _pre_gate_market_id and not allow_averaging and run_mode == "live":
-                            _db_stacking_exists = (
-                                await session.execute(
-                                    select(func.count()).select_from(TraderOrder).where(
-                                        TraderOrder.trader_id == trader_id,
-                                        TraderOrder.market_id == _pre_gate_market_id,
-                                        TraderOrder.mode == "live",
-                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
-                                            ("submitted", "executed", "open")
-                                        ),
-                                    )
-                                )
-                            ).scalar_one()
-                            if _db_stacking_exists > 0:
-                                final_decision = "blocked"
-                                final_reason = "Stacking guard: market already open (DB verification)"
-                                logger.warning(
-                                    "DB stacking guard blocked order that passed hot-state check "
-                                    "trader=%s market=%s existing_orders=%d",
-                                    trader_id, _pre_gate_market_id, _db_stacking_exists,
-                                )
-
-                    if final_decision == "selected":
+                        if run_mode == "live":
+                            await set_trade_signal_status(
+                                session,
+                                signal_id=signal_id,
+                                status="selected",
+                                commit=False,
+                            )
+                            await record_signal_consumption(
+                                session,
+                                trader_id=trader_id,
+                                signal_id=signal_id,
+                                decision_id=decision_row.id,
+                                outcome="claiming",
+                                reason="Claimed for live submission",
+                                payload={
+                                    "phase": "pre_submit_claim",
+                                    "source_key": signal_source,
+                                    "strategy_key": resolved_strategy_key,
+                                },
+                                commit=False,
+                            )
+                            await upsert_trader_signal_cursor(
+                                session,
+                                trader_id=trader_id,
+                                last_signal_created_at=_signal_cursor_timestamp(signal),
+                                last_signal_id=signal_id,
+                                commit=False,
+                            )
+                            cursor_created_at = _signal_cursor_timestamp(signal)
+                            cursor_signal_id = signal_id
+                            cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
                         await _commit_with_retry(session)
                         submit_started_at = utcnow()
                         async with release_conn(session):
@@ -6722,7 +6635,7 @@ async def _run_trader_once(
                                 effective_open_positions = max(open_positions, open_order_count)
                                 opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                                 if opened_market_id:
-                                    open_market_ids.add(opened_market_id)
+                                    occupied_market_ids.add(opened_market_id)
                                 intra_cycle_committed_usd += size_usd
                         else:
                             normalized_order_status = str(submit_result.status or "").strip().lower()
@@ -6826,7 +6739,7 @@ async def _run_trader_once(
                                 _nofill_counts.pop(_nf_success_key, None)
 
                                 for _co in getattr(submit_result, "created_orders", None) or []:
-                                    hot_state.record_order_created(
+                                    hot_state.upsert_active_order(
                                         trader_id=trader_id,
                                         mode=run_mode,
                                         order_id=str(_co.get("order_id", "")),
@@ -6854,7 +6767,7 @@ async def _run_trader_once(
                                 effective_open_positions = max(open_positions, open_order_count)
                                 opened_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                                 if opened_market_id:
-                                    open_market_ids.add(opened_market_id)
+                                    occupied_market_ids.add(opened_market_id)
                                 intra_cycle_committed_usd += size_usd
                         if final_decision == "failed" and order_status in {"failed", "cancelled", "expired"}:
                             await create_trader_event(
@@ -7277,6 +7190,7 @@ async def _run_trader_once_with_timeout(
     if process_signals and run_mode == "live":
         timeout = max(_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS, timeout)
     trader_id = str(trader.get("id") or "")
+    has_runtime_trigger = bool(trigger_signal_ids_by_source) or bool(trigger_signal_snapshots_by_source)
     existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
     if existing is not None and not existing.done():
         # Hard-kill tasks stuck far too long (prevents indefinite DB
@@ -7296,41 +7210,38 @@ async def _run_trader_once_with_timeout(
             _skip_log_suppressed.pop(trader_id, None)
             # Fall through to start a fresh task below
         else:
-            has_runtime_trigger = bool(trigger_signal_ids_by_source) or bool(trigger_signal_snapshots_by_source)
-            # Rate-limit the "still finishing" warnings to once per minute per trader
-            now_mono = time.monotonic()
-            last_log = _skip_log_last_at.get(trader_id, 0.0)
-            warning_eligible = stuck_seconds >= _OVERLAP_WARNING_MIN_STUCK_SECONDS
-            if warning_eligible and now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
-                suppressed = _skip_log_suppressed.get(trader_id, 0)
-                suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
-                if process_signals and has_runtime_trigger:
-                    _queue_pending_runtime_cycle(
-                        trader=trader,
-                        control=control,
-                        process_signals=process_signals,
-                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                        trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                        timeout_seconds=requested_timeout,
+            existing_process_signals = bool(_inflight_trader_cycle_process_signals.get(trader_id, False))
+            should_preempt_existing = bool(process_signals and has_runtime_trigger and not existing_process_signals)
+            if should_preempt_existing:
+                existing.cancel()
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(existing),
+                        timeout=min(1.0, _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS),
                     )
+                except asyncio.TimeoutError:
+                    _abandoned_trader_cycle_tasks.add(existing)
+                    existing.add_done_callback(_discard_abandoned_trader_cycle)
+                    _clear_inflight_trader_cycle_task(trader_id, existing)
                     logger.warning(
-                        "Queued pending runtime trigger because prior trader run is still finishing for trader=%s stuck=%.0fs%s",
+                        "Preempted maintenance-only trader cycle after cancel-grace expiry trader=%s",
                         trader_id,
-                        stuck_seconds,
-                        suffix,
+                    )
+                except asyncio.CancelledError:
+                    _clear_inflight_trader_cycle_task(trader_id, existing)
+                except Exception as exc:
+                    _clear_inflight_trader_cycle_task(trader_id, existing)
+                    logger.warning(
+                        "Maintenance-only trader cycle raised during runtime-trigger preemption trader=%s",
+                        trader_id=trader_id,
+                        exc_info=exc,
                     )
                 else:
-                    logger.warning(
-                        "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s stuck=%.0fs%s",
-                        trader_id,
-                        process_signals,
-                        stuck_seconds,
-                        suffix,
-                    )
-                _skip_log_last_at[trader_id] = now_mono
-                _skip_log_suppressed[trader_id] = 0
-            else:
-                if process_signals and has_runtime_trigger:
+                    _clear_inflight_trader_cycle_task(trader_id, existing)
+                existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
+                if existing is None or existing.done():
+                    pass
+                else:
                     _queue_pending_runtime_cycle(
                         trader=trader,
                         control=control,
@@ -7339,9 +7250,53 @@ async def _run_trader_once_with_timeout(
                         trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
                         timeout_seconds=requested_timeout,
                     )
-                if warning_eligible:
-                    _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
-            return 0, 0, 0
+                    return 0, 0, 0
+            else:
+            # Rate-limit the "still finishing" warnings to once per minute per trader
+                now_mono = time.monotonic()
+                last_log = _skip_log_last_at.get(trader_id, 0.0)
+                warning_eligible = stuck_seconds >= _OVERLAP_WARNING_MIN_STUCK_SECONDS
+                if warning_eligible and now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
+                    suppressed = _skip_log_suppressed.get(trader_id, 0)
+                    suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
+                    if process_signals and has_runtime_trigger:
+                        _queue_pending_runtime_cycle(
+                            trader=trader,
+                            control=control,
+                            process_signals=process_signals,
+                            trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                            trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                            timeout_seconds=requested_timeout,
+                        )
+                        logger.warning(
+                            "Queued pending runtime trigger because prior trader run is still finishing for trader=%s stuck=%.0fs%s",
+                            trader_id,
+                            stuck_seconds,
+                            suffix,
+                        )
+                    else:
+                        logger.warning(
+                            "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s stuck=%.0fs%s",
+                            trader_id,
+                            process_signals,
+                            stuck_seconds,
+                            suffix,
+                        )
+                    _skip_log_last_at[trader_id] = now_mono
+                    _skip_log_suppressed[trader_id] = 0
+                else:
+                    if process_signals and has_runtime_trigger:
+                        _queue_pending_runtime_cycle(
+                            trader=trader,
+                            control=control,
+                            process_signals=process_signals,
+                            trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                            trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                            timeout_seconds=requested_timeout,
+                        )
+                    if warning_eligible:
+                        _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
+                return 0, 0, 0
 
     task = asyncio.create_task(
         _run_trader_once(
@@ -7357,6 +7312,7 @@ async def _run_trader_once_with_timeout(
     if trader_id:
         _inflight_trader_cycle_tasks[trader_id] = task
         _inflight_trader_cycle_start[trader_id] = time.monotonic()
+        _inflight_trader_cycle_process_signals[trader_id] = bool(process_signals)
         task.add_done_callback(
             lambda done_task, current_trader_id=trader_id: _handle_trader_cycle_task_done(
                 current_trader_id,
@@ -7564,8 +7520,9 @@ async def run_runtime_trigger_loop(*, lane: str = _LANE_GENERAL) -> None:
             )
             if not control or not specs:
                 continue
-            tasks = [
-                asyncio.create_task(
+            for spec in specs:
+                trader_id = str(spec["trader"].get("id") or "")
+                task = asyncio.create_task(
                     _run_trader_once_with_timeout(
                         spec["trader"],
                         control,
@@ -7573,21 +7530,15 @@ async def run_runtime_trigger_loop(*, lane: str = _LANE_GENERAL) -> None:
                         trigger_signal_ids_by_source=spec["trigger_signal_ids_by_source"],
                         trigger_signal_snapshots_by_source=spec["trigger_signal_snapshots_by_source"],
                         timeout_seconds=trader_cycle_timeout_seconds,
+                    ),
+                    name=f"trader-runtime-dispatch-{trader_id or 'unknown'}",
+                )
+                task.add_done_callback(
+                    lambda done_task, current_trader_id=trader_id: _handle_runtime_trigger_dispatch_task_done(
+                        current_trader_id,
+                        done_task,
                     )
                 )
-                for spec in specs
-            ]
-            if tasks:
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                for idx, result in enumerate(results):
-                    if isinstance(result, BaseException):
-                        failed_trader_id = str(specs[idx]["trader"].get("id") or "")
-                        logger.warning(
-                            "Runtime trigger trader cycle raised uncaught exception for trader=%s: %s",
-                            failed_trader_id,
-                            result,
-                            exc_info=result,
-                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -7601,7 +7552,6 @@ async def run_runtime_trigger_loop(*, lane: str = _LANE_GENERAL) -> None:
 async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = True, process_runtime_triggers: bool = True) -> None:
     global _ws_auto_paused
     lane_key = str(lane or _LANE_GENERAL).strip().lower()
-    runtime_hot_path_owned_by_lane = lane_key == _LANE_GENERAL and not process_runtime_triggers
     stream_group = _stream_group_name_for_lane(lane_key)
     logger.info("Starting trader orchestrator worker loop")
 
@@ -7969,12 +7919,6 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
                         )
                     process_signals_for_trader = True
                     if manage_only_cycle or is_paused or not due:
-                        process_signals_for_trader = False
-                    if runtime_hot_path_owned_by_lane and _runtime_hot_path_owns_signal_execution(
-                        lane_key=lane_key,
-                        process_runtime_triggers=process_runtime_triggers,
-                        trader=trader,
-                    ):
                         process_signals_for_trader = False
                     trigger_signal_ids_by_source = (
                         _trigger_signal_ids_for_trader(trader, cycle_trigger) if runtime_trigger_for_trader else None

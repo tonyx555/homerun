@@ -232,7 +232,7 @@ async def _enqueue_detection_batch(
     quality_reports: Optional[dict] = None,
 ) -> tuple[str | None, int, int]:
     """Persist scanner truth and emit runtime signals directly."""
-    market_history: dict[str, list[dict]] = {}
+    batch_id = utcnow().strftime("%Y%m%d%H%M%S%f")
     effective_quality_reports: dict = dict(quality_reports or {})
     for opportunity in opportunities:
         stable_id = str(getattr(opportunity, "stable_id", None) or getattr(opportunity, "id", "") or "").strip()
@@ -240,37 +240,29 @@ async def _enqueue_detection_batch(
             strategy_instance = strategy_loader.get_instance(getattr(opportunity, "strategy", None))
             overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
             effective_quality_reports[stable_id] = quality_filter.evaluate_opportunity(opportunity, overrides=overrides)
-        for market in getattr(opportunity, "markets", None) or []:
-            if not isinstance(market, dict):
-                continue
-            history = market.get("price_history")
-            if not isinstance(history, list) or len(history) < 2:
-                continue
-            for market_id in (
-                str(market.get("id") or "").strip(),
-                str(market.get("condition_id") or market.get("conditionId") or "").strip(),
-            ):
-                if market_id and market_id not in market_history:
-                    market_history[market_id] = history
+
+    await bridge_opportunities_to_signals(
+        opportunities,
+        source="scanner",
+        quality_reports=effective_quality_reports,
+        sweep_missing=True,
+        refresh_prices=False,
+    )
+
+    try:
+        async with AsyncSessionLocal() as session:
+            await write_scanner_snapshot(
+                session,
+                opportunities,
+                {**status, "batch_kind": str(batch_kind or "scan_cycle")},
+            )
+    except Exception as exc:
+        logger.warning("Scanner snapshot persist failed after runtime publish", exc_info=exc)
 
     async with AsyncSessionLocal() as session:
-        await write_scanner_snapshot(
-            session,
-            opportunities,
-            {**status, "batch_kind": str(batch_kind or "scan_cycle")},
-            market_history=market_history or None,
-        )
-        await bridge_opportunities_to_signals(
-            session,
-            opportunities,
-            source="scanner",
-            quality_reports=effective_quality_reports,
-            sweep_missing=True,
-            refresh_prices=False,
-        )
         await clear_scan_request(session)
 
-    return utcnow().strftime("%Y%m%d%H%M%S%f"), 0, 0
+    return batch_id, 0, 0
 
 
 async def _run_scan_loop() -> None:

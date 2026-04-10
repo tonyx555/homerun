@@ -77,12 +77,18 @@ class StrategySDK:
     }
     TRADER_EXECUTION_POLICY_DEFAULTS: dict[str, Any] = {
         "allow_taker_limit_buy_above_signal": False,
+        "aggressive_limit_buy_submit_as_gtc": False,
     }
     TRADER_EXECUTION_POLICY_CONFIG_SCHEMA: dict[str, Any] = {
         "param_fields": [
             {
                 "key": "allow_taker_limit_buy_above_signal",
                 "label": "Allow Taker Limit Buy Above Signal Price",
+                "type": "boolean",
+            },
+            {
+                "key": "aggressive_limit_buy_submit_as_gtc",
+                "label": "Submit Aggressive Buy Limits As GTC",
                 "type": "boolean",
             },
         ]
@@ -1114,6 +1120,17 @@ class StrategySDK:
                 )
                 selected = True
                 break
+        for alias in (
+            "aggressive_limit_buy_submit_as_gtc",
+            "submit_aggressive_buy_limits_as_gtc",
+            "submit_taker_limit_buy_as_gtc",
+        ):
+            if alias in raw:
+                cfg["aggressive_limit_buy_submit_as_gtc"] = _coerce_bool(
+                    raw.get(alias),
+                    StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["aggressive_limit_buy_submit_as_gtc"],
+                )
+                break
 
         execution_policy = cfg.get("execution_policy")
         if not selected and isinstance(execution_policy, dict):
@@ -1129,10 +1146,25 @@ class StrategySDK:
                         StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["allow_taker_limit_buy_above_signal"],
                     )
                     break
+            for alias in (
+                "aggressive_limit_buy_submit_as_gtc",
+                "submit_aggressive_buy_limits_as_gtc",
+                "submit_taker_limit_buy_as_gtc",
+            ):
+                if alias in execution_policy:
+                    cfg["aggressive_limit_buy_submit_as_gtc"] = _coerce_bool(
+                        execution_policy.get(alias),
+                        StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["aggressive_limit_buy_submit_as_gtc"],
+                    )
+                    break
 
         cfg["allow_taker_limit_buy_above_signal"] = _coerce_bool(
             cfg.get("allow_taker_limit_buy_above_signal"),
             StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["allow_taker_limit_buy_above_signal"],
+        )
+        cfg["aggressive_limit_buy_submit_as_gtc"] = _coerce_bool(
+            cfg.get("aggressive_limit_buy_submit_as_gtc"),
+            StrategySDK.TRADER_EXECUTION_POLICY_DEFAULTS["aggressive_limit_buy_submit_as_gtc"],
         )
         return cfg
 
@@ -1141,6 +1173,12 @@ class StrategySDK:
         cfg = params if isinstance(params, dict) else {}
         normalized = StrategySDK.validate_trader_execution_policy_config(cfg)
         return _coerce_bool(normalized.get("allow_taker_limit_buy_above_signal"), default)
+
+    @staticmethod
+    def aggressive_limit_buy_submit_as_gtc(params: Any, *, default: bool = False) -> bool:
+        cfg = params if isinstance(params, dict) else {}
+        normalized = StrategySDK.validate_trader_execution_policy_config(cfg)
+        return _coerce_bool(normalized.get("aggressive_limit_buy_submit_as_gtc"), default)
 
     @staticmethod
     def trader_filter_config_schema() -> dict[str, Any]:

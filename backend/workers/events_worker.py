@@ -707,7 +707,6 @@ async def _run_loop() -> None:
                 if bool(getattr(settings, "EVENTS_EMIT_TRADE_SIGNALS", False)):
                     async with AsyncSessionLocal() as session:
                         emitted_signals = await bridge_opportunities_to_signals(
-                            session,
                             opportunities,
                             source="events",
                             sweep_missing=True,

@@ -152,6 +152,44 @@ async def test_execute_live_order_aggressive_quote_respects_max_execution_price(
 
 
 @pytest.mark.asyncio
+async def test_execute_live_order_aggressive_buy_can_submit_as_gtc(monkeypatch):
+    ensure_mock = AsyncMock(return_value=True)
+    place_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            status=OrderStatus.OPEN,
+            error_message=None,
+            average_fill_price=0.0,
+            id="order-gtc",
+            clob_order_id="clob-gtc",
+            filled_size=0.0,
+        )
+    )
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "ensure_initialized", ensure_mock)
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "place_order", place_mock)
+    get_price_mock = AsyncMock(side_effect=[0.91, 0.93])
+    monkeypatch.setattr(
+        live_execution_adapter.polymarket_client,
+        "get_price",
+        get_price_mock,
+    )
+
+    result = await live_execution_adapter.execute_live_order(
+        token_id="123456789012345678901",
+        side="BUY",
+        size=10.0,
+        fallback_price=0.90,
+        time_in_force="IOC",
+        quote_aggressively=True,
+        aggressive_limit_buy_submit_as_gtc=True,
+    )
+
+    assert result.status == "open"
+    assert "aggressive_buy_submit_as_gtc" in str(result.payload.get("price_resolution") or "")
+    _, kwargs = place_mock.await_args
+    assert kwargs["order_type"].value == "GTC"
+
+
+@pytest.mark.asyncio
 async def test_live_execution_service_client_io_times_out():
     with pytest.raises(asyncio.TimeoutError):
         await live_execution_service._run_client_io(lambda: time.sleep(0.5), timeout=0.01)

@@ -221,7 +221,6 @@ async def _run_loop() -> None:
                 deduped_dispatched_opportunities.append(opp)
             async with AsyncSessionLocal() as session:
                 emitted = await bridge_opportunities_to_signals(
-                    session,
                     deduped_dispatched_opportunities,
                     source="weather",
                     sweep_missing=True,

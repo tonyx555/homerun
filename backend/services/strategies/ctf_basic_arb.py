@@ -100,11 +100,35 @@ class CTFBasicArbStrategy(BaseStrategy):
     def _build_execution_plan(
         self,
         *,
-        market: Market,
-        mode: str,
-        yes_price: float,
-        no_price: float,
-    ) -> ExecutionPlan:
+        positions: list[dict[str, Any]],
+        markets: list[Market],
+        market_roster: dict[str, Any] | None = None,
+        is_guaranteed: bool = True,
+    ) -> ExecutionPlan | None:
+        del market_roster, is_guaranteed
+        if len(markets) != 1 or not positions:
+            return None
+        market = markets[0]
+        mode: str | None = None
+        yes_price: float | None = None
+        no_price: float | None = None
+        for position in positions:
+            action = str(position.get("action") or position.get("side") or "").strip().upper()
+            outcome = str(position.get("outcome") or "").strip().upper()
+            price = safe_float(position.get("price"), None)
+            if action == "SPLIT":
+                mode = "split_sell"
+                continue
+            if action == "MERGE":
+                mode = "buy_merge"
+                continue
+            if action in {"BUY", "SELL"} and outcome == "YES" and price is not None:
+                yes_price = float(price)
+                continue
+            if action in {"BUY", "SELL"} and outcome == "NO" and price is not None:
+                no_price = float(price)
+        if mode not in {"split_sell", "buy_merge"} or yes_price is None or no_price is None:
+            return None
         condition_id = self._condition_market_id(market)
         yes_token = market.clob_token_ids[0] if len(market.clob_token_ids) > 0 else None
         no_token = market.clob_token_ids[1] if len(market.clob_token_ids) > 1 else None
@@ -294,12 +318,6 @@ class CTFBasicArbStrategy(BaseStrategy):
         if opportunity is None:
             return None
 
-        opportunity.execution_plan = self._build_execution_plan(
-            market=market,
-            mode="split_sell",
-            yes_price=yes_bid,
-            no_price=no_bid,
-        )
         opportunity.risk_factors = [
             "Structural CTF split/sell arbitrage with full-bundle execution required.",
             f"Conservative proceeds use live bids only: YES ${yes_bid:.3f}, NO ${no_bid:.3f}.",
@@ -388,12 +406,6 @@ class CTFBasicArbStrategy(BaseStrategy):
         if opportunity is None:
             return None
 
-        opportunity.execution_plan = self._build_execution_plan(
-            market=market,
-            mode="buy_merge",
-            yes_price=yes_ask,
-            no_price=no_ask,
-        )
         opportunity.risk_factors = [
             "Structural CTF buy/merge arbitrage with full-bundle execution required.",
             f"Conservative cost uses live asks only: YES ${yes_ask:.3f}, NO ${no_ask:.3f}.",

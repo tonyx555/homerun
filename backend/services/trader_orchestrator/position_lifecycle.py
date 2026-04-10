@@ -53,6 +53,7 @@ _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
+_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 3.0
 _MARKET_INFO_LOAD_TIMEOUT_SECONDS = 4.0
 _ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 3.0
 _RECONCILE_TIMING_WARN_SECONDS = 20.0
@@ -2944,28 +2945,26 @@ async def reconcile_live_positions(
     reverse_signal_ids_by_source: dict[str, list[str]] = {}
 
     candidate_ids = {str(row.id) for row in candidates}
-    terminal_rows = list(
-        (
-            await session.execute(
-                select(TraderOrder).where(
-                    TraderOrder.trader_id == trader_id,
-                    TraderOrder.mode == "live",
-                    TraderOrder.status.in_(("closed_win", "closed_loss", "cancelled", "failed", "rejected", "error")),
-                )
-            )
-        )
-        .scalars()
-        .all()
+    terminal_age_expr = func.coalesce(
+        TraderOrder.updated_at,
+        TraderOrder.executed_at,
+        TraderOrder.created_at,
+    )
+    terminal_stmt = select(TraderOrder).where(
+        TraderOrder.trader_id == trader_id,
+        TraderOrder.mode == "live",
+        TraderOrder.status.in_(("closed_win", "closed_loss", "cancelled", "failed", "rejected", "error")),
     )
     if max_age_hours is not None:
         cutoff = now - timedelta(hours=max(1, int(max_age_hours)))
-        terminal_rows = [
-            row
-            for row in terminal_rows
-            if (row.executed_at or row.updated_at or row.created_at) is not None
-            and (row.executed_at or row.updated_at or row.created_at) <= cutoff
-        ]
+        terminal_stmt = terminal_stmt.where(terminal_age_expr <= cutoff)
     else:
+        audit_cutoff = now_naive - timedelta(
+            hours=max(_TERMINAL_REOPEN_LOOKBACK_HOURS, _NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS)
+        )
+        terminal_stmt = terminal_stmt.where(terminal_age_expr >= audit_cutoff)
+    terminal_rows = list(((await session.execute(terminal_stmt)).scalars().all()))
+    if max_age_hours is None:
         terminal_rows = [row for row in terminal_rows if _terminal_row_requires_reopen_audit(row, now_naive)]
     terminal_rows = _dedupe_live_authority_rows(terminal_rows)
 
@@ -4832,7 +4831,7 @@ async def reconcile_live_positions(
                                 resolve_live_price=rapid_retry_exit,
                                 enforce_fallback_bound=True,
                             ),
-                            timeout=_LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
+                            timeout=_LIVE_EXIT_RETRY_TIMEOUT_SECONDS,
                         )
                     if exec_result.status in {"executed", "open", "submitted"}:
                         logger.info(

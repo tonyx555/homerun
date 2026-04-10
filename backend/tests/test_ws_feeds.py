@@ -1,5 +1,8 @@
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -35,3 +38,21 @@ def test_polymarket_book_update_latency_uses_epoch_time_and_clamps_negative():
         1_700_000_001.000,
     )
     assert feed.stats.last_latency_ms == 0.0
+
+
+@pytest.mark.asyncio
+async def test_feed_manager_start_is_idempotent_under_concurrency(monkeypatch):
+    manager = ws_feeds.FeedManager()
+    manager._polymarket_feed.start = AsyncMock(return_value=None)
+    manager._kalshi_feed.start = AsyncMock(return_value=None)
+    marker = object()
+    monkeypatch.setattr(
+        "services.position_mark_state.get_position_mark_state",
+        lambda: SimpleNamespace(on_price_update=marker, _on_marks_changed=None),
+    )
+
+    await asyncio.gather(manager.start(), manager.start(), manager.start())
+
+    manager._polymarket_feed.start.assert_awaited_once()
+    manager._kalshi_feed.start.assert_awaited_once()
+    assert manager._cache._on_update_callbacks.count(marker) == 1

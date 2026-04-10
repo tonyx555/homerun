@@ -6644,12 +6644,19 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           throw new Error('Live preflight did not pass. Review checks before live launch.')
         }
         const armed = await armTraderOrchestratorLiveStart({ preflight_id: preflight.preflight_id })
-        return startTraderOrchestratorLive({ arm_token: armed.arm_token, mode: 'live' })
+        return startTraderOrchestratorLive({
+          arm_token: armed.arm_token,
+          mode: 'live',
+          selected_account_id: selectedAccountId,
+        })
       }
       if (!selectedSandboxAccount?.id) {
         throw new Error('No sandbox account is selected for shadow mode.')
       }
-      return startTraderOrchestrator({ mode: 'shadow' })
+      return startTraderOrchestrator({
+        mode: 'shadow',
+        selected_account_id: selectedSandboxAccount.id,
+      })
     },
     onMutate: () => {
       setControlActionError(null)
@@ -7479,15 +7486,34 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     ? killSwitchSwitchValue ? 'BLOCKING...' : 'OPENING...'
     : killSwitchOn ? 'BLOCKED' : 'OPEN'
   const orchestratorEnabled = Boolean(orchestratorControl?.is_enabled) && !Boolean(orchestratorControl?.is_paused)
+  const orchestratorBoundSelectedAccountId = typeof orchestratorControl?.settings?.selected_account_id === 'string'
+    ? orchestratorControl.settings.selected_account_id.trim()
+    : ''
+  const orchestratorBoundMode = String(orchestratorControl?.mode || '').trim().toLowerCase()
+  const orchestratorSelectedAccountMismatch =
+    orchestratorEnabled &&
+    Boolean(selectedAccountId) &&
+    Boolean(orchestratorBoundSelectedAccountId) &&
+    selectedAccountId !== orchestratorBoundSelectedAccountId
+  const orchestratorSelectedModeMismatch =
+    orchestratorEnabled &&
+    Boolean(selectedAccountId) &&
+    Boolean(orchestratorBoundMode) &&
+    orchestratorBoundMode !== selectedAccountMode
   const workerActivity = String(worker?.current_activity || '').trim().toLowerCase()
   const orchestratorWorkerRunning = Boolean(worker?.running)
   const orchestratorRunning = orchestratorEnabled && orchestratorWorkerRunning
-  const orchestratorControlMismatch = orchestratorWorkerRunning && !orchestratorEnabled
+  const orchestratorControlMismatch =
+    orchestratorEnabled &&
+    !orchestratorWorkerRunning &&
+    !workerActivity.includes('start command queued') &&
+    !workerActivity.includes('live start command queued') &&
+    !workerActivity.startsWith('blocked')
   const orchestratorStartStopActive = orchestratorEnabled
   const orchestratorBlocked = orchestratorEnabled && !orchestratorWorkerRunning && workerActivity.startsWith('blocked')
   const orchestratorStatusLabel = orchestratorBlocked
     ? 'BLOCKED'
-    : orchestratorWorkerRunning
+    : orchestratorRunning
       ? 'RUNNING'
       : 'STOPPED'
   const orchestratorStartRequestPending =
@@ -7506,6 +7532,18 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     createTraderMutation.isPending ||
     saveTraderMutation.isPending ||
     deleteTraderMutation.isPending
+
+  useEffect(() => {
+    if (!orchestratorEnabled || stopByModeMutation.isPending) return
+    if (!orchestratorSelectedAccountMismatch && !orchestratorSelectedModeMismatch) return
+    stopByModeMutation.mutate()
+    setControlActionError('Stopped orchestrator because the global selected account no longer matches the running trading mode.')
+  }, [
+    orchestratorEnabled,
+    orchestratorSelectedAccountMismatch,
+    orchestratorSelectedModeMismatch,
+    stopByModeMutation,
+  ])
   const globalSettingsBusy = updateGlobalSettingsMutation.isPending
 
   useEffect(() => {
@@ -9430,7 +9468,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     !(selectedAccountIsLive && killSwitchOn)
   const canStopOrchestrator = !controlBusy && orchestratorStartStopActive
   const startStopIsConfigured = orchestratorStartStopActive
-  const startStopIsRunning = orchestratorWorkerRunning
+  const startStopIsRunning = orchestratorRunning
   const startStopIsStarting =
     orchestratorStartRequestPending ||
     (orchestratorEnabled && !startStopIsRunning && workerActivity.includes('start command queued'))
@@ -10011,7 +10049,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
               'w-1.5 h-1.5 rounded-full',
               worker?.last_error
                 ? 'bg-amber-400'
-                : orchestratorWorkerRunning
+                : orchestratorRunning
                   ? 'bg-emerald-500'
                   : 'bg-amber-400'
             )}
@@ -10023,7 +10061,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         <div className="flex items-center gap-1.5">
           <Badge
             className="h-5 px-1.5 text-[10px]"
-            variant={orchestratorBlocked ? 'destructive' : orchestratorWorkerRunning ? 'default' : 'secondary'}
+            variant={orchestratorBlocked ? 'destructive' : orchestratorRunning ? 'default' : 'secondary'}
           >
             {orchestratorStatusLabel}
           </Badge>

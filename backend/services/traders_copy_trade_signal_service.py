@@ -470,7 +470,6 @@ class TradersCopyTradeSignalService:
 
         async with AsyncSessionLocal() as session:
             await bridge_opportunities_to_signals(
-                session,
                 opportunities,
                 source="traders",
                 signal_type_override="copy_trade",

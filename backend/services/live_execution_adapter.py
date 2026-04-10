@@ -75,6 +75,7 @@ async def execute_live_order(
     max_execution_price: float | None = None,
     min_execution_price: float | None = None,
     allow_taker_limit_buy_above_signal: bool = False,
+    aggressive_limit_buy_submit_as_gtc: bool = False,
     skip_buy_pre_submit_gate: bool = False,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
@@ -115,6 +116,7 @@ async def execute_live_order(
         "max_execution_price": max_execution,
         "min_execution_price": min_execution,
         "allow_taker_limit_buy_above_signal": bool(allow_taker_limit_buy_above_signal),
+        "aggressive_limit_buy_submit_as_gtc": bool(aggressive_limit_buy_submit_as_gtc),
     }
 
     if not normalized_token_id:
@@ -284,6 +286,15 @@ async def execute_live_order(
             order_type = OrderType(time_in_force.strip().upper())
         except ValueError:
             order_type = OrderType.GTC
+        if (
+            normalized_side == OrderSide.BUY
+            and bool(aggressive_quote)
+            and bool(aggressive_limit_buy_submit_as_gtc)
+            and not post_only
+            and order_type in {OrderType.IOC, OrderType.FAK, OrderType.FOK}
+        ):
+            order_type = OrderType.GTC
+            price_resolution = f"{price_resolution}|aggressive_buy_submit_as_gtc"
 
         order = await live_execution_service.place_order(
             token_id=normalized_token_id,
@@ -355,6 +366,7 @@ async def execute_live_order(
                 "submission": "exception",
                 "resolved_price": resolved_price,
                 "price_resolution": price_resolution,
+                "submitted_order_type": str(getattr(order_type, "value", order_type) or ""),
             },
         )
 
@@ -377,6 +389,7 @@ async def execute_live_order(
             "price_resolution": price_resolution,
             "order_id": order_id,
             "clob_order_id": clob_order_id,
+            "submitted_order_type": str(getattr(order_type, "value", order_type) or ""),
             "trading_status": str(getattr(getattr(order, "status", None), "value", getattr(order, "status", "")) or ""),
             "filled_size": safe_float(getattr(order, "filled_size", None), 0.0) or 0.0,
             "average_fill_price": average_fill,

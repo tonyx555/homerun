@@ -26,6 +26,7 @@ from models.database import (
     OpportunityEvent,
     OpportunityHistory,
     OpportunityLifetime,
+    ScannerMarketHistory,
     OpportunityState,
     ScannerRun,
     ScannerSnapshot,
@@ -153,12 +154,12 @@ async def _flush_scanner_data(session: AsyncSession) -> dict[str, int]:
     snapshot_opportunities = len(snapshot.opportunities_json or []) if snapshot else 0
     if snapshot is not None:
         snapshot.opportunities_json = []
-        snapshot.market_history_json = {}
         snapshot.last_scan_at = None
         snapshot.current_activity = "Scanner snapshot cleared by manual maintenance flush."
 
     return {
         "scanner_snapshot_opportunities": snapshot_opportunities,
+        "scanner_market_history_rows": await _delete_rows(session, ScannerMarketHistory),
         "opportunity_events": await _delete_rows(session, OpportunityEvent),
         "opportunity_state": await _delete_rows(session, OpportunityState),
         "scanner_runs": await _delete_rows(session, ScannerRun),

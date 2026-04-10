@@ -1158,9 +1158,9 @@ async def run_evaluate_backtest(
             else {}
         )
         platform_allow_averaging = bool(platform_overrides.get("allow_averaging", False))
-        platform_open_market_ids = {
+        platform_occupied_market_ids = {
             str(value or "").strip()
-            for value in (platform_overrides.get("open_market_ids") or [])
+            for value in (platform_overrides.get("occupied_market_ids") or [])
             if str(value or "").strip()
         }
 
@@ -1228,7 +1228,7 @@ async def run_evaluate_backtest(
                     global_limits=platform_global_risk,
                     effective_risk_limits=platform_risk_limits,
                     allow_averaging=platform_allow_averaging,
-                    open_market_ids=platform_open_market_ids,
+            occupied_market_ids=platform_occupied_market_ids,
                     portfolio_allocator=None,
                     risk_evaluator=_backtest_risk_evaluator,
                     invoke_hooks=False,

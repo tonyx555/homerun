@@ -2154,6 +2154,7 @@ class LiveExecutionService:
 
         snapshots: dict[str, dict[str, Any]] = {}
         provider_fetch_ok = False
+        provider_bulk_fetch_failed = False
         per_order_not_found: set[str] = set()
 
         def _ingest_open_orders(response_payload: Any) -> None:
@@ -2171,6 +2172,7 @@ class LiveExecutionService:
             response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
             _ingest_open_orders(response)
         except Exception as exc:
+            provider_bulk_fetch_failed = True
             if _is_transient_transport_error(exc):
                 logger.warning("Failed to fetch open provider orders", exc_info=exc)
             else:
@@ -2187,6 +2189,7 @@ class LiveExecutionService:
                 try:
                     response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                     _ingest_open_orders(response)
+                    provider_bulk_fetch_failed = False
                 except Exception as retry_exc:
                     if _is_transient_transport_error(retry_exc):
                         logger.warning(
@@ -2200,7 +2203,7 @@ class LiveExecutionService:
                         )
 
         missing = requested.difference(snapshots.keys())
-        if missing and hasattr(self._client, "get_order"):
+        if missing and hasattr(self._client, "get_order") and not provider_bulk_fetch_failed:
             for clob_id in sorted(missing):
                 try:
                     single_response = await self._run_client_io(

@@ -25,6 +25,7 @@ from models.database import (
     get_db_session,
 )
 from services import discovery_shared_state
+from services import shared_state as scanner_shared_state
 from services.live_price_snapshot import (
     append_live_binary_price_point,
     get_live_mid_prices,
@@ -602,13 +603,8 @@ def _labels_look_like_yes_no(labels: list[str]) -> bool:
 
 async def _load_scanner_market_history(session: AsyncSession) -> dict[str, list[dict]]:
     """Read scanner snapshot market history map used by main opportunities sparklines."""
-    result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))
-    row = result.scalar_one_or_none()
-    if row is None or not isinstance(row.market_history_json, dict):
-        return {}
-
     out: dict[str, list[dict]] = {}
-    for market_id, points in row.market_history_json.items():
+    for market_id, points in (await scanner_shared_state.read_scanner_market_history(session)).items():
         key = normalize_market_id(market_id)
         if not key or not isinstance(points, list):
             continue

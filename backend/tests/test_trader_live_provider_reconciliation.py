@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 from datetime import timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,7 +12,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from models.database import Base, LiveTradingOrder, LiveTradingPosition, TradeSignal, Trader, TraderDecision, TraderOrder
-from services import trader_orchestrator_state
+from services import trader_hot_state, trader_orchestrator_state
 from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
@@ -23,6 +24,44 @@ from services.trader_orchestrator_state import (
 )
 from tests.postgres_test_db import build_postgres_session_factory
 from utils.utcnow import utcnow
+
+
+def test_sync_recovered_order_hot_state_routes_terminal_unfilled_order_to_cancel(monkeypatch):
+    created: list[dict] = []
+    resolved: list[dict] = []
+    cancelled: list[dict] = []
+
+    monkeypatch.setattr(trader_hot_state, "record_order_created", lambda **kwargs: created.append(kwargs))
+    monkeypatch.setattr(trader_hot_state, "record_order_resolved", lambda **kwargs: resolved.append(kwargs))
+    monkeypatch.setattr(trader_hot_state, "record_order_cancelled", lambda **kwargs: cancelled.append(kwargs))
+
+    trader_orchestrator_state._sync_recovered_order_hot_state(
+        SimpleNamespace(
+            id="recovered-order-1",
+            trader_id="trader-1",
+            mode="live",
+            status="rejected",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            notional_usd=0.0,
+            entry_price=0.55,
+            effective_price=0.55,
+            actual_profit=None,
+            payload_json={
+                "token_id": "token-1",
+                "provider_reconciliation": {
+                    "filled_size": 0.0,
+                    "filled_notional_usd": 0.0,
+                },
+            },
+        )
+    )
+
+    assert created == []
+    assert resolved == []
+    assert len(cancelled) == 1
+    assert cancelled[0]["order_id"] == "recovered-order-1"
 
 
 async def _build_session_factory(_tmp_path: Path):

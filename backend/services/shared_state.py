@@ -12,12 +12,14 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Optional
 
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     ScannerControl,
+    ScannerMarketHistory,
     ScannerSnapshot,
     ScannerRun,
     OpportunityState,
@@ -26,7 +28,7 @@ from models.database import (
 from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
 from services.market_tradability import get_market_tradability_map
-from utils.converters import format_iso_utc_z, parse_iso_datetime
+from utils.converters import format_iso_utc_z, normalize_market_id, parse_iso_datetime
 from utils.retry import commit_with_retry as _shared_commit_with_retry
 from utils.utcnow import utcnow
 
@@ -62,6 +64,75 @@ async def _commit_with_retry(session: AsyncSession) -> None:
         raise
 
 
+def _normalize_history_points(points: Any) -> list[dict[str, Any]]:
+    if not isinstance(points, list):
+        return []
+    normalized = [dict(point) for point in points if isinstance(point, dict)]
+    return normalized if len(normalized) >= 2 else []
+
+
+async def upsert_scanner_market_history(
+    session: AsyncSession,
+    market_history: dict[str, list[dict[str, Any]]],
+) -> int:
+    rows: list[dict[str, Any]] = []
+    now = utcnow()
+    for raw_market_id, raw_points in market_history.items():
+        market_id = normalize_market_id(raw_market_id)
+        points = _normalize_history_points(raw_points)
+        if not market_id or not points:
+            continue
+        rows.append(
+            {
+                "market_id": market_id,
+                "updated_at": now,
+                "points_json": points,
+            }
+        )
+    if not rows:
+        return 0
+    batch_size = 25
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start : start + batch_size]
+        insert_stmt = pg_insert(ScannerMarketHistory).values(chunk)
+        await session.execute(
+            insert_stmt.on_conflict_do_update(
+                index_elements=[ScannerMarketHistory.market_id],
+                set_={
+                    "updated_at": insert_stmt.excluded.updated_at,
+                    "points_json": insert_stmt.excluded.points_json,
+                },
+            )
+        )
+    return len(rows)
+
+
+async def read_scanner_market_history(
+    session: AsyncSession,
+    *,
+    market_ids: Optional[set[str] | list[str] | tuple[str, ...]] = None,
+) -> dict[str, list[dict[str, Any]]]:
+    stmt = select(ScannerMarketHistory.market_id, ScannerMarketHistory.points_json)
+    normalized_market_ids = sorted(
+        {
+            normalize_market_id(market_id)
+            for market_id in (market_ids or [])
+            if normalize_market_id(market_id)
+        }
+    )
+    if normalized_market_ids:
+        stmt = stmt.where(_chunked_in(ScannerMarketHistory.market_id, normalized_market_ids))
+    result = await session.execute(stmt)
+    history_map: dict[str, list[dict[str, Any]]] = {}
+    for raw_market_id, raw_points in result.all():
+        market_id = normalize_market_id(raw_market_id)
+        points = _normalize_history_points(raw_points)
+        if not market_id or not points:
+            continue
+        history_map[market_id] = points
+    return history_map
+
+
 def _normalize_weather_edge_title(title: str) -> str:
     prefix = "weather edge:"
     return title[len(prefix) :].lstrip() if title.lower().startswith(prefix) else title
@@ -82,11 +153,29 @@ def _serialize_opportunity_payload(opportunities: list[Opportunity]) -> tuple[li
     return payload, skipped
 
 
+def _market_history_ids_from_payloads(payloads: list[dict[str, Any]]) -> set[str]:
+    market_ids: set[str] = set()
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            continue
+        for market in payload.get("markets") or []:
+            if not isinstance(market, dict):
+                continue
+            for raw_market_id in (
+                market.get("id"),
+                market.get("condition_id"),
+                market.get("conditionId"),
+            ):
+                market_id = normalize_market_id(raw_market_id)
+                if market_id:
+                    market_ids.add(market_id)
+    return market_ids
+
+
 async def write_scanner_snapshot(
     session: AsyncSession,
     opportunities: list[Opportunity],
     status: dict[str, Any],
-    market_history: Optional[dict[str, list[dict[str, Any]]]] = None,
 ) -> None:
     """Write current opportunities and status to scanner_snapshot (worker calls this)."""
     last_scan = status.get("last_scan")
@@ -123,7 +212,7 @@ async def write_scanner_snapshot(
     displayable_count = len(opportunities)
     row.updated_at = utcnow()
     row.last_scan_at = last_scan
-    row.opportunities_json = payload
+    row.opportunities_json = []
     row.raw_detected_count = int(raw_detected_count)
     row.displayable_count = int(displayable_count)
     row.execution_eligible_count = int(execution_eligible_count)
@@ -136,65 +225,65 @@ async def write_scanner_snapshot(
     row.strategy_diagnostics_json = status.get("strategy_diagnostics", {})
     row.tiered_scanning_json = status.get("tiered_scanning")
     row.ws_feeds_json = status.get("ws_feeds")
-    if market_history is not None:
-        row.market_history_json = market_history
     opportunity_events = await _persist_incremental_state(session, payload, status, last_scan)
     await _commit_with_retry(session)
 
-    # Publish events so the broadcaster can relay immediately.
-    try:
-        scanner_status = {
-            "running": status.get("running", True),
-            "enabled": status.get("enabled", True),
-            "interval_seconds": status.get("interval_seconds", 60),
-            "last_scan": status.get("last_scan"),
-            "last_fast_scan": status.get("last_fast_scan"),
-            "last_heavy_scan": status.get("last_heavy_scan"),
-            "opportunities_count": row.opportunities_count,
-            "current_activity": status.get("current_activity"),
-            "lane_watchdogs": status.get("lane_watchdogs"),
-            "strategies": status.get("strategies", []),
-            "strategy_diagnostics": status.get("strategy_diagnostics", {}),
-            "tiered_scanning": status.get("tiered_scanning"),
-            "ws_feeds": status.get("ws_feeds"),
-        }
-        await event_bus.publish("scanner_status", scanner_status)
-        await event_bus.publish(
-            "scanner_activity",
-            {"activity": status.get("current_activity") or "Idle"},
-        )
-        await event_bus.publish(
-            "opportunities_update",
-            {
-                "count": row.opportunities_count,
-                "source": "scanner_snapshot_write",
-            },
-        )
-        if opportunity_events:
+    async def _publish_snapshot_events() -> None:
+        try:
+            scanner_status = {
+                "running": status.get("running", True),
+                "enabled": status.get("enabled", True),
+                "interval_seconds": status.get("interval_seconds", 60),
+                "last_scan": status.get("last_scan"),
+                "last_fast_scan": status.get("last_fast_scan"),
+                "last_heavy_scan": status.get("last_heavy_scan"),
+                "opportunities_count": row.opportunities_count,
+                "current_activity": status.get("current_activity"),
+                "lane_watchdogs": status.get("lane_watchdogs"),
+                "strategies": status.get("strategies", []),
+                "strategy_diagnostics": status.get("strategy_diagnostics", {}),
+                "tiered_scanning": status.get("tiered_scanning"),
+                "ws_feeds": status.get("ws_feeds"),
+            }
+            await event_bus.publish("scanner_status", scanner_status)
             await event_bus.publish(
-                "opportunity_events",
+                "scanner_activity",
+                {"activity": status.get("current_activity") or "Idle"},
+            )
+            await event_bus.publish(
+                "opportunities_update",
                 {
-                    "events": opportunity_events,
+                    "count": row.opportunities_count,
+                    "source": "scanner_snapshot_write",
                 },
             )
-            for event in opportunity_events:
-                opportunity_payload = event.get("opportunity") if isinstance(event, dict) else {}
-                if not isinstance(opportunity_payload, dict):
-                    opportunity_payload = {}
+            if opportunity_events:
                 await event_bus.publish(
-                    "opportunity_update",
+                    "opportunity_events",
                     {
-                        "id": event.get("id"),
-                        "stable_id": event.get("stable_id"),
-                        "run_id": event.get("run_id"),
-                        "event_type": event.get("event_type"),
-                        "revision": int(opportunity_payload.get("revision") or 0),
-                        "opportunity": opportunity_payload,
-                        "created_at": event.get("created_at"),
+                        "events": opportunity_events,
                     },
                 )
-    except Exception:
-        pass  # fire-and-forget
+                for event in opportunity_events:
+                    opportunity_payload = event.get("opportunity") if isinstance(event, dict) else {}
+                    if not isinstance(opportunity_payload, dict):
+                        opportunity_payload = {}
+                    await event_bus.publish(
+                        "opportunity_update",
+                        {
+                            "id": event.get("id"),
+                            "stable_id": event.get("stable_id"),
+                            "run_id": event.get("run_id"),
+                            "event_type": event.get("event_type"),
+                            "revision": int(opportunity_payload.get("revision") or 0),
+                            "opportunity": opportunity_payload,
+                            "created_at": event.get("created_at"),
+                        },
+                    )
+        except Exception:
+            pass
+
+    asyncio.create_task(_publish_snapshot_events())
 
 
 # ---------------------------------------------------------------------------
@@ -624,13 +713,40 @@ async def read_scanner_snapshot(
     session: AsyncSession,
 ) -> tuple[list[Opportunity], dict[str, Any]]:
     """Read latest opportunities and status from DB. Returns (opportunities, status_dict)."""
-    result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
-    row = result.scalar_one_or_none()
+    result = await session.execute(
+        select(
+            ScannerSnapshot.running,
+            ScannerSnapshot.enabled,
+            ScannerSnapshot.interval_seconds,
+            ScannerSnapshot.last_scan_at,
+            ScannerSnapshot.current_activity,
+            ScannerSnapshot.strategies_json,
+            ScannerSnapshot.strategy_diagnostics_json,
+            ScannerSnapshot.tiered_scanning_json,
+            ScannerSnapshot.ws_feeds_json,
+            ScannerSnapshot.opportunities_count,
+        ).where(ScannerSnapshot.id == SNAPSHOT_ID)
+    )
+    row = result.one_or_none()
     if row is None:
         return [], _default_status()
 
-    raw_opps = list(row.opportunities_json or [])
-    market_history = row.market_history_json if isinstance(row.market_history_json, dict) else {}
+    raw_opps = list(
+        (
+            await session.execute(
+                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
+            )
+        ).scalars().all()
+    )
+    market_history = await read_scanner_market_history(
+        session,
+        market_ids=_market_history_ids_from_payloads(raw_opps),
+    )
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
 
     def _deserialize_opportunities() -> list[Opportunity]:
         out: list[Opportunity] = []
@@ -639,9 +755,9 @@ async def read_scanner_snapshot(
                 opp = Opportunity.model_validate(d)
                 for market in opp.markets:
                     candidates = (
-                        str(market.get("id", "") or "").strip(),
-                        str(market.get("condition_id", "") or "").strip(),
-                        str(market.get("conditionId", "") or "").strip(),
+                        normalize_market_id(market.get("id", "")),
+                        normalize_market_id(market.get("condition_id", "")),
+                        normalize_market_id(market.get("conditionId", "")),
                     )
                     for candidate in candidates:
                         if not candidate:
@@ -656,6 +772,7 @@ async def read_scanner_snapshot(
         return out
 
     opportunities = await asyncio.to_thread(_deserialize_opportunities)
+    opportunities.sort(key=lambda opp: float(getattr(opp, "roi_percent", 0.0) or 0.0), reverse=True)
 
     tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
     status = {
@@ -736,13 +853,6 @@ async def read_scanner_status(
             aware = dt.astimezone(timezone.utc)
         return max(0.0, (now_dt - aware).total_seconds())
 
-    def _p95(values: list[float]) -> float | None:
-        if not values:
-            return None
-        ordered = sorted(values)
-        idx = max(0, min(len(ordered) - 1, int(round((len(ordered) - 1) * 0.95))))
-        return round(float(ordered[idx]), 3)
-
     now_dt = utcnow()
     last_fast_scan_at = None
     raw_last_fast_scan = tiered.get("last_fast_scan")
@@ -754,55 +864,28 @@ async def read_scanner_status(
             last_fast_scan_at = None
     status["last_fast_scan_age_seconds"] = _age_seconds(last_fast_scan_at, now_dt)
 
-    rows = (
-        (
-            await session.execute(
-                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
-            )
+    now_naive = now_dt.astimezone(timezone.utc).replace(tzinfo=None)
+    metrics_row = (
+        await session.execute(
+            select(
+                func.percentile_cont(0.95).within_group(
+                    func.extract(
+                        "epoch",
+                        now_naive - func.coalesce(OpportunityState.last_updated_at, OpportunityState.last_seen_at),
+                    )
+                ),
+                func.percentile_cont(0.95).within_group(
+                    func.extract("epoch", now_naive - OpportunityState.last_seen_at)
+                ),
+            ).where(OpportunityState.is_active == True)  # noqa: E712
         )
-        .scalars()
-        .all()
+    ).one()
+    price_age_p95 = metrics_row[0]
+    detected_age_p95 = metrics_row[1]
+    status["opportunity_price_age_p95"] = round(float(price_age_p95), 3) if price_age_p95 is not None else None
+    status["opportunity_last_detected_age_p95"] = (
+        round(float(detected_age_p95), 3) if detected_age_p95 is not None else None
     )
-    price_ages: list[float] = []
-    detected_ages: list[float] = []
-    for payload in rows:
-        if not isinstance(payload, dict):
-            continue
-
-        priced_at = None
-        for key in ("last_priced_at", "detected_at"):
-            raw = payload.get(key)
-            if not raw:
-                continue
-            try:
-                priced_at = parse_iso_datetime(str(raw), naive=True)
-            except Exception:
-                priced_at = None
-            if priced_at is not None:
-                break
-        if priced_at is not None:
-            age = _age_seconds(priced_at, now_dt)
-            if age is not None:
-                price_ages.append(age)
-
-        detected_at = None
-        for key in ("last_detected_at", "detected_at", "last_seen_at"):
-            raw = payload.get(key)
-            if not raw:
-                continue
-            try:
-                detected_at = parse_iso_datetime(str(raw), naive=True)
-            except Exception:
-                detected_at = None
-            if detected_at is not None:
-                break
-        if detected_at is not None:
-            age = _age_seconds(detected_at, now_dt)
-            if age is not None:
-                detected_ages.append(age)
-
-    status["opportunity_price_age_p95"] = _p95(price_ages)
-    status["opportunity_last_detected_age_p95"] = _p95(detected_ages)
     status["coverage_ratio"] = tiered.get("full_snapshot_coverage_ratio")
     status["full_coverage_completion_time"] = tiered.get("full_coverage_completion_time")
     return status
@@ -812,22 +895,31 @@ async def read_traders_snapshot(
     session: AsyncSession,
 ) -> tuple[list[Opportunity], dict[str, Any]]:
     """Read latest trader opportunities and status from dedicated snapshot row."""
-    result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == TRADERS_SNAPSHOT_ID))
-    row = result.scalar_one_or_none()
+    result = await session.execute(
+        select(
+            ScannerSnapshot.running,
+            ScannerSnapshot.enabled,
+            ScannerSnapshot.interval_seconds,
+            ScannerSnapshot.last_scan_at,
+            ScannerSnapshot.current_activity,
+            ScannerSnapshot.strategies_json,
+            ScannerSnapshot.tiered_scanning_json,
+            ScannerSnapshot.ws_feeds_json,
+            ScannerSnapshot.opportunities_json,
+        ).where(ScannerSnapshot.id == TRADERS_SNAPSHOT_ID)
+    )
+    row = result.one_or_none()
     if row is None:
         return [], _default_status()
 
-    market_history_row = (
-        await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
-    ).scalar_one_or_none()
-    market_history = (
-        market_history_row.market_history_json
-        if market_history_row is not None and isinstance(market_history_row.market_history_json, dict)
-        else {}
+    raw_opps = list(row.opportunities_json or [])
+    market_history = await read_scanner_market_history(
+        session,
+        market_ids=_market_history_ids_from_payloads(raw_opps),
     )
 
     opportunities: list[Opportunity] = []
-    for d in row.opportunities_json or []:
+    for d in raw_opps:
         try:
             opp = Opportunity.model_validate(d)
             if isinstance(market_history, dict):
@@ -835,8 +927,8 @@ async def read_traders_snapshot(
                     if not isinstance(market, dict):
                         continue
                     candidates = {
-                        str(market.get("id", "") or "").strip(),
-                        str(market.get("condition_id", "") or "").strip(),
+                        normalize_market_id(market.get("id", "")),
+                        normalize_market_id(market.get("condition_id", "")),
                     }
                     for candidate in candidates:
                         if not candidate:
@@ -934,34 +1026,13 @@ async def update_opportunity_ai_analysis_in_snapshot(
     stable_id: Optional[str],
     ai_analysis: dict[str, Any],
 ) -> bool:
-    """Persist ai_analysis into scanner snapshot + opportunity_state for one opportunity."""
+    """Persist ai_analysis into opportunity_state for one opportunity."""
     sid = (stable_id or "").strip() or _stable_id_from_opportunity_id(opportunity_id)
     oid = (opportunity_id or "").strip()
     if not oid and not sid:
         return False
 
     updated = False
-
-    result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
-    row = result.scalar_one_or_none()
-    if row is not None and isinstance(row.opportunities_json, list):
-        patched_payload: list[dict[str, Any]] = []
-        for item in row.opportunities_json:
-            if not isinstance(item, dict):
-                patched_payload.append(item)
-                continue
-            item_id = str(item.get("id") or "").strip()
-            item_sid = str(item.get("stable_id") or "").strip()
-            if (oid and item_id == oid) or (sid and item_sid == sid):
-                patched = dict(item)
-                patched["ai_analysis"] = ai_analysis
-                patched_payload.append(patched)
-                updated = True
-            else:
-                patched_payload.append(item)
-        if updated:
-            row.opportunities_json = patched_payload
-            row.updated_at = utcnow()
 
     if sid:
         state_row = await session.get(OpportunityState, sid)

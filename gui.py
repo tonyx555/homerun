@@ -32,6 +32,7 @@ from urllib.parse import urlsplit
 # ---------------------------------------------------------------------------
 _win_job_handle = None
 _child_pids: set = set()
+_single_instance_handle = None
 
 if sys.platform == "win32":
     try:
@@ -53,9 +54,13 @@ if sys.platform == "win32":
         _kernel32.OpenProcess.argtypes = [_DWORD, _BOOL, _DWORD]
         _kernel32.CloseHandle.restype = _BOOL
         _kernel32.CloseHandle.argtypes = [_HANDLE]
+        _kernel32.CreateMutexW.restype = _HANDLE
+        _kernel32.CreateMutexW.argtypes = [_LPVOID, _BOOL, ctypes.wintypes.LPCWSTR]
+        _kernel32.GetLastError.restype = _DWORD
 
         _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         _JOB_OBJECT_EXTENDED_LIMIT_INFO_CLASS = 9
+        _ERROR_ALREADY_EXISTS = 183
 
         class _JOBOBJECT_BASIC_LIMIT_INFORMATION(ctypes.Structure):
             _fields_ = [
@@ -92,6 +97,37 @@ if sys.platform == "win32":
             )
     except Exception:
         _win_job_handle = None
+
+
+def _acquire_single_instance_guard() -> bool:
+    global _single_instance_handle
+    if sys.platform != "win32":
+        return True
+    if _single_instance_handle:
+        return True
+    try:
+        mutex = _kernel32.CreateMutexW(None, False, "Local\\HomerunDesktopLauncher")
+        if not mutex:
+            return True
+        already_running = int(_kernel32.GetLastError()) == _ERROR_ALREADY_EXISTS
+        if already_running:
+            _kernel32.CloseHandle(mutex)
+            return False
+        _single_instance_handle = mutex
+        return True
+    except Exception:
+        return True
+
+
+def _notify_existing_instance() -> None:
+    message = "Homerun is already running. Close the existing window before launching another copy."
+    if sys.platform == "win32":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, "Homerun", 0x00000040)
+            return
+        except Exception:
+            pass
+    print(message)
 
 
 def _assign_to_job(proc: subprocess.Popen) -> None:
@@ -1942,6 +1978,9 @@ def main() -> None:
         setup_cmd = ".\\scripts\\infra\\setup.ps1" if sys.platform == "win32" else "./scripts/infra/setup.sh"
         print(f"Setup not complete. Run {setup_cmd} first.")
         sys.exit(1)
+    if not _acquire_single_instance_guard():
+        _notify_existing_instance()
+        sys.exit(0)
 
     if sys.platform == "win32":
         def _sigbreak_handler(signum, frame):

@@ -71,9 +71,13 @@ from models.model_registry import register_all_models
 from services import discovery_shared_state, shared_state
 from services.news import shared_state as news_shared_state
 from services.pause_state import global_pause_state
+from services.runtime_status import runtime_status
 from services.trader_orchestrator_state import (
     read_orchestrator_control,
     read_orchestrator_snapshot,
+    update_orchestrator_control,
+    write_orchestrator_snapshot,
+    ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
 )
 from services.weather import shared_state as weather_shared_state
 from services.worker_state import list_worker_snapshots, read_worker_control, summarize_worker_stats
@@ -157,6 +161,52 @@ class InboundAPIRateLimiter:
 inbound_api_rate_limiter = InboundAPIRateLimiter()
 
 
+async def _reset_orchestrator_boot_state() -> None:
+    async with AsyncSessionLocal() as session:
+        control = await update_orchestrator_control(
+            session,
+            is_enabled=False,
+            is_paused=True,
+            mode="shadow",
+            requested_run_at=None,
+            settings_json={
+                "selected_account_id": None,
+                "shadow_account_id": None,
+                "live_preflight": None,
+                "live_arm": None,
+            },
+        )
+        await write_orchestrator_snapshot(
+            session,
+            running=False,
+            enabled=False,
+            current_activity="Paused on application startup",
+            interval_seconds=int(
+                control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS
+            ),
+            last_error=None,
+        )
+        interval_seconds = int(
+            control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS
+        )
+        runtime_status.update_orchestrator(
+            running=False,
+            enabled=False,
+            current_activity="Paused on application startup",
+            interval_seconds=interval_seconds,
+            last_run_at=None,
+            lag_seconds=None,
+            last_error=None,
+            stats={},
+            control={
+                "is_enabled": False,
+                "is_paused": True,
+                "interval_seconds": interval_seconds,
+                "requested_run_at": None,
+            },
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
@@ -188,6 +238,7 @@ async def lifespan(app: FastAPI):
         max_workers=max(cpu_count * 2 + 8, 16),
     )
     tasks: list[asyncio.Task] = []
+    _feed_manager_started = False
 
     try:
         # Initialize database
@@ -285,6 +336,13 @@ async def lifespan(app: FastAPI):
                 precedence=RUNTIME_SETTINGS_PRECEDENCE,
                 exc_info=exc,
             )
+
+        try:
+            await _reset_orchestrator_boot_state()
+            logger.info("Trader orchestrator reset on application startup")
+        except Exception as exc:
+            logger.error("Failed to reset trader orchestrator on startup", exc_info=exc)
+            raise
 
         # Restore global pause state from persisted worker controls.
         # This keeps API-owned loops (wallet tracker, LLM/trading gates)
@@ -390,7 +448,6 @@ async def lifespan(app: FastAPI):
         set_marks_event_loop(asyncio.get_running_loop())
         start_marks_refresh_loop()
 
-        _feed_manager_started = False
         try:
             from services.ws_feeds import get_feed_manager
 
@@ -1021,7 +1078,6 @@ async def readiness_check():
 
 
 _gui_health_cache: Optional[dict] = None
-_gui_health_refresh_task: Optional[asyncio.Task] = None
 _gui_health_cache_updated_at: datetime | None = None
 _GUI_HEALTH_CACHE_TTL_SECONDS = 5.0
 _GUI_HEALTH_WORKER_NAMES = (
@@ -1134,15 +1190,7 @@ async def gui_health_check():
     doesn't block the response and cause the GUI to flap OFFLINE/ONLINE.
     When the pool is busy the last successful result is served instead.
     """
-    global _gui_health_cache, _gui_health_cache_updated_at, _gui_health_refresh_task
-    if _gui_health_refresh_task is not None and _gui_health_refresh_task.done():
-        try:
-            _gui_health_cache = _gui_health_refresh_task.result()
-            _gui_health_cache_updated_at = utcnow()
-        except Exception:
-            pass
-        finally:
-            _gui_health_refresh_task = None
+    global _gui_health_cache, _gui_health_cache_updated_at
     cache_age_seconds = None
     if _gui_health_cache_updated_at is not None:
         cache_age_seconds = max(0.0, (utcnow() - _gui_health_cache_updated_at).total_seconds())
@@ -1153,21 +1201,14 @@ async def gui_health_check():
     )
     if cache_is_fresh:
         return _build_gui_health_response(_gui_health_cache or {"database": False})
-    if _gui_health_refresh_task is None:
-        _gui_health_refresh_task = asyncio.create_task(_gui_health_db_queries(), name="gui-health-db-queries")
-        if _gui_health_cache is not None:
-            return _build_gui_health_response(_gui_health_cache)
     try:
-        db = await asyncio.wait_for(asyncio.shield(_gui_health_refresh_task), timeout=2.0)
+        db = await asyncio.wait_for(_gui_health_db_queries(), timeout=2.0)
         _gui_health_cache = db
         _gui_health_cache_updated_at = utcnow()
     except asyncio.TimeoutError:
         db = _gui_health_cache or {"database": False}
     except Exception:
-        _gui_health_refresh_task = None
         db = _gui_health_cache or {"database": False}
-    else:
-        _gui_health_refresh_task = None
     return _build_gui_health_response(db)
 
 

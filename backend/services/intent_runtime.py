@@ -8,12 +8,16 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
+from sqlalchemy import select
+
 from config import settings
 from models.database import AsyncSessionLocal, TradeSignal
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
 from services.runtime_signal_queue import publish_signal_batch
 from services.signal_bus import (
+    SIGNAL_ACTIVE_STATUSES as BUS_SIGNAL_ACTIVE_STATUSES,
+    SIGNAL_REACTIVATABLE_STATUSES as BUS_SIGNAL_REACTIVATABLE_STATUSES,
     build_signal_contract_from_opportunity,
     expire_source_signals_except,
     make_dedupe_key,
@@ -36,8 +40,11 @@ _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
 _PREWARM_WAIT_POLL_SECONDS = 0.01
 _UNCHANGED_SCANNER_TERMINAL_REACTIVATION_COOLDOWN_SECONDS = 180.0
+_HOT_SUBSCRIPTION_SEED_CONCURRENCY = 8
+_HOT_SUBSCRIPTION_SEED_RETRY_SECONDS = 30.0
 _DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY = "deferred_quote_min_observed_at"
 _DEFERRED_REQUIRED_MAX_AGE_MS_KEY = "strict_ws_required_max_age_ms"
+_LIVE_MARKET_PAYLOAD_KEY = "live_market"
 _PAYLOAD_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
@@ -74,6 +81,10 @@ def _to_iso(dt: datetime | None) -> str | None:
     return _to_utc(dt).isoformat().replace("+00:00", "Z")
 
 
+def _snapshot_signal_view(snapshot: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(**copy.deepcopy(snapshot))
+
+
 def _normalize_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return _to_utc(value)
@@ -93,6 +104,15 @@ def _normalize_datetime(value: Any) -> datetime | None:
     except Exception:
         return None
     return _to_utc(parsed)
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except Exception:
+        return None
 
 
 def _opportunity_signal_expires_at(now: datetime, opportunity: Opportunity, default_ttl_minutes: int) -> datetime:
@@ -170,7 +190,12 @@ def _signal_runtime_metadata(payload: Any, strategy_context: Any) -> dict[str, A
         or ""
     ).strip().lower()
     if not execution_activation:
-        execution_activation = "immediate" if source_key == "crypto" else "ws_post_arm_tick"
+        if source_key == "crypto":
+            execution_activation = "immediate"
+        elif source_key == "scanner":
+            execution_activation = "ws_current"
+        else:
+            execution_activation = "ws_post_arm_tick"
     return {
         "source_key": source_key,
         "subscriptions": subscriptions,
@@ -232,6 +257,65 @@ def _normalize_token_ids(raw: Any) -> list[str]:
     return out
 
 
+def _snapshot_live_market(snapshot: dict[str, Any]) -> dict[str, Any]:
+    payload = snapshot.get("payload_json")
+    payload = payload if isinstance(payload, dict) else {}
+    live_market = payload.get(_LIVE_MARKET_PAYLOAD_KEY)
+    return dict(live_market) if isinstance(live_market, dict) else {}
+
+
+async def build_cached_live_signal_contexts(*args: Any, **kwargs: Any) -> dict[str, dict[str, Any]]:
+    from services.trader_orchestrator.live_market_context import (
+        build_cached_live_signal_contexts as _build_cached_live_signal_contexts,
+    )
+
+    return await _build_cached_live_signal_contexts(*args, **kwargs)
+
+
+def _clear_snapshot_live_market(snapshot: dict[str, Any]) -> None:
+    payload = snapshot.get("payload_json")
+    if not isinstance(payload, dict) or _LIVE_MARKET_PAYLOAD_KEY not in payload:
+        return
+    payload = dict(payload)
+    payload.pop(_LIVE_MARKET_PAYLOAD_KEY, None)
+    snapshot["payload_json"] = payload
+
+
+def _snapshot_requires_scanner_strict_live_market(snapshot: dict[str, Any]) -> bool:
+    if str(snapshot.get("source") or "").strip().lower() != "scanner":
+        return False
+    return bool(_normalize_token_ids(snapshot.get("required_token_ids")))
+
+
+def _snapshot_has_strict_scanner_live_market(snapshot: dict[str, Any]) -> bool:
+    if not _snapshot_requires_scanner_strict_live_market(snapshot):
+        return True
+    live_market = _snapshot_live_market(snapshot)
+    live_source = str(
+        live_market.get("market_data_source")
+        or live_market.get("live_selected_price_source")
+        or ""
+    ).strip().lower()
+    live_price = _safe_float(live_market.get("live_selected_price"))
+    live_age_ms = _safe_float(
+        live_market.get("market_data_age_ms")
+        if live_market.get("market_data_age_ms") is not None
+        else live_market.get("age_ms")
+    )
+    ws_subscription_current = bool(live_market.get("ws_subscription_current"))
+    strict_max_age_ms = max(100, int(_strict_ws_ttl_seconds_for_source("scanner") * 1000.0))
+    return (
+        bool(live_market.get("available"))
+        and live_source in {"ws_strict", "redis_strict"}
+        and live_price is not None
+        and live_price > 0.0
+        and (
+            ws_subscription_current
+            or (live_age_ms is not None and live_age_ms <= strict_max_age_ms)
+        )
+    )
+
+
 def _extract_required_token_ids(payload: Any, *, direction: str) -> list[str]:
     if not isinstance(payload, dict):
         return []
@@ -248,13 +332,6 @@ def _extract_required_token_ids(payload: Any, *, direction: str) -> list[str]:
     execution_plan = payload.get("execution_plan")
     if isinstance(execution_plan, dict):
         raw_legs = [leg for leg in (execution_plan.get("legs") or []) if isinstance(leg, dict)]
-        buy_leg = next(
-            (leg for leg in raw_legs if str(leg.get("side") or "").strip().lower() == "buy"),
-            None,
-        )
-        primary_leg = buy_leg or (raw_legs[0] if raw_legs else None)
-        if isinstance(primary_leg, dict):
-            _append(primary_leg.get("token_id"))
         for leg in raw_legs:
             _append(leg.get("token_id"))
 
@@ -265,8 +342,9 @@ def _extract_required_token_ids(payload: Any, *, direction: str) -> list[str]:
     _append(payload.get("selected_token_id"))
     _append(payload.get("token_id"))
     _append(payload.get("clob_token_id"))
-    _append(payload.get("yes_token_id"))
-    _append(payload.get("no_token_id"))
+
+    if out:
+        return out
 
     for market in payload.get("markets") or []:
         if not isinstance(market, dict):
@@ -381,6 +459,7 @@ class IntentRuntime:
         self._projection_task: asyncio.Task[None] | None = None
         self._deferred_timeout_task: asyncio.Task[None] | None = None
         self._background_tasks: set[asyncio.Task[Any]] = set()
+        self._hot_seed_retry_not_before: dict[str, float] = {}
 
     def _track_task(self, task: asyncio.Task[Any], *, name: str) -> asyncio.Task[Any]:
         self._background_tasks.add(task)
@@ -519,6 +598,9 @@ class IntentRuntime:
                 self._deferred_signal_ids_by_token.setdefault(token_id, set()).add(signal_id)
         snapshot = self._signals_by_id.get(signal_id)
         if snapshot is not None:
+            is_scanner_source = str(snapshot.get("source") or "").strip().lower() == "scanner"
+            if is_scanner_source:
+                preserved_min_observed_at_iso = None
             snapshot["required_token_ids"] = sorted(token_set)
             snapshot["deferred_until_ws"] = True
             snapshot["deferred_reason"] = str(reason or "strict_ws_context_missing")
@@ -527,21 +609,25 @@ class IntentRuntime:
             if not isinstance(payload, dict):
                 payload = {}
                 snapshot["payload_json"] = payload
-            resolved_min_observed_at_iso = preserved_min_observed_at_iso or min_observed_at_iso
-            normalized_reason = str(reason or "").strip().lower()
-            if resolved_min_observed_at_iso is None and normalized_reason == "awaiting_post_arm_ws_tick":
-                resolved_min_observed_at_iso = str(payload.get("execution_armed_at") or "").strip() or None
-            if resolved_min_observed_at_iso is None and normalized_reason in {
-                "awaiting_post_arm_ws_tick",
-                "prewarm_waiting_for_strict_ws_quote",
-                "strict_ws_pricing_live_context_unavailable",
-                "strict_ws_pricing_signal_release_stale",
-            }:
-                resolved_min_observed_at_iso = snapshot["deferred_started_at"]
-            if resolved_min_observed_at_iso:
-                payload[_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY] = str(resolved_min_observed_at_iso)
-            else:
+            if is_scanner_source:
+                payload.pop("execution_armed_at", None)
                 payload.pop(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY, None)
+            else:
+                resolved_min_observed_at_iso = preserved_min_observed_at_iso or min_observed_at_iso
+                normalized_reason = str(reason or "").strip().lower()
+                if resolved_min_observed_at_iso is None and normalized_reason == "awaiting_post_arm_ws_tick":
+                    resolved_min_observed_at_iso = str(payload.get("execution_armed_at") or "").strip() or None
+                if resolved_min_observed_at_iso is None and normalized_reason in {
+                    "awaiting_post_arm_ws_tick",
+                    "prewarm_waiting_for_strict_ws_quote",
+                    "strict_ws_pricing_live_context_unavailable",
+                    "strict_ws_pricing_signal_release_stale",
+                }:
+                    resolved_min_observed_at_iso = snapshot["deferred_started_at"]
+                if resolved_min_observed_at_iso:
+                    payload[_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY] = str(resolved_min_observed_at_iso)
+                else:
+                    payload.pop(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY, None)
             resolved_required_max_age_ms = preserved_required_max_age_ms
             if resolved_required_max_age_ms is None:
                 try:
@@ -576,9 +662,19 @@ class IntentRuntime:
             if max_age_seconds is not None
             else _strict_ws_ttl_seconds_for_source(source)
         )
+        normalized_source = str(source or "").strip().lower()
         for token_id in normalized:
             try:
-                if not feed_manager.cache.is_fresh(token_id, max_age_seconds=strict_ttl):
+                quote_current = feed_manager.cache.is_fresh(token_id, max_age_seconds=strict_ttl)
+                if not quote_current and normalized_source == "scanner" and min_observed_at_epoch is None:
+                    quote_current = bool(
+                        feed_manager.has_current_subscription_price(
+                            token_id,
+                            max_age_seconds=strict_ttl,
+                            allow_stale_subscribed=True,
+                        )
+                    )
+                if not quote_current:
                     return False
                 if feed_manager.cache.get_mid_price(token_id) is None:
                     return False
@@ -613,8 +709,201 @@ class IntentRuntime:
                 return False
             await asyncio.sleep(_PREWARM_WAIT_POLL_SECONDS)
 
+    async def _attach_live_market_contexts(
+        self,
+        snapshots: dict[str, dict[str, Any]],
+    ) -> None:
+        if not snapshots:
+            return
+        for snapshot in snapshots.values():
+            payload = snapshot.get("payload_json")
+            if not isinstance(payload, dict):
+                payload = {}
+            else:
+                payload = dict(payload)
+            payload.pop(_LIVE_MARKET_PAYLOAD_KEY, None)
+            snapshot["payload_json"] = payload
+        try:
+            signal_views = [_snapshot_signal_view(snapshot) for snapshot in snapshots.values()]
+            live_contexts = await build_cached_live_signal_contexts(
+                signal_views,
+                max_history_points=20,
+                strict_ws_only=True,
+            )
+        except Exception as exc:
+            logger.debug("Intent runtime activation live-context attach failed", exc_info=exc)
+            live_contexts = {}
+
+        for signal_id, live_context in live_contexts.items():
+            snapshot = snapshots.get(str(signal_id or "").strip())
+            if snapshot is None or not isinstance(live_context, dict) or not live_context:
+                continue
+            payload = snapshot.get("payload_json")
+            if not isinstance(payload, dict):
+                payload = {}
+            else:
+                payload = dict(payload)
+            payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_context)
+            snapshot["payload_json"] = payload
+
+        for signal_id, snapshot in snapshots.items():
+            if str(signal_id or "").strip() in live_contexts:
+                continue
+            live_context = self._build_minimal_scanner_live_market_context(snapshot)
+            if not isinstance(live_context, dict) or not live_context:
+                continue
+            payload = snapshot.get("payload_json")
+            if not isinstance(payload, dict):
+                payload = {}
+            else:
+                payload = dict(payload)
+            payload[_LIVE_MARKET_PAYLOAD_KEY] = live_context
+            snapshot["payload_json"] = payload
+
+    def _build_minimal_scanner_live_market_context(
+        self,
+        snapshot: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if not _snapshot_requires_scanner_strict_live_market(snapshot):
+            return None
+        required_token_ids = _normalize_token_ids(snapshot.get("required_token_ids") or [])
+        if not required_token_ids:
+            return None
+        source = str(snapshot.get("source") or "").strip().lower()
+        if not self._tokens_have_fresh_ws_quotes(required_token_ids, source=source):
+            return None
+        try:
+            feed_manager = get_feed_manager()
+        except Exception:
+            return None
+        if feed_manager is None or not getattr(feed_manager, "_started", False):
+            return None
+
+        payload = snapshot.get("payload_json")
+        payload = payload if isinstance(payload, dict) else {}
+        selected_token_id = str(
+            payload.get("selected_token_id")
+            or payload.get("token_id")
+            or (required_token_ids[0] if required_token_ids else "")
+        ).strip().lower()
+        if not selected_token_id:
+            return None
+        try:
+            live_selected_price = _safe_float(feed_manager.cache.get_mid_price(selected_token_id))
+        except Exception:
+            return None
+        if live_selected_price is None or live_selected_price <= 0.0:
+            return None
+
+        observed_at_epoch = None
+        try:
+            observed_at_epoch = feed_manager.cache.get_observed_at_epoch(selected_token_id)
+        except Exception:
+            observed_at_epoch = None
+        if observed_at_epoch is None:
+            try:
+                staleness_seconds = _safe_float(feed_manager.cache.staleness(selected_token_id))
+            except Exception:
+                staleness_seconds = None
+            if staleness_seconds is None:
+                return None
+            observed_at_epoch = time.time() - max(0.0, float(staleness_seconds))
+
+        observed_at_epoch = float(observed_at_epoch)
+        now_epoch = time.time()
+        market_data_age_ms = max(0.0, (now_epoch - observed_at_epoch) * 1000.0)
+        strict_max_age_ms = max(100, int(_strict_ws_ttl_seconds_for_source(source) * 1000.0))
+        ws_subscription_current = False
+        if market_data_age_ms > strict_max_age_ms:
+            try:
+                ws_subscription_current = bool(
+                    feed_manager.has_current_subscription_price(
+                        selected_token_id,
+                        max_age_seconds=(strict_max_age_ms / 1000.0),
+                        allow_stale_subscribed=True,
+                    )
+                )
+            except Exception:
+                ws_subscription_current = False
+            if not ws_subscription_current:
+                return None
+
+        signal_entry_price = _safe_float(snapshot.get("entry_price"))
+        entry_price_delta = (
+            float(live_selected_price) - float(signal_entry_price)
+            if signal_entry_price is not None
+            else None
+        )
+        entry_price_delta_pct = (
+            ((entry_price_delta / float(signal_entry_price)) * 100.0)
+            if entry_price_delta is not None and signal_entry_price not in {None, 0.0}
+            else None
+        )
+        return {
+            "available": True,
+            "market_id": str(snapshot.get("market_id") or "").strip() or None,
+            "market_question": str(snapshot.get("market_question") or "").strip() or None,
+            "direction": str(snapshot.get("direction") or "").strip().lower() or None,
+            "token_ids": list(required_token_ids),
+            "selected_token_id": selected_token_id,
+            "live_selected_price": float(live_selected_price),
+            "live_selected_price_source": "ws_strict",
+            "market_data_source": "ws_strict",
+            "source_observed_at": _to_iso(datetime.fromtimestamp(observed_at_epoch, tz=timezone.utc)),
+            "market_data_age_ms": market_data_age_ms,
+            "market_data_age_seconds": market_data_age_ms / 1000.0,
+            "ws_subscription_current": ws_subscription_current,
+            "signal_entry_price": signal_entry_price,
+            "entry_price_delta": entry_price_delta,
+            "entry_price_delta_pct": entry_price_delta_pct,
+            "live_edge_percent": None,
+        }
+
+    async def _defer_scanner_snapshots_without_strict_live_market(
+        self,
+        snapshots: dict[str, dict[str, Any]],
+        *,
+        projection_snapshots: dict[str, dict[str, Any]],
+        event_types: dict[str, str] | None = None,
+        reason: str,
+    ) -> None:
+        if not snapshots:
+            return
+        required_max_age_ms = max(100, int(_strict_ws_ttl_seconds_for_source("scanner") * 1000.0))
+        deferred_signal_ids: list[str] = []
+        for signal_id, snapshot in list(snapshots.items()):
+            if _snapshot_has_strict_scanner_live_market(snapshot):
+                continue
+            if not _snapshot_requires_scanner_strict_live_market(snapshot):
+                continue
+            _clear_snapshot_live_market(snapshot)
+            projection_snapshot = projection_snapshots.get(signal_id)
+            if isinstance(projection_snapshot, dict):
+                _clear_snapshot_live_market(projection_snapshot)
+            deferred = await self.defer_signal(
+                signal_id=signal_id,
+                required_token_ids=list(snapshot.get("required_token_ids") or []),
+                reason=reason,
+                required_max_age_ms=required_max_age_ms,
+                clear_live_market=True,
+            )
+            if not deferred:
+                continue
+            deferred_signal_ids.append(signal_id)
+            snapshots.pop(signal_id, None)
+            projection_snapshots.pop(signal_id, None)
+            if event_types is not None:
+                event_types.pop(signal_id, None)
+        if deferred_signal_ids:
+            logger.debug(
+                "Deferred scanner snapshots without strict live market context",
+                signal_ids=deferred_signal_ids,
+                reason=reason,
+            )
+
     def _snapshot_ready_for_runtime(self, snapshot: dict[str, Any]) -> bool:
         deferred_reason = str(snapshot.get("deferred_reason") or "")
+        source = str(snapshot.get("source") or "").strip().lower()
         payload = snapshot.get("payload_json")
         payload = payload if isinstance(payload, dict) else {}
         min_observed_at_epoch = None
@@ -628,6 +917,12 @@ class IntentRuntime:
                 max_age_seconds = max(0.01, int(required_max_age_ms) / 1000.0)
         except Exception:
             max_age_seconds = None
+        if source == "scanner":
+            return self._tokens_have_fresh_ws_quotes(
+                list(snapshot.get("required_token_ids") or []),
+                source=source,
+                max_age_seconds=max_age_seconds,
+            )
         if deferred_reason == "awaiting_post_arm_ws_tick":
             if min_observed_at_epoch is None:
                 armed_at = _normalize_datetime(payload.get("execution_armed_at"))
@@ -682,6 +977,35 @@ class IntentRuntime:
             if missing:
                 await polymarket_feed.subscribe(missing)
                 self._hot_subscription_tokens.update(missing)
+            seed_order_book = getattr(feed_manager, "get_order_book", None)
+            if callable(seed_order_book):
+                now_mono = time.monotonic()
+                seed_candidates: list[str] = []
+                for token_id in normalized:
+                    try:
+                        if feed_manager.cache.get_mid_price(token_id) is not None:
+                            continue
+                    except Exception:
+                        continue
+                    retry_not_before = float(self._hot_seed_retry_not_before.get(token_id, 0.0) or 0.0)
+                    if retry_not_before > now_mono:
+                        continue
+                    self._hot_seed_retry_not_before[token_id] = now_mono + _HOT_SUBSCRIPTION_SEED_RETRY_SECONDS
+                    seed_candidates.append(token_id)
+                if seed_candidates:
+                    seed_sem = asyncio.Semaphore(_HOT_SUBSCRIPTION_SEED_CONCURRENCY)
+
+                    async def _seed_one(token_id: str) -> None:
+                        async with seed_sem:
+                            try:
+                                await seed_order_book(token_id)
+                            except Exception:
+                                return
+
+                    await asyncio.gather(
+                        *[_seed_one(token_id) for token_id in seed_candidates],
+                        return_exceptions=True,
+                    )
         except Exception as exc:
             logger.warning("Intent runtime token prewarm subscribe failed", exc_info=exc)
 
@@ -789,6 +1113,23 @@ class IntentRuntime:
                 published_by_source.setdefault(str(snapshot.get("source") or ""), {})[signal_id] = copy.deepcopy(snapshot)
                 projection_snapshots[signal_id] = copy.deepcopy(snapshot)
         for source_key, snapshots in published_by_source.items():
+            await self._attach_live_market_contexts(snapshots)
+            await self._defer_scanner_snapshots_without_strict_live_market(
+                snapshots,
+                projection_snapshots=projection_snapshots,
+                reason="strict_ws_pricing_live_context_unavailable",
+            )
+            for signal_id, projection_snapshot in projection_snapshots.items():
+                live_market = (snapshots.get(signal_id, {}).get("payload_json") or {}).get(_LIVE_MARKET_PAYLOAD_KEY)
+                if not isinstance(live_market, dict):
+                    continue
+                payload = projection_snapshot.get("payload_json")
+                if not isinstance(payload, dict):
+                    payload = {}
+                else:
+                    payload = dict(payload)
+                payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_market)
+                projection_snapshot["payload_json"] = payload
             emitted_at_iso = _to_iso(now)
             for snapshot in snapshots.values():
                 _restamp_signal_emitted_at(snapshot, emitted_at_iso)
@@ -845,6 +1186,7 @@ class IntentRuntime:
                 if snapshot is None:
                     self._clear_deferred_state_locked(signal_id)
                     continue
+                source = str(snapshot.get("source") or "").strip().lower()
                 deferred_started_at = _normalize_datetime(snapshot.get("deferred_started_at"))
                 if deferred_started_at is None:
                     deferred_started_at = _normalize_datetime(snapshot.get("updated_at"))
@@ -853,7 +1195,8 @@ class IntentRuntime:
                 if deferred_started_at is None:
                     continue
                 age_seconds = (now - deferred_started_at).total_seconds()
-                if age_seconds < max_age:
+                required_age_seconds = 0.0 if source == "scanner" else max_age
+                if age_seconds < required_age_seconds:
                     continue
                 deferred_reason = str(snapshot.get("deferred_reason") or "").strip().lower()
                 if deferred_reason in quote_gated_reasons and not self._snapshot_ready_for_runtime(snapshot):
@@ -871,6 +1214,23 @@ class IntentRuntime:
         released_count = sum(len(v) for v in published_by_source.values())
         logger.info("Released %d deferred signals past max age %.1fs", released_count, max_age)
         for source_key, snapshots in published_by_source.items():
+            await self._attach_live_market_contexts(snapshots)
+            await self._defer_scanner_snapshots_without_strict_live_market(
+                snapshots,
+                projection_snapshots=projection_snapshots,
+                reason="strict_ws_pricing_live_context_unavailable",
+            )
+            for signal_id, projection_snapshot in projection_snapshots.items():
+                live_market = (snapshots.get(signal_id, {}).get("payload_json") or {}).get(_LIVE_MARKET_PAYLOAD_KEY)
+                if not isinstance(live_market, dict):
+                    continue
+                payload = projection_snapshot.get("payload_json")
+                if not isinstance(payload, dict):
+                    payload = {}
+                else:
+                    payload = dict(payload)
+                payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_market)
+                projection_snapshot["payload_json"] = payload
             emitted_at_iso = _to_iso(now)
             for snapshot in snapshots.values():
                 _restamp_signal_emitted_at(snapshot, emitted_at_iso)
@@ -912,6 +1272,7 @@ class IntentRuntime:
         reason: str = "strict_ws_context_missing",
         min_observed_at: Any = None,
         required_max_age_ms: int | None = None,
+        clear_live_market: bool = False,
     ) -> bool:
         normalized_signal_id = str(signal_id or "").strip()
         if not normalized_signal_id:
@@ -923,6 +1284,8 @@ class IntentRuntime:
             snapshot = self._signals_by_id.get(normalized_signal_id)
             if snapshot is None:
                 return False
+            if clear_live_market:
+                _clear_snapshot_live_market(snapshot)
             snapshot["status"] = "pending"
             snapshot["updated_at"] = _to_iso(utcnow())
             snapshot["runtime_sequence"] = None
@@ -1015,9 +1378,49 @@ class IntentRuntime:
                 }
                 if not snapshot["id"]:
                     continue
-                if snapshot["runtime_sequence"] is None and str(snapshot.get("status") or "").strip().lower() in _SIGNAL_ACTIVE_STATUSES:
-                    snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
-                    bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
+                source = str(snapshot.get("source") or "").strip().lower()
+                if source == "scanner":
+                    payload = snapshot.get("payload_json")
+                    if isinstance(payload, dict):
+                        payload = dict(payload)
+                        payload.pop("execution_armed_at", None)
+                        payload.pop(_DEFERRED_QUOTE_MIN_OBSERVED_AT_KEY, None)
+                        payload.pop(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY, None)
+                        snapshot["payload_json"] = payload
+                status = str(snapshot.get("status") or "").strip().lower()
+                runtime = _signal_runtime_metadata(
+                    snapshot.get("payload_json"),
+                    snapshot.get("strategy_context_json"),
+                )
+                activation = str(runtime.get("execution_activation") or "").strip().lower()
+                defer_reason: str | None = None
+                if snapshot["runtime_sequence"] is None and status in _SIGNAL_ACTIVE_STATUSES:
+                    if source == "scanner" and snapshot["required_token_ids"]:
+                        if self._tokens_have_fresh_ws_quotes(
+                            snapshot["required_token_ids"],
+                            source=source,
+                        ):
+                            snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                            bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
+                        else:
+                            defer_reason = "prewarm_waiting_for_strict_ws_quote"
+                    elif activation == "ws_post_arm_tick" and snapshot["required_token_ids"]:
+                        payload = snapshot.get("payload_json")
+                        if not isinstance(payload, dict):
+                            payload = {}
+                        else:
+                            payload = dict(payload)
+                        payload["execution_armed_at"] = str(
+                            payload.get("execution_armed_at")
+                            or snapshot.get("updated_at")
+                            or snapshot.get("created_at")
+                            or _to_iso(utcnow())
+                        )
+                        snapshot["payload_json"] = payload
+                        defer_reason = "awaiting_post_arm_ws_tick"
+                    else:
+                        snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                        bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
                 sequence = _normalize_runtime_sequence(snapshot.get("runtime_sequence"))
                 if sequence is not None:
                     self._next_runtime_sequence = max(self._next_runtime_sequence, sequence + 1)
@@ -1025,9 +1428,21 @@ class IntentRuntime:
                 if snapshot["dedupe_key"]:
                     self._signal_ids_by_dedupe_key[snapshot["dedupe_key"]] = snapshot["id"]
                 self._source_signal_ids.setdefault(snapshot["source"], set()).add(snapshot["id"])
-                if str(snapshot.get("status") or "").strip().lower() in _SIGNAL_ACTIVE_STATUSES:
+                if status in _SIGNAL_ACTIVE_STATUSES:
                     tokens_to_subscribe.update(snapshot.get("required_token_ids") or [])
+                if defer_reason is not None:
+                    self._set_deferred_state_locked(
+                        snapshot["id"],
+                        required_token_ids=snapshot["required_token_ids"],
+                        reason=defer_reason,
+                    )
         if bootstrap_snapshots:
+            await self._attach_live_market_contexts(bootstrap_snapshots)
+            await self._defer_scanner_snapshots_without_strict_live_market(
+                bootstrap_snapshots,
+                projection_snapshots=bootstrap_snapshots,
+                reason="strict_ws_pricing_live_context_unavailable",
+            )
             bootstrap_snapshots_by_source: dict[str, dict[str, dict[str, Any]]] = {}
             for signal_id, snapshot in bootstrap_snapshots.items():
                 source_key = str(snapshot.get("source") or "").strip()
@@ -1179,22 +1594,14 @@ class IntentRuntime:
                         .get("execution_activation", "")
                         or ""
                     )
+                    if normalized_source == "scanner":
+                        _ea = "ws_current"
                     if incoming_snapshot["status"] == "filtered":
                         incoming_snapshot["runtime_sequence"] = None
                         incoming_snapshot["deferred_until_ws"] = False
                         incoming_snapshot["deferred_reason"] = None
                         incoming_snapshot["deferred_started_at"] = None
-                    elif (
-                        _ea == "ws_post_arm_tick"
-                        and incoming_snapshot["required_token_ids"]
-                        and not (
-                            normalized_source == "scanner"
-                            and self._tokens_have_fresh_ws_quotes(
-                                incoming_snapshot["required_token_ids"],
-                                source=normalized_source,
-                            )
-                        )
-                    ):
+                    elif _ea == "ws_post_arm_tick" and incoming_snapshot["required_token_ids"]:
                         incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
                         self._set_deferred_state_locked(
                             existing["id"],
@@ -1246,19 +1653,11 @@ class IntentRuntime:
                         .get("execution_activation", "")
                         or ""
                     )
+                    if normalized_source == "scanner":
+                        _ea = "ws_current"
                     if incoming_snapshot["status"] == "filtered":
                         incoming_snapshot["runtime_sequence"] = None
-                    elif (
-                        _ea == "ws_post_arm_tick"
-                        and incoming_snapshot["required_token_ids"]
-                        and not (
-                            normalized_source == "scanner"
-                            and self._tokens_have_fresh_ws_quotes(
-                                incoming_snapshot["required_token_ids"],
-                                source=normalized_source,
-                            )
-                        )
-                    ):
+                    elif _ea == "ws_post_arm_tick" and incoming_snapshot["required_token_ids"]:
                         incoming_snapshot["payload_json"]["execution_armed_at"] = _to_iso(now)
                         self._set_deferred_state_locked(
                             signal_id,
@@ -1317,6 +1716,25 @@ class IntentRuntime:
             )
 
         if actionable_snapshots:
+            await self._attach_live_market_contexts(actionable_snapshots)
+            await self._defer_scanner_snapshots_without_strict_live_market(
+                actionable_snapshots,
+                projection_snapshots=projection_snapshots,
+                event_types=actionable_event_types,
+                reason="strict_ws_pricing_live_context_unavailable",
+            )
+            for signal_id, snapshot in actionable_snapshots.items():
+                projection_snapshot = projection_snapshots.get(signal_id)
+                live_market = (snapshot.get("payload_json") or {}).get(_LIVE_MARKET_PAYLOAD_KEY)
+                if projection_snapshot is None or not isinstance(live_market, dict):
+                    continue
+                payload = projection_snapshot.get("payload_json")
+                if not isinstance(payload, dict):
+                    payload = {}
+                else:
+                    payload = dict(payload)
+                payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_market)
+                projection_snapshot["payload_json"] = payload
             snapshots_by_event_type: dict[str, dict[str, dict[str, Any]]] = {}
             for signal_id, snapshot in actionable_snapshots.items():
                 event_type = str(actionable_event_types.get(signal_id) or "upsert_update")
@@ -1571,6 +1989,28 @@ class IntentRuntime:
             if not chunk:
                 break
             async with AsyncSessionLocal() as session:
+                chunk_dedupe_keys = [
+                    str(snapshot.get("dedupe_key") or "").strip()
+                    for snapshot in chunk
+                    if str(snapshot.get("dedupe_key") or "").strip()
+                ]
+                nonreactivable_dedupe_keys: set[str] = set()
+                if chunk_dedupe_keys:
+                    existing_rows = (
+                        await session.execute(
+                            select(TradeSignal.dedupe_key, TradeSignal.status).where(
+                                TradeSignal.source == source,
+                                TradeSignal.dedupe_key.in_(chunk_dedupe_keys),
+                            )
+                        )
+                    ).all()
+                    updatable_statuses = BUS_SIGNAL_ACTIVE_STATUSES | BUS_SIGNAL_REACTIVATABLE_STATUSES
+                    nonreactivable_dedupe_keys = {
+                        str(existing_dedupe_key or "").strip()
+                        for existing_dedupe_key, existing_status in existing_rows
+                        if str(existing_dedupe_key or "").strip()
+                        and str(existing_status or "").strip().lower() not in updatable_statuses
+                    }
                 for snapshot in chunk:
                     signal_type = str(snapshot.get("signal_type") or "").strip().lower()
                     if signal_type:
@@ -1578,6 +2018,9 @@ class IntentRuntime:
                     strategy_type = str(snapshot.get("strategy_type") or "").strip().lower()
                     if strategy_type:
                         strategy_types_in_batch.add(strategy_type)
+                    dedupe_key = str(snapshot.get("dedupe_key") or "").strip()
+                    if dedupe_key and dedupe_key in nonreactivable_dedupe_keys:
+                        continue
                     row = await upsert_trade_signal(
                         session,
                         source=str(snapshot.get("source") or source),
@@ -1596,7 +2039,7 @@ class IntentRuntime:
                         strategy_context_json=copy.deepcopy(snapshot.get("strategy_context_json") or {}),
                         quality_passed=snapshot.get("quality_passed"),
                         quality_rejection_reasons=list(snapshot.get("quality_rejection_reasons") or []),
-                        dedupe_key=str(snapshot.get("dedupe_key") or ""),
+                        dedupe_key=dedupe_key,
                         signal_id=str(snapshot.get("id") or "") or None,
                         runtime_sequence=snapshot.get("runtime_sequence"),
                         commit=False,

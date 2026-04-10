@@ -25,6 +25,7 @@ from services.live_price_snapshot import (
     get_live_mid_prices,
     normalize_binary_price_history,
 )
+from services import shared_state as scanner_shared_state
 from services.news import shared_state
 from services.pause_state import global_pause_state
 from utils.market_urls import build_market_url, infer_market_platform
@@ -446,13 +447,8 @@ def _history_candidates_for_finding(
 async def _load_scanner_market_history(
     session: AsyncSession,
 ) -> dict[str, list[dict[str, float]]]:
-    result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == "latest"))
-    row = result.scalar_one_or_none()
-    if row is None or not isinstance(row.market_history_json, dict):
-        return {}
-
     history_map: dict[str, list[dict[str, float]]] = {}
-    for raw_market_id, raw_points in row.market_history_json.items():
+    for raw_market_id, raw_points in (await scanner_shared_state.read_scanner_market_history(session)).items():
         market_id = normalize_market_id(raw_market_id)
         if not market_id:
             continue

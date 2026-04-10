@@ -1,5 +1,8 @@
+import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import models.database as database_module
@@ -10,7 +13,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from models.database import Base, LiveTradingOrder, LiveTradingPosition
-from services.live_execution_service import LiveExecutionService, Position
+from services.live_execution_service import LiveExecutionService, Order, OrderSide, OrderStatus, Position
 from tests.postgres_test_db import build_postgres_session_factory
 from utils.utcnow import utcnow
 
@@ -176,3 +179,45 @@ async def test_persist_positions_upserts_current_rows_and_deletes_stale_rows(tmp
             assert kept_row.size == 3.0
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(monkeypatch):
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = SimpleNamespace(get_orders=object(), get_order=object())
+
+    order = Order(
+        id="order-1",
+        token_id="token-1",
+        side=OrderSide.BUY,
+        price=0.73,
+        size=15.0,
+        status=OrderStatus.OPEN,
+        clob_order_id="clob-1",
+        market_question="Question 1",
+    )
+    service._orders[order.id] = order
+
+    calls: list[str] = []
+
+    async def _run_client_io(method, *args, timeout=None):
+        del args
+        del timeout
+        if method is service._client.get_orders:
+            calls.append("get_orders")
+            raise asyncio.TimeoutError()
+        if method is service._client.get_order:
+            calls.append("get_order")
+            raise AssertionError("single-order fallback should not run after bulk timeout")
+        raise AssertionError("unexpected client method")
+
+    monkeypatch.setattr(service, "_run_client_io", _run_client_io)
+    monkeypatch.setattr(service, "ensure_initialized", AsyncMock(return_value=False))
+    monkeypatch.setattr(service, "_persist_orders", AsyncMock())
+
+    snapshots = await service.get_order_snapshots_by_clob_ids(["clob-1"])
+
+    assert calls == ["get_orders"]
+    assert snapshots["clob-1"]["clob_order_id"] == "clob-1"
+    assert snapshots["clob-1"]["normalized_status"] == "open"

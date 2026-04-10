@@ -726,10 +726,10 @@ async def test_expire_stale_signals_keeps_runtime_revalidated_scanner_signal_pen
                     dedupe_key="dedupe_scanner_runtime_revalidated_stale",
                     status="pending",
                     payload_json={
-                        "strategy_runtime": {"execution_activation": "ws_post_arm_tick"},
+                        "strategy_runtime": {"execution_activation": "ws_current"},
                         "markets": [{"clob_token_ids": ["yes", "no"]}],
                     },
-                    strategy_context_json={"execution_activation": "ws_post_arm_tick"},
+                    strategy_context_json={"execution_activation": "ws_current"},
                     expires_at=now + timedelta(hours=2),
                     created_at=stale_created,
                     updated_at=stale_created,
@@ -809,10 +809,10 @@ async def test_list_trade_signals_keeps_runtime_revalidated_scanner_signal_pendi
                     dedupe_key="dedupe_scanner_runtime_revalidated_list_stale",
                     status="pending",
                     payload_json={
-                        "strategy_runtime": {"execution_activation": "ws_post_arm_tick"},
+                        "strategy_runtime": {"execution_activation": "ws_current"},
                         "markets": [{"clob_token_ids": ["yes", "no"]}],
                     },
-                    strategy_context_json={"execution_activation": "ws_post_arm_tick"},
+                    strategy_context_json={"execution_activation": "ws_current"},
                     expires_at=now + timedelta(hours=2),
                     created_at=stale_created,
                     updated_at=stale_created,
@@ -910,7 +910,6 @@ async def test_bridge_refreshes_prices_before_upsert(monkeypatch):
     monkeypatch.setattr(strategy_signal_bridge, "get_intent_runtime", lambda: fake_runtime)
 
     emitted = await bridge_opportunities_to_signals(
-        None,
         [opportunity],
         source="weather",
         sweep_missing=False,
@@ -970,7 +969,6 @@ async def test_bridge_serializes_datetime_strategy_context(monkeypatch):
     monkeypatch.setattr(strategy_signal_bridge, "get_intent_runtime", lambda: fake_runtime)
 
     emitted = await bridge_opportunities_to_signals(
-        None,
         [opportunity],
         source="traders",
         sweep_missing=True,

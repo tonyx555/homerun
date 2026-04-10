@@ -10,6 +10,7 @@ if str(BACKEND_ROOT) not in sys.path:
 
 import pytest
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from utils.utcnow import utcnow
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -44,6 +45,25 @@ def _build_scanner(
         # Tests that need specific strategies can still pass them explicitly.
         scanner.strategies = strategies if strategies is not None else []
         return scanner
+
+
+class _FakeAsyncSessionFactory:
+    def __init__(self):
+        self.sessions: list[SimpleNamespace] = []
+
+    def __call__(self):
+        factory = self
+
+        class _Context:
+            async def __aenter__(self_inner):
+                session = SimpleNamespace(commit=AsyncMock(), rollback=AsyncMock())
+                factory.sessions.append(session)
+                return session
+
+            async def __aexit__(self_inner, exc_type, exc, tb):
+                return False
+
+        return _Context()
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +235,56 @@ class TestScanPipeline:
         assert market_count == 1
         assert len(scanner._cached_markets) == 1
         assert scanner._cached_markets[0].id == "market-timeout-fallback"
+
+
+@pytest.mark.asyncio
+async def test_enqueue_detection_batch_publishes_runtime_signals_when_snapshot_persist_fails(monkeypatch):
+    from workers import scanner_worker
+
+    class _Session:
+        pass
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    opportunity = SimpleNamespace(
+        stable_id="scanner-opp-1",
+        id="scanner-opp-1",
+        strategy="basic",
+        markets=[],
+    )
+    bridge_mock = AsyncMock(return_value=1)
+    snapshot_mock = AsyncMock(side_effect=TimeoutError("snapshot timeout"))
+    clear_mock = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(scanner_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(scanner_worker, "bridge_opportunities_to_signals", bridge_mock)
+    monkeypatch.setattr(scanner_worker, "write_scanner_snapshot", snapshot_mock)
+    monkeypatch.setattr(scanner_worker, "clear_scan_request", clear_mock)
+    monkeypatch.setattr(
+        scanner_worker.quality_filter,
+        "evaluate_opportunity",
+        lambda opportunity, overrides=None: {"passed": True, "overrides": overrides, "id": opportunity.stable_id},
+    )
+    monkeypatch.setattr(scanner_worker.strategy_loader, "get_instance", lambda _strategy: None)
+
+    batch_id, pending, dropped = await scanner_worker._enqueue_detection_batch(
+        [opportunity],
+        {"running": True},
+        batch_kind="startup",
+        quality_reports={},
+    )
+
+    assert batch_id
+    assert pending == 0
+    assert dropped == 0
+    bridge_mock.assert_awaited_once()
+    snapshot_mock.assert_awaited_once()
+    clear_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_refresh_catalog_backfills_flat_market_event_context_from_event_payload(self, mock_polymarket_client):
@@ -1415,6 +1485,60 @@ class TestSharedPriceHistoryAttach:
         assert attached == 1
         assert len(opp.markets[0].get("price_history") or []) == 2
         assert scanner._hydrate_history_from_db.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_persist_market_history_for_opportunities_writes_only_changed_rows(self, monkeypatch):
+        import services.scanner as scanner_module
+        import services.shared_state as shared_state_module
+
+        scanner = _build_scanner(strategies=[])
+        scanner._market_price_history = {
+            "m_same": [
+                {"t": 1.0, "yes": 0.41, "no": 0.59},
+                {"t": 2.0, "yes": 0.43, "no": 0.57},
+            ],
+            "m_new": [
+                {"t": 1.0, "yes": 0.21, "no": 0.79},
+                {"t": 2.0, "yes": 0.24, "no": 0.76},
+            ],
+        }
+        scanner._persisted_market_history_signatures = {
+            "m_same": scanner._market_history_signature(scanner._market_price_history["m_same"]),
+        }
+        upsert_mock = AsyncMock(return_value=1)
+        session_factory = _FakeAsyncSessionFactory()
+        monkeypatch.setattr(shared_state_module, "upsert_scanner_market_history", upsert_mock)
+        monkeypatch.setattr(scanner_module, "AsyncSessionLocal", session_factory)
+
+        opp = Opportunity(
+            strategy="weather_edge",
+            title="Weather",
+            description="D",
+            total_cost=0.2,
+            expected_payout=0.5,
+            gross_profit=0.3,
+            fee=0.01,
+            net_profit=0.29,
+            roi_percent=145.0,
+            markets=[
+                {"id": "m_same", "platform": "polymarket", "yes_price": 0.2, "no_price": 0.8},
+                {"id": "m_new", "platform": "polymarket", "yes_price": 0.2, "no_price": 0.8},
+            ],
+            min_liquidity=1000.0,
+            max_position_size=10.0,
+            positions_to_take=[],
+        )
+
+        await scanner._persist_market_history_for_opportunities([opp])
+
+        upsert_mock.assert_awaited_once()
+        written_history = upsert_mock.await_args.args[1]
+        assert set(written_history.keys()) == {"m_new"}
+        assert len(session_factory.sessions) == 1
+        assert session_factory.sessions[0].commit.await_count == 1
+        assert scanner._persisted_market_history_signatures["m_new"] == scanner._market_history_signature(
+            scanner._market_price_history["m_new"]
+        )
 
     def test_merge_market_history_points_keeps_multi_outcome_vectors(self):
         scanner = _build_scanner(strategies=[])
