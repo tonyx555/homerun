@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 import models.database as database_module
+import services.live_execution_service as live_execution_service_module
+import services.polymarket as polymarket_module
 from sqlalchemy import select
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -221,3 +223,55 @@ async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(mo
     assert calls == ["get_orders"]
     assert snapshots["clob-1"]["clob_order_id"] == "clob-1"
     assert snapshots["clob-1"]["normalized_status"] == "open"
+
+
+@pytest.mark.asyncio
+async def test_sync_positions_marks_redeemable_claims_as_not_open(monkeypatch):
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = object()
+    service._wallet_address = "0xruntimewallet-sync"
+    monkeypatch.setattr(service, "_persist_positions", AsyncMock())
+    monkeypatch.setattr(service, "_persist_runtime_state", AsyncMock())
+    monkeypatch.setattr(
+        polymarket_module.polymarket_client,
+        "get_wallet_positions_with_prices",
+        AsyncMock(
+            return_value=[
+                {
+                    "asset": "token-open",
+                    "conditionId": "market-open",
+                    "title": "Open market",
+                    "outcome": "Yes",
+                    "size": 4.0,
+                    "avgPrice": 0.55,
+                    "currentPrice": 0.6,
+                    "cashPnl": 0.2,
+                    "redeemable": False,
+                    "endDate": "2026-04-11",
+                },
+                {
+                    "asset": "token-claim",
+                    "conditionId": "market-claim",
+                    "title": "Redeemable market",
+                    "outcome": "No",
+                    "size": 3.0,
+                    "avgPrice": 0.92,
+                    "currentPrice": 1.0,
+                    "cashPnl": 0.24,
+                    "redeemable": True,
+                    "endDate": "2026-04-10",
+                },
+            ]
+        ),
+    )
+
+    positions = await service.sync_positions()
+
+    assert len(positions) == 2
+    positions_by_token = {position.token_id: position for position in positions}
+    assert positions_by_token["token-open"].counts_as_open is True
+    assert positions_by_token["token-open"].redeemable is False
+    assert positions_by_token["token-claim"].counts_as_open is False
+    assert positions_by_token["token-claim"].redeemable is True
+    assert service._stats.open_positions == 1

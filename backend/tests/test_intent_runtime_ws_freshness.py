@@ -9,6 +9,7 @@ import pytest
 
 from services.intent_runtime import (
     IntentRuntime,
+    _SIGNAL_PUBLICATION_BATCH_SIZE,
     _extract_required_token_ids,
     _snapshot_has_strict_scanner_live_market,
     _strict_ws_ttl_seconds_for_source,
@@ -372,6 +373,81 @@ async def test_publish_opportunities_does_not_reactivate_unchanged_scanner_termi
     refreshed = runtime._signals_by_id[signal_id]
     assert refreshed["status"] == "skipped"
     assert refreshed["runtime_sequence"] is None
+
+
+@pytest.mark.asyncio
+async def test_publish_opportunities_batches_actionable_and_projection_work(monkeypatch):
+    published_batches: list[dict[str, object]] = []
+    projection_payloads: list[dict[str, object]] = []
+
+    async def _publish_signal_batch(**kwargs):
+        published_batches.append(kwargs)
+        return f"batch-{len(published_batches)}"
+
+    def _build_signal_contract(opportunity):
+        index = str(getattr(opportunity, "id"))
+        return (
+            f"market-{index}",
+            "buy_yes",
+            0.42,
+            f"Question {index}?",
+            {"markets": [{"id": f"market-{index}"}]},
+            {},
+        )
+
+    async def _enqueue_projection(payload: dict[str, object]) -> None:
+        projection_payloads.append(payload)
+
+    monkeypatch.setattr(
+        "services.intent_runtime.build_signal_contract_from_opportunity",
+        _build_signal_contract,
+    )
+    monkeypatch.setattr("services.intent_runtime.publish_signal_batch", _publish_signal_batch)
+    monkeypatch.setattr("services.intent_runtime.event_bus.publish", AsyncMock(return_value=None))
+
+    runtime = IntentRuntime()
+    runtime._publish_signal_stats = AsyncMock(return_value=None)
+    runtime._attach_live_market_contexts = AsyncMock(return_value=None)
+    runtime._defer_scanner_snapshots_without_strict_live_market = AsyncMock(return_value=None)
+    runtime._enqueue_projection = _enqueue_projection
+
+    opportunities = [
+        SimpleNamespace(
+            id=f"opp-{index}",
+            stable_id=f"stable-{index}",
+            strategy="generic_strategy",
+            roi_percent=7.5,
+            confidence=0.8,
+            min_liquidity=1000.0,
+            resolution_date=None,
+        )
+        for index in range((_SIGNAL_PUBLICATION_BATCH_SIZE * 2) + 50)
+    ]
+
+    published = await runtime.publish_opportunities(
+        opportunities,
+        source="scanner",
+        sweep_missing=True,
+    )
+
+    assert published == len(opportunities)
+    assert [len(batch["signal_ids"]) for batch in published_batches] == [
+        _SIGNAL_PUBLICATION_BATCH_SIZE,
+        _SIGNAL_PUBLICATION_BATCH_SIZE,
+        50,
+    ]
+    assert runtime._attach_live_market_contexts.await_count == 3
+    assert runtime._defer_scanner_snapshots_without_strict_live_market.await_count == 3
+    assert len(projection_payloads) == 4
+    assert [len(payload["snapshots"]) for payload in projection_payloads[:-1]] == [
+        _SIGNAL_PUBLICATION_BATCH_SIZE,
+        _SIGNAL_PUBLICATION_BATCH_SIZE,
+        50,
+    ]
+    assert all(payload["sweep_missing"] is False for payload in projection_payloads[:-1])
+    assert projection_payloads[-1]["snapshots"] == {}
+    assert projection_payloads[-1]["sweep_missing"] is True
+    assert len(projection_payloads[-1]["keep_dedupe_keys"]) == len(opportunities)
 
 
 @pytest.mark.asyncio
@@ -886,7 +962,7 @@ async def test_publish_opportunities_uses_fresh_scanner_ws_quotes_without_post_a
     assert snapshot["deferred_until_ws"] is False
     assert snapshot["deferred_reason"] is None
     assert snapshot["runtime_sequence"] is not None
-    assert "execution_armed_at" not in snapshot["payload_json"]
+    assert snapshot["payload_json"]["execution_armed_at"]
     published_snapshot = next(iter(published_batches[0]["signal_snapshots"].values()))
     assert published_snapshot["payload_json"]["signal_emitted_at"] == published_batches[0]["emitted_at"]
 
@@ -1139,6 +1215,7 @@ async def test_release_stale_deferred_signals_releases_ready_scanner_signal_on_n
     assert snapshot["runtime_sequence"] is not None
     assert snapshot["deferred_until_ws"] is False
     assert snapshot["deferred_reason"] is None
+    assert snapshot["payload_json"]["execution_armed_at"]
     assert len(published_batches) == 1
     assert published_batches[0]["event_type"] == "upsert_reactivated"
 

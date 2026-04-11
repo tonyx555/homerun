@@ -1070,6 +1070,9 @@ export interface TraderLiveWalletPosition {
   market_slug: string | null
   event_slug: string | null
   market_url: string | null
+  redeemable: boolean
+  counts_as_open: boolean
+  end_date: string | null
   is_managed: boolean
   managed_order_id: string | null
 }
@@ -1082,8 +1085,11 @@ export interface TraderLiveWalletPositionsPayload {
   managed_order_ids: string[]
   summary: {
     total_positions: number
+    open_positions: number
     managed_positions: number
+    managed_open_positions: number
     unmanaged_positions: number
+    unmanaged_open_positions: number
     returned_positions: number
   }
 }

@@ -338,6 +338,26 @@ def test_max_hold_still_triggers():
     assert "max hold" in decision.reason.lower()
 
 
+def test_generic_stop_loss_still_applies_outside_resolution_hold():
+    strategy = TailEndCarryStrategy()
+    position = _make_position(
+        entry_price=0.86,
+        current_price=0.72,
+        config={
+            "inversion_stop_enabled": False,
+            "trailing_stop_enabled": False,
+            "smart_take_profit_enabled": False,
+            "resolution_hold_enabled": False,
+            "stop_loss_pct": 10.0,
+        },
+    )
+
+    decision = strategy.should_exit(position, _market_state(0.72, seconds_left=86400.0))
+
+    assert decision.action == "close"
+    assert "stop loss" in decision.reason.lower()
+
+
 def test_evaluate_does_not_reapply_signal_phase_keyword_exclusions():
     strategy = TailEndCarryStrategy()
     signal = SimpleNamespace(

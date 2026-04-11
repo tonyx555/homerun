@@ -64,6 +64,11 @@ _TRADER_RECONCILE_TIMEOUT_SECONDS = 30.0
 _RECONCILIATION_CYCLE_TIMEOUT_SECONDS = 120.0
 _MAX_TRIGGER_DRAIN_PER_CYCLE = 128
 _TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
+_STARTUP_INTER_TRADER_SLEEP_SECONDS = 0.0
+_DEFAULT_INTER_TRADER_SLEEP_SECONDS = 0.1
+_SCHEDULED_CYCLE_COOLDOWN_SECONDS = 1.0
+_EVENT_CYCLE_COOLDOWN_SECONDS = 0.5
+_POSITION_TICK_CYCLE_COOLDOWN_SECONDS = 0.25
 _RECONCILE_TRIGGER_EVENTS = frozenset(
     {
         "trader_order",
@@ -80,6 +85,22 @@ _inflight_timed_tasks: dict[str, asyncio.Task] = {}
 
 class _TimedTaskStillRunningError(RuntimeError):
     pass
+
+
+def _inter_trader_sleep_seconds(*, reason: str) -> float:
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "startup":
+        return _STARTUP_INTER_TRADER_SLEEP_SECONDS
+    return _DEFAULT_INTER_TRADER_SLEEP_SECONDS
+
+
+def _post_cycle_cooldown_seconds(*, reason: str, provider_pass: bool) -> float:
+    normalized_reason = str(reason or "").strip().lower()
+    if normalized_reason == "position_tick" or not provider_pass:
+        return _POSITION_TICK_CYCLE_COOLDOWN_SECONDS
+    if normalized_reason.startswith("event:"):
+        return _EVENT_CYCLE_COOLDOWN_SECONDS
+    return _SCHEDULED_CYCLE_COOLDOWN_SECONDS
 
 
 def _reconcile_retry_delay_seconds(attempt: int) -> float:
@@ -686,6 +707,7 @@ async def _run_reconciliation_cycle(
     # Sleep between traders to release DB pool pressure — the reconciliation holds
     # a connection for 7-15s of Polymarket API I/O per trader, which starves the
     # trader orchestrator of connections for signal processing.
+    inter_trader_sleep_seconds = _inter_trader_sleep_seconds(reason=reason)
     results: list[dict[str, Any] | None | BaseException] = []
     for idx, trader in enumerate(traders):
         try:
@@ -693,8 +715,8 @@ async def _run_reconciliation_cycle(
         except Exception as exc:
             result = exc
         results.append(result)
-        if idx < len(traders) - 1:
-            await asyncio.sleep(1.5)
+        if inter_trader_sleep_seconds > 0.0 and idx < len(traders) - 1:
+            await asyncio.sleep(inter_trader_sleep_seconds)
         # Update heartbeat between traders to prevent stale detection
         if heartbeat_activity and idx < len(traders) - 1:
             try:
@@ -985,7 +1007,12 @@ async def run_worker_loop() -> None:
 
                 # Mandatory cooldown after each cycle to release DB pool pressure
                 # and let the trader orchestrator process signals uncontested.
-                await asyncio.sleep(5.0)
+                cooldown_seconds = _post_cycle_cooldown_seconds(
+                    reason=cycle_reason,
+                    provider_pass=provider_pass,
+                )
+                if cooldown_seconds > 0.0:
+                    await asyncio.sleep(cooldown_seconds)
 
                 # Sync position marks and exit registry for event-driven updates
                 await _sync_position_marks_and_exit_registry()

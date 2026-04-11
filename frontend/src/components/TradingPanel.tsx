@@ -81,7 +81,7 @@ import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getTraderOrderPlatformLinks } from '../lib/marketUrls'
-import { selectedAccountIdAtom, themeAtom } from '../store/atoms'
+import { accountModeAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -5346,7 +5346,8 @@ type TradingPanelProps = {
 
 export default function TradingPanel({ isConnected = false }: TradingPanelProps = {}) {
   const queryClient = useQueryClient()
-  const [selectedAccountId] = useAtom(selectedAccountIdAtom)
+  const [selectedAccountId, setSelectedAccountId] = useAtom(selectedAccountIdAtom)
+  const [, setAccountMode] = useAtom(accountModeAtom)
   const selectedAccountIsLive = Boolean(selectedAccountId?.startsWith('live:'))
   const selectedAccountMode: 'shadow' | 'live' = selectedAccountIsLive ? 'live' : 'shadow'
   const selectedTraderDataMode: 'shadow' | 'live' = selectedAccountId ? selectedAccountMode : 'live'
@@ -7490,16 +7491,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     ? orchestratorControl.settings.selected_account_id.trim()
     : ''
   const orchestratorBoundMode = String(orchestratorControl?.mode || '').trim().toLowerCase()
-  const orchestratorSelectedAccountMismatch =
-    orchestratorEnabled &&
-    Boolean(selectedAccountId) &&
-    Boolean(orchestratorBoundSelectedAccountId) &&
-    selectedAccountId !== orchestratorBoundSelectedAccountId
-  const orchestratorSelectedModeMismatch =
-    orchestratorEnabled &&
-    Boolean(selectedAccountId) &&
-    Boolean(orchestratorBoundMode) &&
-    orchestratorBoundMode !== selectedAccountMode
   const workerActivity = String(worker?.current_activity || '').trim().toLowerCase()
   const orchestratorWorkerRunning = Boolean(worker?.running)
   const orchestratorRunning = orchestratorEnabled && orchestratorWorkerRunning
@@ -7534,15 +7525,23 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     deleteTraderMutation.isPending
 
   useEffect(() => {
-    if (!orchestratorEnabled || stopByModeMutation.isPending) return
-    if (!orchestratorSelectedAccountMismatch && !orchestratorSelectedModeMismatch) return
-    stopByModeMutation.mutate()
-    setControlActionError('Stopped orchestrator because the global selected account no longer matches the running trading mode.')
+    if (!orchestratorEnabled) return
+    if (!orchestratorBoundSelectedAccountId) return
+    if (selectedAccountId !== orchestratorBoundSelectedAccountId) {
+      setSelectedAccountId(orchestratorBoundSelectedAccountId)
+    }
+    if (orchestratorBoundMode === 'live') {
+      setAccountMode('live')
+    } else if (orchestratorBoundMode === 'shadow') {
+      setAccountMode('sandbox')
+    }
   }, [
     orchestratorEnabled,
-    orchestratorSelectedAccountMismatch,
-    orchestratorSelectedModeMismatch,
-    stopByModeMutation,
+    orchestratorBoundSelectedAccountId,
+    orchestratorBoundMode,
+    selectedAccountId,
+    setAccountMode,
+    setSelectedAccountId,
   ])
   const globalSettingsBusy = updateGlobalSettingsMutation.isPending
 
@@ -9199,12 +9198,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => {
       if (selectedTrader?.mode === 'live') {
         const payload = selectedTraderLiveWalletPositionsQuery.data
-        const summaryCount = Number(payload?.summary?.returned_positions)
+        const summaryCount = Number(payload?.summary?.managed_open_positions)
         if (Number.isFinite(summaryCount)) {
           return Math.max(0, summaryCount)
         }
         if (Array.isArray(payload?.positions)) {
-          return payload.positions.length
+          return payload.positions.filter((position) => Boolean(position?.is_managed) && position?.counts_as_open !== false).length
         }
       }
       return selectedPositionBook.filter((row) => row.liveOrderCount > 0).length

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
+import asyncpg
 import pytest
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +55,64 @@ def test_enforce_strict_ws_strategy_params_caps_looser_existing_budget():
     assert params["strict_ws_price_sources"] == ["redis_strict"]
 
 
+def test_build_execution_latency_sample_uses_execution_armed_at_for_release_sla():
+    armed_at = datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc)
+    emitted_at = armed_at - timedelta(seconds=30)
+    signal = SimpleNamespace(
+        payload_json={
+            "execution_armed_at": armed_at.isoformat().replace("+00:00", "Z"),
+            "signal_emitted_at": emitted_at.isoformat().replace("+00:00", "Z"),
+            "ingested_at": emitted_at.isoformat().replace("+00:00", "Z"),
+        }
+    )
+
+    sample = trader_orchestrator_worker._build_execution_latency_sample(
+        signal,
+        wake_started_at=armed_at + timedelta(seconds=1),
+        context_ready_at=armed_at + timedelta(seconds=2),
+        decision_ready_at=armed_at + timedelta(seconds=3),
+        submit_started_at=armed_at + timedelta(seconds=4),
+        submit_completed_at=armed_at + timedelta(seconds=5),
+    )
+
+    assert sample["armed_to_ws_release_ms"] == 0
+    assert sample["emit_to_queue_wake_ms"] == 31000
+    assert sample["ws_release_to_submit_start_ms"] == 4000
+    assert sample["emit_to_submit_start_ms"] == 34000
+
+
+def test_maybe_log_execution_latency_sla_breach_does_not_repeat_same_signature(monkeypatch):
+    warnings: list[dict[str, object]] = []
+
+    def _warning(message: str, **kwargs):
+        warnings.append({"message": message, **kwargs})
+
+    monkeypatch.setattr(trader_orchestrator_worker.logger, "warning", _warning)
+    trader_orchestrator_worker._latency_sla_breach_logged_at.clear()
+    trader_orchestrator_worker._latency_sla_breach_last_signature.clear()
+
+    metrics = {
+        "execution_latency": {
+            "internal_sla_target_ms": 200,
+            "sample_count": 1,
+            "overall": {
+                "ws_release_to_submit_start_ms": {
+                    "p95": 18048,
+                    "p99": 18048,
+                }
+            },
+            "by_source": {},
+            "by_strategy": {},
+            "by_trader": {},
+        }
+    }
+
+    trader_orchestrator_worker._maybe_log_execution_latency_sla_breach(lane="general", metrics=metrics)
+    trader_orchestrator_worker._maybe_log_execution_latency_sla_breach(lane="general", metrics=metrics)
+
+    assert len(warnings) == 1
+
+
 @pytest.mark.asyncio
 async def test_write_orchestrator_snapshot_updates_runtime_status_before_db_write(monkeypatch):
     original_snapshot = runtime_status.get_orchestrator()
@@ -89,6 +148,46 @@ async def test_write_orchestrator_snapshot_updates_runtime_status_before_db_writ
         assert runtime_snapshot["interval_seconds"] == 5
         assert runtime_snapshot["last_run_at"] == last_run_at.isoformat().replace("+00:00", "Z")
         assert runtime_snapshot["stats"] == {"open_orders": 2}
+    finally:
+        runtime_status._orchestrator = original_snapshot  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_write_orchestrator_snapshot_swallows_query_canceled_errors(monkeypatch):
+    original_snapshot = runtime_status.get_orchestrator()
+    rollback_calls: list[str] = []
+
+    class _Session:
+        async def rollback(self):
+            rollback_calls.append("rollback")
+
+    async def _raise_query_canceled(_session, **_kwargs):
+        raise asyncpg.exceptions.QueryCanceledError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "write_orchestrator_snapshot",
+        _raise_query_canceled,
+    )
+
+    last_run_at = datetime(2026, 4, 10, 9, 15, 0, tzinfo=timezone.utc)
+    try:
+        await trader_orchestrator_worker._write_orchestrator_snapshot_best_effort(
+            _Session(),
+            running=True,
+            enabled=True,
+            current_activity="Cycle[runtime-trigger:general]",
+            interval_seconds=5,
+            last_run_at=last_run_at,
+            last_error=None,
+            stats={"open_orders": 1},
+        )
+
+        runtime_snapshot = runtime_status.get_orchestrator()
+        assert rollback_calls == ["rollback"]
+        assert runtime_snapshot["running"] is True
+        assert runtime_snapshot["current_activity"] == "Cycle[runtime-trigger:general]"
+        assert runtime_snapshot["last_run_at"] == last_run_at.isoformat().replace("+00:00", "Z")
     finally:
         runtime_status._orchestrator = original_snapshot  # type: ignore[attr-defined]
 
@@ -2859,6 +2958,7 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     decision_checks: list[list[dict]] = []
     submit_calls = {"count": 0}
     list_calls = {"count": 0}
+    evaluate_calls = {"count": 0}
 
     async def _list_unconsumed(*args, **kwargs):
         list_calls["count"] += 1
@@ -2991,6 +3091,7 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
     assert decisions_written == 1
     assert orders_written == 0
     assert submit_calls["count"] == 0
+    assert evaluate_calls["count"] == 0
     assert decisions[0]["decision"] == "blocked"
     assert "stacking guard" in decisions[0]["reason"].lower() or "market already occupied" in decisions[0]["reason"].lower()
 

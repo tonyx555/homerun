@@ -2369,6 +2369,9 @@ class LiveTradingPosition(Base):
     average_cost = Column(Float, nullable=False, default=0.0)
     current_price = Column(Float, nullable=False, default=0.0)
     unrealized_pnl = Column(Float, nullable=False, default=0.0)
+    redeemable = Column(Boolean, nullable=False, default=False, server_default="false")
+    counts_as_open = Column(Boolean, nullable=False, default=True, server_default="true")
+    end_date = Column(String, nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
 

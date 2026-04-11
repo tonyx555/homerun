@@ -333,6 +333,48 @@ async def test_run_loop_iteration_schedules_catalog_refresh_without_waiting(monk
 
 
 @pytest.mark.asyncio
+async def test_start_schedules_event_catalog_refresh_without_blocking_startup(monkeypatch):
+    runtime = market_runtime.MarketRuntime()
+    runtime._reference_runtime = SimpleNamespace(start=AsyncMock(), on_update=lambda *_args, **_kwargs: None)
+    fake_feed_manager = SimpleNamespace(
+        _started=False,
+        start=AsyncMock(),
+        cache=SimpleNamespace(add_on_update_callback=lambda *_args, **_kwargs: None),
+    )
+    refresh_calls: list[bool] = []
+    refresh_crypto = AsyncMock()
+
+    monkeypatch.setattr(market_runtime, "get_feed_manager", lambda: fake_feed_manager)
+    monkeypatch.setattr(runtime, "_schedule_event_catalog_refresh", lambda *, force=False: refresh_calls.append(bool(force)))
+    monkeypatch.setattr(runtime, "_refresh_crypto_markets", refresh_crypto)
+
+    await runtime.start()
+
+    runtime._reference_runtime.start.assert_awaited_once()
+    fake_feed_manager.start.assert_awaited_once()
+    refresh_crypto.assert_awaited_once_with(trigger="startup", full_source_sweep=True)
+    assert refresh_calls == [True]
+    assert runtime.started is True
+
+
+def test_get_market_snapshot_schedules_forced_catalog_refresh_on_event_market_miss(monkeypatch):
+    runtime = market_runtime.MarketRuntime()
+    runtime._last_catalog_refresh_mono = 0.0
+    refresh_calls: list[bool] = []
+
+    monkeypatch.setattr(market_runtime, "_CATALOG_MISS_REFRESH_SECONDS", 0.0)
+    monkeypatch.setattr(runtime, "_schedule_event_catalog_refresh", lambda *, force=False: refresh_calls.append(bool(force)))
+
+    snapshot = runtime.get_market_snapshot(
+        "missing-market",
+        hint={"condition_id": "missing-market", "clob_token_ids": ["yes-miss", "no-miss"]},
+    )
+
+    assert snapshot == {"condition_id": "missing-market", "clob_token_ids": ["yes-miss", "no-miss"]}
+    assert refresh_calls == [True]
+
+
+@pytest.mark.asyncio
 async def test_refresh_crypto_markets_publishes_snapshot_without_waiting_for_opportunity_dispatch(monkeypatch):
     fake_reference = _FakeReferenceRuntime({"BTC": 70000.0})
     monkeypatch.setattr(market_runtime, "get_reference_runtime", lambda: fake_reference)

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from utils.utcnow import utcnow
 from typing import Optional
 
-from sqlalchemy import select, func, and_, case
+from sqlalchemy import select, func, and_, case, or_
 from sqlalchemy.exc import DBAPIError
 
 from models.database import AsyncSessionLocal, OpportunityHistory
@@ -29,6 +29,8 @@ _RESOLUTION_CHECK_INTERVAL = 600  # 10 minutes
 
 # Only check opportunities detected within this window for resolution
 _MAX_RESOLUTION_AGE_DAYS = 90
+_RESOLUTION_LOOKAHEAD_HOURS = 6
+_RESOLUTION_CHECK_BATCH_SIZE = 500
 
 
 class OpportunityRecorder:
@@ -161,15 +163,30 @@ class OpportunityRecorder:
     async def _check_resolutions(self):
         """Check unresolved opportunities against the Polymarket API."""
         cutoff = utcnow() - timedelta(days=_MAX_RESOLUTION_AGE_DAYS)
+        resolution_due_by = utcnow() + timedelta(hours=_RESOLUTION_LOOKAHEAD_HOURS)
 
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(OpportunityHistory).where(
+                select(OpportunityHistory)
+                .where(
                     and_(
                         OpportunityHistory.was_profitable.is_(None),
                         OpportunityHistory.detected_at >= cutoff,
+                        or_(
+                            and_(
+                                OpportunityHistory.resolution_date.is_not(None),
+                                OpportunityHistory.resolution_date <= resolution_due_by,
+                            ),
+                            OpportunityHistory.resolution_date.is_(None),
+                        ),
                     )
                 )
+                .order_by(
+                    case((OpportunityHistory.resolution_date.is_(None), 1), else_=0),
+                    OpportunityHistory.resolution_date.asc(),
+                    OpportunityHistory.detected_at.asc(),
+                )
+                .limit(_RESOLUTION_CHECK_BATCH_SIZE)
             )
             unresolved = result.scalars().all()
 

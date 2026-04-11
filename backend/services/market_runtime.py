@@ -27,7 +27,8 @@ from utils.utcnow import utcnow
 logger = get_logger(__name__)
 
 _WS_REACTIVE_DEBOUNCE_SECONDS = max(0.01, float(getattr(settings, "CRYPTO_WS_REACTIVE_DEBOUNCE_SECONDS", 0.05) or 0.05))
-_CATALOG_REFRESH_SECONDS = 5.0
+_CATALOG_REFRESH_SECONDS = 300.0
+_CATALOG_MISS_REFRESH_SECONDS = 15.0
 _CRYPTO_SNAPSHOT_PERSIST_INTERVAL_SECONDS = 5.0
 _FULL_REFRESH_FLOOR_SECONDS = 0.5
 _LOOP_ITERATION_TIMEOUT_SECONDS = 30.0
@@ -360,6 +361,11 @@ class MarketRuntime:
         self._event_catalog_refresh_task = refresh_task
         refresh_task.add_done_callback(self._clear_event_catalog_refresh_task)
 
+    def _schedule_event_catalog_refresh_on_miss(self) -> None:
+        if (time.monotonic() - self._last_catalog_refresh_mono) < _CATALOG_MISS_REFRESH_SECONDS:
+            return
+        self._schedule_event_catalog_refresh(force=True)
+
     async def _await_with_cancel_grace(
         self,
         awaitable: Any,
@@ -415,7 +421,7 @@ class MarketRuntime:
             if not getattr(self._feed_manager, "_started", False):
                 await self._feed_manager.start()
             self._feed_manager.cache.add_on_update_callback(self._on_ws_price_update)
-            await self._refresh_event_catalog(force=True)
+            self._schedule_event_catalog_refresh(force=True)
             await self._refresh_crypto_markets(trigger="startup", full_source_sweep=True)
             self._started = True
             self._main_task = asyncio.create_task(self._run_loop(), name="market-runtime")
@@ -643,6 +649,8 @@ class MarketRuntime:
                 event_market = self._event_catalog_markets.get(token_id)
                 if event_market is not None:
                     return self._build_event_market_snapshot(event_market)
+        if normalized or hinted:
+            self._schedule_event_catalog_refresh_on_miss()
         return copy.deepcopy(hinted) if hinted else None
 
     def get_token_mid_price(self, token_id: str) -> float | None:

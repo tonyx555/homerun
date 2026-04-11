@@ -95,6 +95,9 @@ class PositionResponse(BaseModel):
     average_cost: float
     current_price: float
     unrealized_pnl: float
+    redeemable: bool = False
+    counts_as_open: bool = True
+    end_date: Optional[str] = None
 
     @classmethod
     def from_position(cls, pos: Position, market_info: Optional[dict] = None) -> "PositionResponse":
@@ -113,6 +116,9 @@ class PositionResponse(BaseModel):
             average_cost=pos.average_cost,
             current_price=pos.current_price,
             unrealized_pnl=pos.unrealized_pnl,
+            redeemable=bool(pos.redeemable),
+            counts_as_open=bool(pos.counts_as_open),
+            end_date=pos.end_date,
         )
 
 

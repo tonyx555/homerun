@@ -813,13 +813,22 @@ function App() {
     setAnalyzeMenuOpen(false)
   }, [opportunitiesView])
 
+  const usesSharedScannerOpportunitiesQuery =
+    activeTab === 'opportunities'
+    && opportunitiesView !== 'search'
+    && opportunitiesView !== 'crypto'
+    && opportunitiesView !== 'news'
+    && opportunitiesView !== 'weather'
+    && opportunitiesView !== 'traders'
+    && opportunitiesView !== 'sports'
+
   // Queries — WS pushes are primary; polling is a degraded fallback.
   // When WS is connected, polls are infrequent. When disconnected, revert to faster polling.
   const {
     data: opportunitiesData,
     isLoading: oppsLoading,
   } = useQuery({
-    queryKey: ['opportunities', selectedStrategy, selectedStrategySubtype, selectedCategory, minProfit, maxRisk, searchQuery, sortBy, sortDir, currentPage],
+    queryKey: ['opportunities', opportunitiesView, selectedStrategy, selectedStrategySubtype, selectedCategory, minProfit, maxRisk, searchQuery, sortBy, sortDir, currentPage],
     queryFn: () => getOpportunities({
       strategy: selectedStrategy || undefined,
       sub_strategy: selectedStrategySubtype || undefined,
@@ -832,6 +841,7 @@ function App() {
       limit: ITEMS_PER_PAGE,
       offset: currentPage * ITEMS_PER_PAGE
     }),
+    enabled: usesSharedScannerOpportunitiesQuery,
     refetchInterval: isConnected ? false : 10000,
   })
 
@@ -1179,7 +1189,7 @@ function App() {
     }
 
     const liveBalance = headerTradingBalance?.balance ?? 0
-    const livePositions = headerTradingPositions.length
+    const livePositions = headerTradingPositions.filter((position) => position.counts_as_open !== false).length
     const liveUnrealizedPnl = headerTradingPositions.reduce((sum, position) => sum + Number(position.unrealized_pnl || 0), 0)
     const livePositionMarketValue = headerTradingPositions.reduce(
       (sum, position) => sum + Number(position.size || 0) * Number(position.current_price || 0),
@@ -1268,6 +1278,7 @@ function App() {
       max_risk: maxRisk,
       search: searchQuery || undefined,
     }),
+    enabled: activeTab === 'opportunities' && opportunitiesView === 'scanner',
     refetchInterval: 15000,
   })
 
@@ -1282,6 +1293,7 @@ function App() {
       max_risk: maxRisk,
       search: searchQuery || undefined,
     }),
+    enabled: activeTab === 'opportunities' && opportunitiesView === 'scanner',
     refetchInterval: 15000,
   })
 
@@ -1296,7 +1308,7 @@ function App() {
       max_risk: maxRisk,
       search: searchQuery || undefined,
     }),
-    enabled: opportunitiesView === 'scanner' && !!selectedStrategy,
+    enabled: activeTab === 'opportunities' && opportunitiesView === 'scanner' && !!selectedStrategy,
     refetchInterval: 15000,
   })
 

@@ -10,7 +10,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import Base, Strategy, Trader, TraderOrder
+from models.database import Base, LiveTradingPosition, Strategy, Trader, TraderOrder
 from services import trader_orchestrator_state
 from services.trader_orchestrator_state import (
     adopt_live_wallet_position,
@@ -118,6 +118,27 @@ def _market_info_payload() -> dict:
     }
 
 
+async def _seed_live_wallet_position(session) -> None:
+    now = utcnow()
+    session.add(
+        LiveTradingPosition(
+            id=f"{WALLET_ADDRESS}:{TOKEN_YES}",
+            wallet_address=WALLET_ADDRESS,
+            token_id=TOKEN_YES,
+            market_id=CONDITION_ID,
+            market_question="Will BTC close above $100k on March 1?",
+            outcome="Yes",
+            size=20.0,
+            average_cost=0.41,
+            current_price=0.58,
+            unrealized_pnl=3.4,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await session.commit()
+
+
 @pytest_asyncio.fixture(scope="function")
 async def postgres_session_factory():
     engine, session_factory = await build_postgres_session_factory(Base, "trader_live_manual_position_adoption")
@@ -144,19 +165,10 @@ async def test_adopt_manual_live_wallet_position_creates_open_live_order(postgre
         "_resolve_execution_wallet_address",
         AsyncMock(return_value=WALLET_ADDRESS),
     )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_wallet_positions_with_prices",
-        AsyncMock(return_value=_wallet_positions_payload()),
-    )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_market_by_condition_id",
-        AsyncMock(return_value=_market_info_payload()),
-    )
 
     async with postgres_session_factory() as session:
         await _seed_live_trader(session)
+        await _seed_live_wallet_position(session)
 
         before = await list_live_wallet_positions_for_trader(session, trader_id=TRADER_ID)
         assert before["wallet_address"] == WALLET_ADDRESS
@@ -176,7 +188,7 @@ async def test_adopt_manual_live_wallet_position_creates_open_live_order(postgre
         order = await session.get(TraderOrder, order_id)
         assert order is not None
         assert order.mode == "live"
-        assert order.status == "open"
+        assert order.status == "executed"
         assert order.source == "manual_wallet_position"
         assert order.strategy_key == "manual_wallet_position"
 
@@ -200,19 +212,10 @@ async def test_adopt_manual_live_wallet_position_rejects_duplicate_token(postgre
         "_resolve_execution_wallet_address",
         AsyncMock(return_value=WALLET_ADDRESS),
     )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_wallet_positions_with_prices",
-        AsyncMock(return_value=_wallet_positions_payload()),
-    )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_market_by_condition_id",
-        AsyncMock(return_value=_market_info_payload()),
-    )
 
     async with postgres_session_factory() as session:
         await _seed_live_trader(session)
+        await _seed_live_wallet_position(session)
         await adopt_live_wallet_position(session, trader_id=TRADER_ID, token_id=TOKEN_YES)
 
         with pytest.raises(ValueError, match="already managed"):
@@ -227,20 +230,11 @@ async def test_adopt_manual_live_wallet_position_uses_trader_strategy_key(postgr
         "_resolve_execution_wallet_address",
         AsyncMock(return_value=WALLET_ADDRESS),
     )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_wallet_positions_with_prices",
-        AsyncMock(return_value=_wallet_positions_payload()),
-    )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_market_by_condition_id",
-        AsyncMock(return_value=_market_info_payload()),
-    )
 
     async with postgres_session_factory() as session:
         await _seed_live_trader(session, strategy_key=strategy_slug)
         await _seed_exit_only_strategy(session, strategy_slug)
+        await _seed_live_wallet_position(session)
 
         adopted = await adopt_live_wallet_position(
             session,
@@ -264,19 +258,10 @@ async def test_adopt_manual_live_wallet_position_requires_configured_strategy(po
         "_resolve_execution_wallet_address",
         AsyncMock(return_value=WALLET_ADDRESS),
     )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_wallet_positions_with_prices",
-        AsyncMock(return_value=_wallet_positions_payload()),
-    )
-    monkeypatch.setattr(
-        trader_orchestrator_state.polymarket_client,
-        "get_market_by_condition_id",
-        AsyncMock(return_value=_market_info_payload()),
-    )
 
     async with postgres_session_factory() as session:
         await _seed_live_trader(session, strategy_key="")
+        await _seed_live_wallet_position(session)
 
         with pytest.raises(ValueError, match="configured strategy"):
             await adopt_live_wallet_position(

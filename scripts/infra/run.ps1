@@ -76,6 +76,35 @@ function Test-TcpPort {
     }
 }
 
+function Test-TcpPortAvailableForBind {
+    param(
+        [string]$TargetHost,
+        [int]$Port
+    )
+
+    $listener = $null
+    try {
+        $ipAddress = if (-not $TargetHost -or $TargetHost -eq "0.0.0.0") {
+            [System.Net.IPAddress]::Any
+        } elseif ($TargetHost -eq "::" -or $TargetHost -eq "::0") {
+            [System.Net.IPAddress]::IPv6Any
+        } else {
+            [System.Net.IPAddress]::Parse($TargetHost)
+        }
+
+        $listener = [System.Net.Sockets.TcpListener]::new($ipAddress, $Port)
+        $listener.Server.ExclusiveAddressUse = $true
+        $listener.Start()
+        return $true
+    } catch {
+        return $false
+    } finally {
+        if ($listener) {
+            try { $listener.Stop() } catch {}
+        }
+    }
+}
+
 function Test-NpcapLoopbackInterference {
     <#
     .SYNOPSIS
@@ -1120,7 +1149,7 @@ function Get-AvailablePostgresPort {
     )
 
     for ($port = $StartPort; $port -le ($StartPort + 32); $port++) {
-        if (-not (Test-TcpPort -TargetHost $PgHost -Port $port)) {
+        if (Test-TcpPortAvailableForBind -TargetHost $PgHost -Port $port) {
             return $port
         }
     }
@@ -1187,7 +1216,7 @@ function Ensure-Postgres {
     }
 
     # Check if our Docker container is already running on the requested port
-    if (Test-TcpPort -TargetHost $PgHost -Port $Port) {
+    if (-not (Test-TcpPortAvailableForBind -TargetHost $PgHost -Port $Port)) {
         if (Test-PostgresDockerListenerOwned -ContainerName $ContainerName -Port $Port) {
             $script:postgresPort = [int]$Port
             Write-Host "Postgres already running on ${PgHost}:${Port}" -ForegroundColor Green
@@ -1196,12 +1225,12 @@ function Ensure-Postgres {
 
         Write-Host "Postgres port ${Port} is occupied by a non-launcher listener. Attempting to reclaim it..." -ForegroundColor Yellow
         if (Stop-ConflictingPostgresListener -PgHost $PgHost -Port $Port -ContainerName $ContainerName -DataDir $DataDir) {
-            if (-not (Test-TcpPort -TargetHost $PgHost -Port $Port)) {
+            if (Test-TcpPortAvailableForBind -TargetHost $PgHost -Port $Port) {
                 Write-Host "Reclaimed Postgres port ${Port}." -ForegroundColor Green
             }
         }
 
-        if (Test-TcpPort -TargetHost $PgHost -Port $Port) {
+        if (-not (Test-TcpPortAvailableForBind -TargetHost $PgHost -Port $Port)) {
             $alternatePort = Get-AvailablePostgresPort -PgHost $PgHost -StartPort ($Port + 1)
             if (-not $alternatePort) {
                 Write-Host "Port ${Port} is occupied and no alternate Postgres port is available." -ForegroundColor Red
@@ -1221,18 +1250,14 @@ function Ensure-Postgres {
         exit 1
     }
 
-    if (-not (Test-DockerRuntimeAvailable)) {
+    $dockerRuntimeReady = Test-DockerRuntimeAvailable
+    if (-not $dockerRuntimeReady) {
         Write-Host "Docker runtime unavailable after bootstrap. Re-invoking setup postgres bootstrap..." -ForegroundColor Yellow
         try {
             & .\scripts\infra\setup.ps1 -PostgresOnly
         } catch {
         }
-        if (-not (Wait-ForDockerRuntime -TimeoutSeconds 120)) {
-            Write-Host "Failed to start Docker runtime automatically." -ForegroundColor Red
-            Write-Host "Homerun requires Docker Desktop for launcher-managed Postgres on Windows." -ForegroundColor Yellow
-            Write-Host "Enable virtualization (Hyper-V/WSL2) and rerun Homerun.bat." -ForegroundColor Yellow
-            exit 1
-        }
+        $dockerRuntimeReady = Wait-ForDockerRuntime -TimeoutSeconds 120
     }
 
     Write-Host "Starting Postgres..." -ForegroundColor Cyan
@@ -1246,7 +1271,7 @@ function Ensure-Postgres {
     }
 
     $dockerStarted = $false
-    if (Wait-ForDockerRuntime -TimeoutSeconds 120) {
+    if ($dockerRuntimeReady -or (Wait-ForDockerRuntime -TimeoutSeconds 120)) {
         $dockerStarted = Start-PostgresDocker -PgHost $PgHost -Port $Port -Db $Db -User $User -Password $Password -ContainerName $ContainerName -Image $Image -DataDir $DataDir
     }
     $resolvedDockerPort = if ($script:lastPostgresDockerPublishedPort) { [int]$script:lastPostgresDockerPublishedPort } else { [int]$Port }
@@ -1268,8 +1293,17 @@ function Ensure-Postgres {
     }
     Show-PostgresDockerDiagnostics -ContainerName $ContainerName
 
+    $localStarted = Start-PostgresLocal -PgHost $PgHost -Port $Port -User $User -DataDir $DataDir
+    if ($localStarted -and (Wait-ForService -TargetHost $PgHost -Port $Port -TimeoutSeconds 90)) {
+        $script:postgresPort = [int]$Port
+        $script:postgresStartedByScript = $true
+        $script:postgresStartMode = "local"
+        Write-Host "Postgres started via local PostgreSQL on ${PgHost}:${Port}" -ForegroundColor Green
+        return
+    }
+
     Write-Host "Failed to start Postgres automatically." -ForegroundColor Red
-    Write-Host "Launcher could not confirm Postgres is reachable on ${PgHost}:${resolvedDockerPort}." -ForegroundColor Yellow
+    Write-Host "Launcher could not confirm Postgres is reachable on ${PgHost}:${Port}." -ForegroundColor Yellow
     Write-Host "Resolve the connectivity issue shown above, then rerun Homerun.bat." -ForegroundColor Yellow
     exit 1
 }
@@ -1689,13 +1723,13 @@ try {
         $env:DATABASE_URL = "postgresql+asyncpg://${postgresUser}:${postgresPassword}@${postgresHost}:${script:postgresPort}/${postgresDb}"
     }
 
-    New-Item -ItemType Directory -Path "backend\.runtime" -Force | Out-Null
-    Set-Content -Path "backend\.runtime\database_url" -Value $env:DATABASE_URL -Encoding UTF8
-
     & backend\venv\Scripts\python.exe .\scripts\infra\ensure_postgres_ready.py --database-url $env:DATABASE_URL --retries 240 --retry-delay-seconds 0.5
     if ($LASTEXITCODE -ne 0) {
         throw "Postgres readiness validation failed"
     }
+
+    New-Item -ItemType Directory -Path "backend\.runtime" -Force | Out-Null
+    Set-Content -Path "backend\.runtime\database_url" -Value $env:DATABASE_URL -Encoding UTF8
 
     # Activate venv
     & backend\venv\Scripts\Activate.ps1

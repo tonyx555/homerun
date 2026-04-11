@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_FLOOR
 import uuid
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -59,6 +59,7 @@ _CLOB_READ_TIMEOUT_SECONDS = 3.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
 _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
 _CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
+_OPEN_ORDER_SNAPSHOT_CACHE_TTL_SECONDS = 2.0
 _BALANCE_CACHE_TTL_SECONDS = 5.0  # short-lived cache to deduplicate calls within one order pipeline
 
 
@@ -313,6 +314,9 @@ class Position:
     average_cost: float  # Average price paid
     current_price: float = 0.0
     unrealized_pnl: float = 0.0
+    redeemable: bool = False
+    counts_as_open: bool = True
+    end_date: Optional[str] = None
     created_at: datetime = field(default_factory=utcnow)
 
 
@@ -379,6 +383,8 @@ class LiveExecutionService:
         self._clob_read_consecutive_failures: int = 0
         self._clob_read_circuit_open_until: Optional[float] = None
         self._clob_read_last_failure_logged: float = 0.0
+        self._open_order_snapshot_cache: Optional[dict[str, dict[str, Any]]] = None
+        self._open_order_snapshot_cache_at: float = 0.0
         # Short-lived balance cache to avoid repeated CLOB calls within the same
         # order submission pipeline (signature refresh + buy gate both call get_balance).
         self._balance_cache: Optional[dict] = None
@@ -1662,6 +1668,7 @@ class LiveExecutionService:
             for attempt in range(_DB_RETRY_ATTEMPTS):
                 async with AsyncSessionLocal() as session:
                     try:
+                        wallet_key = str(wallet).strip().lower()
                         persisted_at = utcnow()
                         position_ids: set[str] = set()
                         position_rows: list[dict[str, Any]] = []
@@ -1669,12 +1676,12 @@ class LiveExecutionService:
                             token_id = str(position.token_id or "").strip()
                             if not token_id:
                                 continue
-                            position_id = f"{wallet}:{token_id}"
+                            position_id = f"{wallet_key}:{token_id}"
                             position_ids.add(position_id)
                             position_rows.append(
                                 {
                                     "id": position_id,
-                                    "wallet_address": wallet,
+                                    "wallet_address": wallet_key,
                                     "token_id": token_id,
                                     "market_id": str(position.market_id or "").strip(),
                                     "market_question": position.market_question,
@@ -1683,12 +1690,15 @@ class LiveExecutionService:
                                     "average_cost": float(position.average_cost),
                                     "current_price": float(position.current_price),
                                     "unrealized_pnl": float(position.unrealized_pnl),
+                                    "redeemable": bool(position.redeemable),
+                                    "counts_as_open": bool(position.counts_as_open),
+                                    "end_date": str(position.end_date or "").strip() or None,
                                     "created_at": _normalize_utc_datetime(position.created_at) or persisted_at,
                                     "updated_at": persisted_at,
                                 }
                             )
                         stale_rows_query = delete(LiveTradingPosition).where(
-                            LiveTradingPosition.wallet_address == wallet
+                            func.lower(func.coalesce(LiveTradingPosition.wallet_address, "")) == wallet_key
                         )
                         if position_ids:
                             stale_rows_query = stale_rows_query.where(~LiveTradingPosition.id.in_(list(position_ids)))
@@ -1708,6 +1718,9 @@ class LiveExecutionService:
                                         "average_cost": insert_stmt.excluded.average_cost,
                                         "current_price": insert_stmt.excluded.current_price,
                                         "unrealized_pnl": insert_stmt.excluded.unrealized_pnl,
+                                        "redeemable": insert_stmt.excluded.redeemable,
+                                        "counts_as_open": insert_stmt.excluded.counts_as_open,
+                                        "end_date": insert_stmt.excluded.end_date,
                                         "updated_at": insert_stmt.excluded.updated_at,
                                     },
                                 )
@@ -1807,8 +1820,11 @@ class LiveExecutionService:
                         runtime_row = runtime_result.scalar_one_or_none()
 
                         self._positions.clear()
+                        wallet_key = str(wallet).strip().lower()
                         positions_result = await session.execute(
-                            select(LiveTradingPosition).where(LiveTradingPosition.wallet_address == wallet)
+                            select(LiveTradingPosition).where(
+                                func.lower(func.coalesce(LiveTradingPosition.wallet_address, "")) == wallet_key
+                            )
                         )
                         for row in positions_result.scalars().all():
                             token_id = str(row.token_id or "").strip()
@@ -1823,8 +1839,14 @@ class LiveExecutionService:
                                 average_cost=float(safe_float(row.average_cost, 0.0) or 0.0),
                                 current_price=float(safe_float(row.current_price, 0.0) or 0.0),
                                 unrealized_pnl=float(safe_float(row.unrealized_pnl, 0.0) or 0.0),
+                                redeemable=bool(getattr(row, "redeemable", False)),
+                                counts_as_open=coerce_bool(getattr(row, "counts_as_open", True), default=True),
+                                end_date=str(getattr(row, "end_date", "") or "").strip() or None,
                                 created_at=_normalize_utc_datetime(row.created_at) or utcnow(),
                             )
+                        self._stats.open_positions = sum(
+                            1 for position in self._positions.values() if bool(position.counts_as_open)
+                        )
 
                         self._orders.clear()
                         orders_result = await session.execute(
@@ -2027,6 +2049,28 @@ class LiveExecutionService:
             "raw": None,
         }
 
+    def _remember_open_order_snapshot_cache(self, snapshots: dict[str, dict[str, Any]]) -> None:
+        cached: dict[str, dict[str, Any]] = {}
+        for raw_clob_id, raw_snapshot in (snapshots or {}).items():
+            clob_id = str(raw_clob_id or "").strip()
+            if not clob_id or not isinstance(raw_snapshot, dict):
+                continue
+            cached[clob_id] = dict(raw_snapshot)
+        self._open_order_snapshot_cache = cached
+        self._open_order_snapshot_cache_at = _time.monotonic()
+
+    def _get_recent_open_order_snapshot_cache(self) -> Optional[dict[str, dict[str, Any]]]:
+        if self._open_order_snapshot_cache is None:
+            return None
+        age_seconds = _time.monotonic() - float(self._open_order_snapshot_cache_at or 0.0)
+        if age_seconds > _OPEN_ORDER_SNAPSHOT_CACHE_TTL_SECONDS:
+            return None
+        return {
+            clob_id: dict(snapshot)
+            for clob_id, snapshot in self._open_order_snapshot_cache.items()
+            if isinstance(snapshot, dict)
+        }
+
     def _parse_provider_order_snapshot(self, server_order: dict[str, Any]) -> Optional[dict[str, Any]]:
         clob_order_id = str(
             server_order.get("id")
@@ -2156,54 +2200,70 @@ class LiveExecutionService:
         provider_fetch_ok = False
         provider_bulk_fetch_failed = False
         per_order_not_found: set[str] = set()
+        used_recent_open_order_snapshot_cache = False
 
         def _ingest_open_orders(response_payload: Any) -> None:
             nonlocal provider_fetch_ok
             provider_fetch_ok = True
+            parsed_snapshots: dict[str, dict[str, Any]] = {}
             for server_order in self._extract_server_orders(response_payload):
                 snapshot = self._parse_provider_order_snapshot(server_order)
                 if snapshot is None:
                     continue
                 clob_id = str(snapshot["clob_order_id"])
+                parsed_snapshots[clob_id] = snapshot
                 if clob_id in requested:
                     snapshots[clob_id] = snapshot
+            self._remember_open_order_snapshot_cache(parsed_snapshots)
 
-        try:
-            response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
-            _ingest_open_orders(response)
-        except Exception as exc:
-            provider_bulk_fetch_failed = True
-            if _is_transient_transport_error(exc):
-                logger.warning("Failed to fetch open provider orders", exc_info=exc)
-            else:
-                logger.error("Failed to fetch open provider orders", exc_info=exc)
+        recent_open_order_snapshots = self._get_recent_open_order_snapshot_cache()
+        if recent_open_order_snapshots is not None:
+            used_recent_open_order_snapshot_cache = True
+            provider_fetch_ok = True
+            for clob_id in requested:
+                snapshot = recent_open_order_snapshots.get(clob_id)
+                if snapshot is not None:
+                    snapshots[clob_id] = dict(snapshot)
+            per_order_not_found.update(requested.difference(snapshots.keys()))
+        elif self._clob_read_circuit_open():
+            return cached_fallback
+        else:
             try:
-                reinitialized = await self.ensure_initialized()
-            except Exception as reinit_exc:
-                logger.warning(
-                    "Trading client reinitialization failed while fetching order snapshots",
-                    exc_info=reinit_exc,
-                )
-                reinitialized = False
-            if reinitialized and self.is_ready():
+                response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
+                _ingest_open_orders(response)
+            except Exception as exc:
+                provider_bulk_fetch_failed = True
+                if _is_transient_transport_error(exc):
+                    logger.warning("Failed to fetch open provider orders", exc_info=exc)
+                else:
+                    logger.error("Failed to fetch open provider orders", exc_info=exc)
                 try:
-                    response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
-                    _ingest_open_orders(response)
-                    provider_bulk_fetch_failed = False
-                except Exception as retry_exc:
-                    if _is_transient_transport_error(retry_exc):
-                        logger.warning(
-                            "Failed to fetch open provider orders after reinitializing trading client",
-                            exc_info=retry_exc,
-                        )
-                    else:
-                        logger.error(
-                            "Failed to fetch open provider orders after reinitializing trading client",
-                            exc_info=retry_exc,
-                        )
+                    reinitialized = await self.ensure_initialized()
+                except Exception as reinit_exc:
+                    logger.warning(
+                        "Trading client reinitialization failed while fetching order snapshots",
+                        exc_info=reinit_exc,
+                    )
+                    reinitialized = False
+                if reinitialized and self.is_ready():
+                    try:
+                        response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
+                        _ingest_open_orders(response)
+                        provider_bulk_fetch_failed = False
+                    except Exception as retry_exc:
+                        if _is_transient_transport_error(retry_exc):
+                            logger.warning(
+                                "Failed to fetch open provider orders after reinitializing trading client",
+                                exc_info=retry_exc,
+                            )
+                        else:
+                            logger.error(
+                                "Failed to fetch open provider orders after reinitializing trading client",
+                                exc_info=retry_exc,
+                            )
 
         missing = requested.difference(snapshots.keys())
-        if missing and hasattr(self._client, "get_order") and not provider_bulk_fetch_failed:
+        if missing and hasattr(self._client, "get_order") and not provider_bulk_fetch_failed and not used_recent_open_order_snapshot_cache:
             for clob_id in sorted(missing):
                 try:
                     single_response = await self._run_client_io(
@@ -2357,6 +2417,7 @@ class LiveExecutionService:
         self._clob_read_record_success("Provider open orders sync")
 
         provider_orders = self._extract_server_orders(provider_response)
+        provider_snapshots_by_clob: dict[str, dict[str, Any]] = {}
         updated_orders: list[Order] = []
         provider_clob_ids: set[str] = set()
         existing_by_clob: dict[str, list[Order]] = {}
@@ -2377,6 +2438,7 @@ class LiveExecutionService:
                 continue
 
             clob_order_id = str(snapshot["clob_order_id"])
+            provider_snapshots_by_clob[clob_order_id] = dict(snapshot)
             provider_clob_ids.add(clob_order_id)
             candidates = existing_by_clob.get(clob_order_id, [])
             local_order: Optional[Order] = None
@@ -2484,6 +2546,8 @@ class LiveExecutionService:
             cached.status = OrderStatus.FILLED if float(cached.filled_size or 0.0) > 0 else OrderStatus.CANCELLED
             cached.updated_at = utcnow()
             updated_orders.append(cached)
+
+        self._remember_open_order_snapshot_cache(provider_snapshots_by_clob)
 
         now = utcnow()
         immediate_order_cutoff = 30.0
@@ -3390,6 +3454,8 @@ class LiveExecutionService:
                     "cashPnl",
                     "cash_pnl",
                 )
+                redeemable = bool(pos.get("redeemable"))
+                end_date = _read_text(pos, "endDate", "end_date")
 
                 if (size is None or size <= 0.0) and current_value is not None and current_value > 0.0:
                     if current_price is not None and current_price > 0.0:
@@ -3426,11 +3492,14 @@ class LiveExecutionService:
                     average_cost=float(average_cost),
                     current_price=float(current_price),
                     unrealized_pnl=float(unrealized_pnl),
+                    redeemable=redeemable,
+                    counts_as_open=not redeemable,
+                    end_date=end_date or None,
                 )
 
             self._positions = next_positions
 
-            self._stats.open_positions = len(self._positions)
+            self._stats.open_positions = sum(1 for position in self._positions.values() if bool(position.counts_as_open))
             await self._persist_positions()
             await self._persist_runtime_state()
 

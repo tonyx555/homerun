@@ -180,3 +180,129 @@ async def test_intent_runtime_hydrate_republishes_bootstrap_pending_signals(monk
     assert publish_mock.await_args.kwargs["signal_ids"] == ["sig-bootstrap-1"]
     assert publish_mock.await_args.kwargs["reason"] == "bootstrap_pending_signals"
     assert runtime._signals_by_id["sig-bootstrap-1"]["runtime_sequence"] == 1
+
+
+@pytest.mark.asyncio
+async def test_intent_runtime_hydrate_skips_stale_terminal_history(monkeypatch) -> None:
+    now = utcnow()
+    stale_terminal_updated_at = now - intent_runtime_module.timedelta(
+        hours=intent_runtime_module._BOOTSTRAP_REACTIVATABLE_LOOKBACK_HOURS + 1
+    )
+
+    class _Result:
+        def __init__(self, rows: list[dict[str, object]]) -> None:
+            self._rows = rows
+
+        def mappings(self) -> "_Result":
+            return self
+
+        def all(self) -> list[dict[str, object]]:
+            return self._rows
+
+    class _Session:
+        async def execute(self, *args, **kwargs) -> _Result:
+            del args, kwargs
+            return _Result(
+                [
+                    {
+                        "id": "sig-active-old",
+                        "source": "crypto",
+                        "source_item_id": "stable-active-old",
+                        "signal_type": "crypto_worker_15m",
+                        "strategy_type": "btc_eth_highfreq",
+                        "market_id": "market-active-old",
+                        "market_question": "Active question?",
+                        "direction": "no",
+                        "entry_price": 0.91,
+                        "effective_price": None,
+                        "edge_percent": 1.7,
+                        "confidence": 0.75,
+                        "liquidity": 120.0,
+                        "expires_at": now,
+                        "status": "pending",
+                        "payload_json": {"signal_emitted_at": now.isoformat().replace("+00:00", "Z")},
+                        "strategy_context_json": {"source_key": "crypto", "execution_activation": "immediate"},
+                        "quality_passed": True,
+                        "quality_rejection_reasons": None,
+                        "dedupe_key": "dedupe-active-old",
+                        "runtime_sequence": None,
+                        "created_at": now - intent_runtime_module.timedelta(days=7),
+                        "updated_at": now - intent_runtime_module.timedelta(days=7),
+                    },
+                    {
+                        "id": "sig-terminal-recent",
+                        "source": "scanner",
+                        "source_item_id": "stable-terminal-recent",
+                        "signal_type": "scanner_opportunity",
+                        "strategy_type": "tail_end_carry",
+                        "market_id": "market-terminal-recent",
+                        "market_question": "Recent terminal question?",
+                        "direction": "buy_yes",
+                        "entry_price": 0.93,
+                        "effective_price": 0.93,
+                        "edge_percent": 2.0,
+                        "confidence": 0.8,
+                        "liquidity": 180.0,
+                        "expires_at": now,
+                        "status": "expired",
+                        "payload_json": {"signal_emitted_at": now.isoformat().replace("+00:00", "Z")},
+                        "strategy_context_json": {"source_key": "scanner", "execution_activation": "ws_current"},
+                        "quality_passed": True,
+                        "quality_rejection_reasons": None,
+                        "dedupe_key": "dedupe-terminal-recent",
+                        "runtime_sequence": None,
+                        "created_at": now - intent_runtime_module.timedelta(hours=2),
+                        "updated_at": now - intent_runtime_module.timedelta(hours=2),
+                    },
+                    {
+                        "id": "sig-terminal-stale",
+                        "source": "scanner",
+                        "source_item_id": "stable-terminal-stale",
+                        "signal_type": "scanner_opportunity",
+                        "strategy_type": "tail_end_carry",
+                        "market_id": "market-terminal-stale",
+                        "market_question": "Stale terminal question?",
+                        "direction": "buy_yes",
+                        "entry_price": 0.94,
+                        "effective_price": 0.94,
+                        "edge_percent": 1.5,
+                        "confidence": 0.7,
+                        "liquidity": 90.0,
+                        "expires_at": now,
+                        "status": "expired",
+                        "payload_json": {"signal_emitted_at": now.isoformat().replace("+00:00", "Z")},
+                        "strategy_context_json": {"source_key": "scanner", "execution_activation": "ws_current"},
+                        "quality_passed": True,
+                        "quality_rejection_reasons": None,
+                        "dedupe_key": "dedupe-terminal-stale",
+                        "runtime_sequence": None,
+                        "created_at": stale_terminal_updated_at,
+                        "updated_at": stale_terminal_updated_at,
+                    },
+                ]
+            )
+
+    class _SessionContext:
+        async def __aenter__(self) -> _Session:
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb) -> bool:
+            del exc_type, exc, tb
+            return False
+
+    publish_mock = AsyncMock(return_value="batch-1")
+    monkeypatch.setattr(intent_runtime_module, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(intent_runtime_module, "publish_signal_batch", publish_mock)
+
+    runtime = intent_runtime_module.IntentRuntime()
+    runtime._enqueue_projection = AsyncMock(return_value=None)
+    runtime._publish_signal_stats = AsyncMock(return_value=None)
+
+    await runtime.hydrate_from_db()
+
+    assert set(runtime._signals_by_id.keys()) == {"sig-active-old", "sig-terminal-recent"}
+    assert runtime._signals_by_id["sig-active-old"]["runtime_sequence"] == 1
+    assert runtime._signals_by_id["sig-terminal-recent"]["status"] == "expired"
+    assert "sig-terminal-stale" not in runtime._signals_by_id
+    assert publish_mock.await_count == 1
+    assert publish_mock.await_args.kwargs["signal_ids"] == ["sig-active-old"]

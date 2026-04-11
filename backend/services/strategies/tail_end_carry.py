@@ -8,7 +8,7 @@ liquidity/spread quality and non-trivial expected repricing room.
 from __future__ import annotations
 
 import re
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -35,6 +35,16 @@ from utils.converters import safe_float
 from services.quality_filter import QualityFilterOverrides
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _StopLossPosition:
+    config: dict[str, Any]
+    entry_price: float
+    age_minutes: float | None
+    highest_price: float | None
+    outcome_idx: int
+    strategy_context: dict[str, Any]
 
 # -- Market category constants ------------------------------------------------
 
@@ -208,7 +218,7 @@ class TailEndCarryStrategy(BaseStrategy):
         "price_policy": "taker_limit",
         "time_in_force": "IOC",
         "allow_taker_limit_buy_above_signal": True,
-        "aggressive_limit_buy_submit_as_gtc": True,
+        "aggressive_limit_buy_submit_as_gtc": False,
         "immediate_break_even_stop_enabled": True,
         "immediate_break_even_stop_buffer_pct": 0.5,
         "max_market_data_age_ms": 15000,
@@ -487,7 +497,7 @@ class TailEndCarryStrategy(BaseStrategy):
         skip_live_games = _is_bool_true(cfg.get("skip_live_games", True))
         live_game_buffer_minutes = max(0.0, safe_float(cfg.get("live_game_buffer_minutes"), 15.0))
         allow_taker_limit_buy_above_signal = _is_bool_true(cfg.get("allow_taker_limit_buy_above_signal", True))
-        aggressive_limit_buy_submit_as_gtc = _is_bool_true(cfg.get("aggressive_limit_buy_submit_as_gtc", True))
+        aggressive_limit_buy_submit_as_gtc = _is_bool_true(cfg.get("aggressive_limit_buy_submit_as_gtc", False))
 
         return {
             "min_probability": min_probability,
@@ -1295,6 +1305,32 @@ class TailEndCarryStrategy(BaseStrategy):
                 f"Max hold exceeded ({age_minutes:.0f} >= {max_hold_minutes:.0f} min)",
                 close_price=current_price,
             )
+
+        stop_loss_config = {
+            key: config[key]
+            for key in (
+                "resolve_only",
+                "min_hold_minutes",
+                "stop_loss_pct",
+                "stop_loss_policy",
+                "stop_loss_mode",
+                "stop_loss_activation_seconds",
+                "stop_loss_near_close_seconds",
+            )
+            if key in config
+        }
+        if stop_loss_config:
+            stop_loss_position = _StopLossPosition(
+                config=stop_loss_config,
+                entry_price=entry_price,
+                age_minutes=age_minutes,
+                highest_price=highest_price,
+                outcome_idx=getattr(position, "outcome_idx", 0),
+                strategy_context=strategy_context,
+            )
+            stop_loss_exit = self.default_exit_check(stop_loss_position, market_state)
+            if stop_loss_exit.action != "hold":
+                return stop_loss_exit
 
         return ExitDecision(
             "hold",

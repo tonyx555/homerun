@@ -306,6 +306,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     const visibleTradingPositions = polymarketReady
       ? tradingPositions.filter((position) => toFiniteNumber(position.size) > 0)
       : []
+    const openRiskTradingPositions = visibleTradingPositions.filter((position) => position.counts_as_open !== false)
     const exposure = visibleTradingPositions.reduce(
       (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
       0
@@ -321,7 +322,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       balance: polymarketReady ? toFiniteNumber(tradingBalance?.balance) : 0,
       available: polymarketReady ? toFiniteNumber(tradingBalance?.available) : 0,
       exposure,
-      openPositions: visibleTradingPositions.length,
+      openPositions: openRiskTradingPositions.length,
       unrealizedPnl,
     }
   }, [

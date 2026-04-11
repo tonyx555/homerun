@@ -112,6 +112,28 @@ class _NoOpenOrdersClient:
         return []
 
 
+class _CachedSnapshotClient:
+    def __init__(self):
+        self.get_orders_calls = 0
+        self.get_order_calls: list[str] = []
+
+    def get_orders(self):
+        self.get_orders_calls += 1
+        return [
+            {
+                "id": "clob-open",
+                "status": "open",
+                "size": "10",
+                "size_matched": "0",
+                "price": "0.41",
+            }
+        ]
+
+    def get_order(self, clob_order_id: str):
+        self.get_order_calls.append(clob_order_id)
+        raise AssertionError("fresh open-order snapshot cache should avoid single-order provider lookups")
+
+
 def _install_fake_clob_modules(monkeypatch) -> None:
     py_clob_client = types.ModuleType("py_clob_client")
     clob_types = types.ModuleType("py_clob_client.clob_types")
@@ -412,6 +434,99 @@ async def test_get_order_snapshots_retries_after_reinitializing_client(monkeypat
     assert snapshots["clob-reinit"]["normalized_status"] == "filled"
     assert snapshots["clob-reinit"]["filled_size"] == pytest.approx(12.0)
     assert ensure_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_get_order_snapshots_reuses_recent_open_order_snapshot_cache(monkeypatch):
+    _configure_limits(monkeypatch)
+    service = LiveExecutionService()
+    service._initialized = True
+    client = _CachedSnapshotClient()
+    service._client = client
+    service._remember_order(
+        Order(
+            id="order-open",
+            token_id="token-open",
+            side=OrderSide.BUY,
+            price=0.41,
+            size=10.0,
+            status=OrderStatus.OPEN,
+            clob_order_id="clob-open",
+            created_at=datetime(2026, 1, 1, 0, 0, 0),
+            updated_at=datetime(2026, 1, 1, 0, 0, 0),
+        )
+    )
+    service._remember_order(
+        Order(
+            id="order-filled",
+            token_id="token-filled",
+            side=OrderSide.BUY,
+            price=0.52,
+            size=12.0,
+            status=OrderStatus.OPEN,
+            clob_order_id="clob-filled",
+            created_at=datetime(2026, 1, 1, 0, 0, 0),
+            updated_at=datetime(2026, 1, 1, 0, 0, 0),
+        )
+    )
+
+    first = await service.get_order_snapshots_by_clob_ids(["clob-open"])
+    assert first["clob-open"]["normalized_status"] == "open"
+
+    async def _sync_positions():
+        service._positions["token-filled"] = live_execution_module.Position(
+            token_id="token-filled",
+            market_id="market-1",
+            market_question="Market",
+            outcome="YES",
+            size=12.0,
+            average_cost=0.52,
+        )
+
+    monkeypatch.setattr(service, "sync_positions", _sync_positions)
+
+    snapshots = await service.get_order_snapshots_by_clob_ids(["clob-open", "clob-filled"])
+
+    assert client.get_orders_calls == 1
+    assert client.get_order_calls == []
+    assert snapshots["clob-open"]["normalized_status"] == "open"
+    assert snapshots["clob-filled"]["normalized_status"] == "filled"
+    assert snapshots["clob-filled"]["filled_size"] == pytest.approx(12.0)
+    assert snapshots["clob-filled"]["average_fill_price"] == pytest.approx(0.52)
+
+
+@pytest.mark.asyncio
+async def test_get_order_snapshots_respects_open_read_circuit_and_returns_cached_fallback(monkeypatch):
+    _configure_limits(monkeypatch)
+
+    class _CircuitClient:
+        def get_orders(self):
+            raise AssertionError("open-order circuit should suppress provider reads")
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = _CircuitClient()
+    service._remember_order(
+        Order(
+            id="order-cached",
+            token_id="token-cached",
+            side=OrderSide.BUY,
+            price=0.29,
+            size=8.0,
+            status=OrderStatus.PARTIALLY_FILLED,
+            filled_size=3.0,
+            average_fill_price=0.29,
+            clob_order_id="clob-cached",
+            created_at=datetime(2026, 1, 1, 0, 0, 0),
+            updated_at=datetime(2026, 1, 1, 0, 0, 0),
+        )
+    )
+    service._clob_read_circuit_open_until = live_execution_module._time.monotonic() + 30.0
+
+    snapshots = await service.get_order_snapshots_by_clob_ids(["clob-cached"])
+
+    assert snapshots["clob-cached"]["normalized_status"] == "partially_filled"
+    assert snapshots["clob-cached"]["filled_size"] == pytest.approx(3.0)
 
 
 @pytest.mark.asyncio

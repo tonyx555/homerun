@@ -141,6 +141,9 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
     """
     existing = _inflight_timed_tasks.get(label)
     if existing is not None and not existing.done():
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
         raise _TimedTaskStillRunningError(label)
 
     task = asyncio.create_task(coro, name=f"tracked-traders-{label}")

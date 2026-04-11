@@ -14,7 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, func, select, text, update as sa_update
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from config import settings
 from models.database import (
@@ -661,6 +661,7 @@ _live_provider_reconcile_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _live_provider_failure_snapshot_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _trader_maintenance_last_run: dict[str, datetime] = {}
 _latency_sla_breach_logged_at: dict[str, datetime] = {}
+_latency_sla_breach_last_signature: dict[str, tuple[int | None, int | None, int | None]] = {}
 _TRADERS_SCOPE_CONTEXT_CACHE_TTL_SECONDS = 5.0
 _traders_scope_context_cache: dict[str, tuple[datetime, dict[str, Any]]] = {}
 _lane_snapshot_metrics: dict[str, dict[str, Any]] = {}
@@ -1207,12 +1208,12 @@ async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwar
     )
     try:
         await write_orchestrator_snapshot(session, **snapshot_kwargs)
-    except OperationalError as exc:
-        if not _is_retryable_db_error(exc):
-            raise
+    except (OperationalError, DBAPIError, asyncpg.PostgresError, asyncio.TimeoutError, TimeoutError) as exc:
         if hasattr(session, "rollback"):
             await session.rollback()
-        logger.warning("Skipped orchestrator snapshot write due to transient DB error")
+        if isinstance(exc, OperationalError) and not _is_retryable_db_error(exc):
+            raise
+        logger.warning("Skipped orchestrator snapshot write due to transient DB error", exc_info=exc)
 
 
 async def submit_order(
@@ -1361,6 +1362,7 @@ def _compute_signal_latency_payload(
     )
     emitted_at = _parse_iso(str(payload.get("signal_emitted_at") or payload.get("ingested_at") or ""))
     ingested_at = _parse_iso(str(payload.get("ingested_at") or ""))
+    released_at = execution_armed_at or emitted_at
 
     out: dict[str, Any] = {
         "measured_at": now.isoformat(),
@@ -1376,7 +1378,8 @@ def _compute_signal_latency_payload(
         out["source_to_now_ms"] = max(0, int((now - source_observed_at).total_seconds() * 1000))
     if emitted_at is not None:
         out["emit_to_now_ms"] = max(0, int((now - emitted_at).total_seconds() * 1000))
-        out["ws_release_to_now_ms"] = max(0, int((now - emitted_at).total_seconds() * 1000))
+    if released_at is not None:
+        out["ws_release_to_now_ms"] = max(0, int((now - released_at).total_seconds() * 1000))
     if ingested_at is not None:
         out["ingest_to_now_ms"] = max(0, int((now - ingested_at).total_seconds() * 1000))
     return out
@@ -1400,8 +1403,9 @@ def _build_execution_latency_sample(
 ) -> dict[str, Any]:
     payload = getattr(signal, "payload_json", None)
     payload = payload if isinstance(payload, dict) else {}
-    armed_at = _parse_iso(str(payload.get("execution_armed_at") or payload.get("signal_emitted_at") or payload.get("ingested_at") or ""))
+    armed_at = _parse_iso(str(payload.get("execution_armed_at") or ""))
     emitted_at = _parse_iso(str(payload.get("signal_emitted_at") or payload.get("ingested_at") or ""))
+    released_at = armed_at or emitted_at
 
     def _delta_ms(start: datetime | None, end: datetime | None) -> int | None:
         if start is None or end is None:
@@ -1409,10 +1413,10 @@ def _build_execution_latency_sample(
         return max(0, int((end - start).total_seconds() * 1000))
 
     sample = {
-        "armed_to_ws_release_ms": _delta_ms(armed_at, emitted_at),
+        "armed_to_ws_release_ms": _delta_ms(armed_at, released_at),
         "emit_to_queue_wake_ms": _delta_ms(emitted_at, wake_started_at),
-        "ws_release_to_decision_ms": _delta_ms(emitted_at, decision_ready_at),
-        "ws_release_to_submit_start_ms": _delta_ms(emitted_at, submit_started_at),
+        "ws_release_to_decision_ms": _delta_ms(released_at, decision_ready_at),
+        "ws_release_to_submit_start_ms": _delta_ms(released_at, submit_started_at),
         "wake_to_context_ready_ms": _delta_ms(wake_started_at, context_ready_at),
         "context_ready_to_decision_ms": _delta_ms(context_ready_at, decision_ready_at),
         "decision_to_submit_start_ms": _delta_ms(decision_ready_at, submit_started_at),
@@ -3401,26 +3405,34 @@ def _worst_latency_group(groups: dict[str, Any], *, stage_key: str) -> tuple[str
 
 
 def _maybe_log_execution_latency_sla_breach(*, lane: str, metrics: dict[str, Any]) -> None:
+    lane_key = str(lane or _LANE_GENERAL).strip().lower() or _LANE_GENERAL
     execution_latency = metrics.get("execution_latency")
     if not isinstance(execution_latency, dict):
+        _latency_sla_breach_last_signature.pop(lane_key, None)
         return
     target_ms = safe_int(execution_latency.get("internal_sla_target_ms"), None)
     overall = execution_latency.get("overall")
     p95 = _latency_stage_percentile(overall, stage_key=_LATENCY_SLA_STAGE_KEY, percentile_key="p95")
     if target_ms is None or p95 is None or p95 <= target_ms:
+        _latency_sla_breach_last_signature.pop(lane_key, None)
         return
     alert_threshold_ms = max(int(target_ms * 5), 1000)
     if p95 < alert_threshold_ms:
+        _latency_sla_breach_last_signature.pop(lane_key, None)
         return
 
-    lane_key = str(lane or _LANE_GENERAL).strip().lower() or _LANE_GENERAL
+    overall_p99 = _latency_stage_percentile(overall, stage_key=_LATENCY_SLA_STAGE_KEY, percentile_key="p99")
+    sample_count = safe_int(execution_latency.get("sample_count"), None)
+    signature = (sample_count, p95, overall_p99)
+    if _latency_sla_breach_last_signature.get(lane_key) == signature:
+        return
     now = utcnow()
     last_logged_at = _latency_sla_breach_logged_at.get(lane_key)
     if last_logged_at is not None and (now - last_logged_at).total_seconds() < _LATENCY_SLA_BREACH_LOG_COOLDOWN_SECONDS:
         return
     _latency_sla_breach_logged_at[lane_key] = now
+    _latency_sla_breach_last_signature[lane_key] = signature
 
-    overall_p99 = _latency_stage_percentile(overall, stage_key=_LATENCY_SLA_STAGE_KEY, percentile_key="p99")
     worst_source, worst_source_p95 = _worst_latency_group(
         execution_latency.get("by_source") or {},
         stage_key=_LATENCY_SLA_STAGE_KEY,
@@ -5871,58 +5883,95 @@ async def _run_trader_once(
                                     }
                             copy_inventory_context_for_signal = copy_inventory_context
 
-                    loop = asyncio.get_running_loop()
-                    evaluation_timeout_seconds = _strategy_evaluation_timeout_seconds(
-                        control,
-                        source_config,
-                        strategy_params,
-                    )
-                    remaining_cycle_budget = _remaining_cycle_budget_seconds(
-                        cycle_started_mono=cycle_started_mono,
-                        cycle_timeout_seconds=cycle_timeout_seconds,
-                        reserve_seconds=1.0,
-                    )
-                    if remaining_cycle_budget is not None:
-                        evaluation_timeout_seconds = max(
-                            0.1,
-                            min(float(evaluation_timeout_seconds), float(remaining_cycle_budget)),
+                    _pre_gate_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
+                    _pre_gate_occupied = bool(
+                        _pre_gate_market_id
+                        and not allow_averaging
+                        and (
+                            _pre_gate_market_id in occupied_market_ids
+                            or _pre_gate_market_id in intra_cycle_seen_market_ids
                         )
-                    decision_future = loop.run_in_executor(
-                        _STRATEGY_EVAL_POOL,
-                        strategy.evaluate,
-                        runtime_signal,
-                        {
-                            "params": strategy_params,
-                            "trader": trader,
-                            "mode": control.get("mode", "shadow"),
-                            "live_market": live_context,
-                            "source_config": source_config,
-                            "traders_scope_context": (
-                                traders_scope_context if signal_source == "traders" else None
-                            ),
-                            "edge_calibration": edge_calibration_profile,
-                            "copy_risk_context": copy_risk_context,
-                            "copy_allocation_context": copy_allocation_context,
-                            "copy_inventory_context": copy_inventory_context_for_signal,
-                        },
                     )
-                    async with release_conn(session):
-                        try:
-                            decision_obj = await asyncio.wait_for(
-                                decision_future,
-                                timeout=evaluation_timeout_seconds,
+                    _pre_gate_reentry_cooldown = bool(
+                        _pre_gate_market_id
+                        and _pre_gate_market_id in reentry_cooldown_market_ids
+                    )
+                    import time as _time_mod
+                    _nofill_key = (trader_id, _pre_gate_market_id)
+                    _nofill_expiry = _nofill_cooldowns.get(_nofill_key, 0.0)
+                    _nofill_blocked = bool(
+                        _pre_gate_market_id
+                        and _nofill_expiry > _time_mod.monotonic()
+                    )
+                    _skip_strategy_evaluation = bool(
+                        _pre_gate_occupied
+                        or _pre_gate_reentry_cooldown
+                        or _nofill_blocked
+                    )
+
+                    if _skip_strategy_evaluation:
+                        decision_obj = StrategyDecision(
+                            decision="selected",
+                            reason="Platform pre-gate short-circuited strategy evaluation",
+                            score=None,
+                            size_usd=None,
+                            checks=[],
+                            payload={},
+                        )
+                        checks_payload = []
+                    else:
+                        loop = asyncio.get_running_loop()
+                        evaluation_timeout_seconds = _strategy_evaluation_timeout_seconds(
+                            control,
+                            source_config,
+                            strategy_params,
+                        )
+                        remaining_cycle_budget = _remaining_cycle_budget_seconds(
+                            cycle_started_mono=cycle_started_mono,
+                            cycle_timeout_seconds=cycle_timeout_seconds,
+                            reserve_seconds=1.0,
+                        )
+                        if remaining_cycle_budget is not None:
+                            evaluation_timeout_seconds = max(
+                                0.1,
+                                min(float(evaluation_timeout_seconds), float(remaining_cycle_budget)),
                             )
-                        except asyncio.TimeoutError as exc:
-                            if not decision_future.done():
-                                decision_future.cancel()
-                            raise RuntimeError(
-                                f"Strategy evaluation timed out after {evaluation_timeout_seconds:.1f}s"
-                            ) from exc
-                        except asyncio.CancelledError:
-                            if not decision_future.done():
-                                decision_future.cancel()
-                            raise
-                    checks_payload = _checks_to_payload(decision_obj.checks)
+                        decision_future = loop.run_in_executor(
+                            _STRATEGY_EVAL_POOL,
+                            strategy.evaluate,
+                            runtime_signal,
+                            {
+                                "params": strategy_params,
+                                "trader": trader,
+                                "mode": control.get("mode", "shadow"),
+                                "live_market": live_context,
+                                "source_config": source_config,
+                                "traders_scope_context": (
+                                    traders_scope_context if signal_source == "traders" else None
+                                ),
+                                "edge_calibration": edge_calibration_profile,
+                                "copy_risk_context": copy_risk_context,
+                                "copy_allocation_context": copy_allocation_context,
+                                "copy_inventory_context": copy_inventory_context_for_signal,
+                            },
+                        )
+                        async with release_conn(session):
+                            try:
+                                decision_obj = await asyncio.wait_for(
+                                    decision_future,
+                                    timeout=evaluation_timeout_seconds,
+                                )
+                            except asyncio.TimeoutError as exc:
+                                if not decision_future.done():
+                                    decision_future.cancel()
+                                raise RuntimeError(
+                                    f"Strategy evaluation timed out after {evaluation_timeout_seconds:.1f}s"
+                                ) from exc
+                            except asyncio.CancelledError:
+                                if not decision_future.done():
+                                    decision_future.cancel()
+                                raise
+                        checks_payload = _checks_to_payload(decision_obj.checks)
 
                     if live_context:
                         live_price = live_context.get("live_selected_price")
@@ -5987,7 +6036,7 @@ async def _run_trader_once(
                     risk_evaluator = None
                     portfolio_allocator = None
                     portfolio_runtime_payload: dict[str, Any] = {}
-                    if decision_obj.decision == "selected" and trading_schedule_ok:
+                    if not _skip_strategy_evaluation and decision_obj.decision == "selected" and trading_schedule_ok:
                         gross_exposure = await get_gross_exposure(session, mode=run_mode)
                         market_exposure = await get_market_exposure(
                             session,
@@ -6070,30 +6119,12 @@ async def _run_trader_once(
 
                             portfolio_allocator = _evaluate_portfolio
 
-                    _pre_gate_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
-                    _pre_gate_occupied = (
-                        _pre_gate_market_id
-                        and not allow_averaging
-                        and (
-                            _pre_gate_market_id in occupied_market_ids
-                            or _pre_gate_market_id in intra_cycle_seen_market_ids
-                        )
-                        and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
-                    )
+                    _pre_gate_occupied = _pre_gate_occupied and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     _pre_gate_reentry_cooldown = (
-                        _pre_gate_market_id
-                        and _pre_gate_market_id in reentry_cooldown_market_ids
+                        _pre_gate_reentry_cooldown
                         and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     )
-                    # No-fill cooldown: skip markets that recently failed with FAK no-fill
-                    import time as _time_mod
-                    _nofill_key = (trader_id, _pre_gate_market_id)
-                    _nofill_expiry = _nofill_cooldowns.get(_nofill_key, 0.0)
-                    _nofill_blocked = (
-                        _pre_gate_market_id
-                        and _nofill_expiry > _time_mod.monotonic()
-                        and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
-                    )
+                    _nofill_blocked = _nofill_blocked and str(getattr(decision_obj, "decision", "") or "").strip() == "selected"
                     _pre_gate_blocked = bool(_pre_gate_occupied or _pre_gate_reentry_cooldown or _nofill_blocked)
 
                     if _pre_gate_blocked and _nofill_blocked:

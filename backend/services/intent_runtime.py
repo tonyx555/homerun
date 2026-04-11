@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 
 from config import settings
 from models.database import AsyncSessionLocal, TradeSignal
@@ -39,6 +39,8 @@ _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
 _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
 _PREWARM_WAIT_POLL_SECONDS = 0.01
+_SIGNAL_PUBLICATION_BATCH_SIZE = 200
+_BOOTSTRAP_REACTIVATABLE_LOOKBACK_HOURS = 24.0
 _UNCHANGED_SCANNER_TERMINAL_REACTIVATION_COOLDOWN_SECONDS = 180.0
 _HOT_SUBSCRIPTION_SEED_CONCURRENCY = 8
 _HOT_SUBSCRIPTION_SEED_RETRY_SECONDS = 30.0
@@ -48,6 +50,7 @@ _LIVE_MARKET_PAYLOAD_KEY = "live_market"
 _PAYLOAD_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
+    "execution_armed_at",
     "ingested_at",
     "market_data_age_ms",
     "signal_emitted_at",
@@ -241,6 +244,13 @@ def _restamp_signal_emitted_at(snapshot: dict[str, Any], emitted_at_iso: str) ->
     payload = snapshot.get("payload_json")
     payload_json = dict(payload) if isinstance(payload, dict) else {}
     payload_json["signal_emitted_at"] = emitted_at_iso
+    snapshot["payload_json"] = payload_json
+
+
+def _ensure_execution_armed_at(snapshot: dict[str, Any], armed_at_iso: str) -> None:
+    payload = snapshot.get("payload_json")
+    payload_json = dict(payload) if isinstance(payload, dict) else {}
+    payload_json["execution_armed_at"] = str(payload_json.get("execution_armed_at") or armed_at_iso)
     snapshot["payload_json"] = payload_json
 
 
@@ -1107,6 +1117,7 @@ class IntentRuntime:
                 self._clear_deferred_state_locked(signal_id)
                 snapshot["status"] = "pending"
                 snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                _ensure_execution_armed_at(snapshot, _to_iso(now))
                 snapshot["deferred_until_ws"] = False
                 snapshot["deferred_reason"] = None
                 snapshot["updated_at"] = _to_iso(now)
@@ -1204,6 +1215,7 @@ class IntentRuntime:
                 self._clear_deferred_state_locked(signal_id)
                 snapshot["status"] = "pending"
                 snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                _ensure_execution_armed_at(snapshot, _to_iso(now))
                 snapshot["deferred_until_ws"] = False
                 snapshot["deferred_reason"] = None
                 snapshot["updated_at"] = _to_iso(now)
@@ -1324,11 +1336,47 @@ class IntentRuntime:
         return True
 
     async def hydrate_from_db(self) -> None:
+        now = utcnow()
+        active_statuses = tuple(sorted(_SIGNAL_ACTIVE_STATUSES))
+        terminal_statuses = tuple(sorted(_SIGNAL_TERMINAL_STATUSES))
+        terminal_cutoff = now - timedelta(hours=_BOOTSTRAP_REACTIVATABLE_LOOKBACK_HOURS)
         async with AsyncSessionLocal() as session:
             rows = (
                 (
                     await session.execute(
-                        TradeSignal.__table__.select().where(TradeSignal.status.in_(tuple(sorted(_SIGNAL_ACTIVE_STATUSES | _SIGNAL_TERMINAL_STATUSES))))
+                        select(
+                            TradeSignal.id,
+                            TradeSignal.source,
+                            TradeSignal.source_item_id,
+                            TradeSignal.signal_type,
+                            TradeSignal.strategy_type,
+                            TradeSignal.market_id,
+                            TradeSignal.market_question,
+                            TradeSignal.direction,
+                            TradeSignal.entry_price,
+                            TradeSignal.effective_price,
+                            TradeSignal.edge_percent,
+                            TradeSignal.confidence,
+                            TradeSignal.liquidity,
+                            TradeSignal.expires_at,
+                            TradeSignal.status,
+                            TradeSignal.payload_json,
+                            TradeSignal.strategy_context_json,
+                            TradeSignal.quality_passed,
+                            TradeSignal.quality_rejection_reasons,
+                            TradeSignal.dedupe_key,
+                            TradeSignal.runtime_sequence,
+                            TradeSignal.created_at,
+                            TradeSignal.updated_at,
+                        ).where(
+                            or_(
+                                TradeSignal.status.in_(active_statuses),
+                                and_(
+                                    TradeSignal.status.in_(terminal_statuses),
+                                    TradeSignal.updated_at >= terminal_cutoff,
+                                ),
+                            )
+                        )
                     )
                 )
                 .mappings()
@@ -1388,6 +1436,9 @@ class IntentRuntime:
                         payload.pop(_DEFERRED_REQUIRED_MAX_AGE_MS_KEY, None)
                         snapshot["payload_json"] = payload
                 status = str(snapshot.get("status") or "").strip().lower()
+                updated_at = _normalize_datetime(row.get("updated_at")) or _normalize_datetime(row.get("created_at"))
+                if status in _SIGNAL_TERMINAL_STATUSES and (updated_at is None or updated_at < terminal_cutoff):
+                    continue
                 runtime = _signal_runtime_metadata(
                     snapshot.get("payload_json"),
                     snapshot.get("strategy_context_json"),
@@ -1401,6 +1452,7 @@ class IntentRuntime:
                             source=source,
                         ):
                             snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                            _ensure_execution_armed_at(snapshot, _to_iso(now))
                             bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
                         else:
                             defer_reason = "prewarm_waiting_for_strict_ws_quote"
@@ -1420,6 +1472,7 @@ class IntentRuntime:
                         defer_reason = "awaiting_post_arm_ws_tick"
                     else:
                         snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                        _ensure_execution_armed_at(snapshot, _to_iso(now))
                         bootstrap_snapshots[snapshot["id"]] = copy.deepcopy(snapshot)
                 sequence = _normalize_runtime_sequence(snapshot.get("runtime_sequence"))
                 if sequence is not None:
@@ -1635,6 +1688,7 @@ class IntentRuntime:
                         incoming_snapshot["runtime_sequence"] = None
                     else:
                         incoming_snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                        _ensure_execution_armed_at(incoming_snapshot, _to_iso(now))
                     self._signals_by_id[existing["id"]] = incoming_snapshot
                     projection_snapshots[existing["id"]] = copy.deepcopy(incoming_snapshot)
                     if incoming_snapshot["runtime_sequence"] is not None:
@@ -1685,6 +1739,7 @@ class IntentRuntime:
                         incoming_snapshot["deferred_started_at"] = _to_iso(now)
                     else:
                         incoming_snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                        _ensure_execution_armed_at(incoming_snapshot, _to_iso(now))
                     self._signals_by_id[signal_id] = incoming_snapshot
                     self._signal_ids_by_dedupe_key[dedupe_key] = signal_id
                     self._source_signal_ids.setdefault(str(source), set()).add(signal_id)
@@ -1716,52 +1771,82 @@ class IntentRuntime:
             )
 
         if actionable_snapshots:
-            await self._attach_live_market_contexts(actionable_snapshots)
-            await self._defer_scanner_snapshots_without_strict_live_market(
-                actionable_snapshots,
-                projection_snapshots=projection_snapshots,
-                event_types=actionable_event_types,
-                reason="strict_ws_pricing_live_context_unavailable",
-            )
-            for signal_id, snapshot in actionable_snapshots.items():
-                projection_snapshot = projection_snapshots.get(signal_id)
-                live_market = (snapshot.get("payload_json") or {}).get(_LIVE_MARKET_PAYLOAD_KEY)
-                if projection_snapshot is None or not isinstance(live_market, dict):
-                    continue
-                payload = projection_snapshot.get("payload_json")
-                if not isinstance(payload, dict):
-                    payload = {}
-                else:
-                    payload = dict(payload)
-                payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_market)
-                projection_snapshot["payload_json"] = payload
-            snapshots_by_event_type: dict[str, dict[str, dict[str, Any]]] = {}
-            for signal_id, snapshot in actionable_snapshots.items():
-                event_type = str(actionable_event_types.get(signal_id) or "upsert_update")
-                snapshots_by_event_type.setdefault(event_type, {})[signal_id] = snapshot
-            for event_type, snapshots in snapshots_by_event_type.items():
-                emitted_at_iso = _to_iso(utcnow())
-                for signal_id, snapshot in snapshots.items():
-                    _restamp_signal_emitted_at(snapshot, emitted_at_iso)
-                    projection_snapshot = projection_snapshots.get(signal_id)
-                    if isinstance(projection_snapshot, dict):
-                        _restamp_signal_emitted_at(projection_snapshot, emitted_at_iso)
-                await publish_signal_batch(
-                    event_type=event_type,
-                    source=source,
-                    signal_ids=sorted(snapshots.keys()),
-                    trigger="intent_runtime",
-                    emitted_at=emitted_at_iso,
-                    signal_snapshots=snapshots,
+            actionable_items = list(actionable_snapshots.items())
+            for chunk_start in range(0, len(actionable_items), _SIGNAL_PUBLICATION_BATCH_SIZE):
+                actionable_chunk = dict(
+                    actionable_items[chunk_start : chunk_start + _SIGNAL_PUBLICATION_BATCH_SIZE]
                 )
-        if projection_snapshots or sweep_missing:
+                projection_chunk = {
+                    signal_id: projection_snapshots[signal_id]
+                    for signal_id in actionable_chunk.keys()
+                    if signal_id in projection_snapshots
+                }
+                event_type_chunk = {
+                    signal_id: str(actionable_event_types.get(signal_id) or "upsert_update")
+                    for signal_id in actionable_chunk.keys()
+                }
+                await self._attach_live_market_contexts(actionable_chunk)
+                await self._defer_scanner_snapshots_without_strict_live_market(
+                    actionable_chunk,
+                    projection_snapshots=projection_chunk,
+                    event_types=event_type_chunk,
+                    reason="strict_ws_pricing_live_context_unavailable",
+                )
+                for signal_id, snapshot in actionable_chunk.items():
+                    projection_snapshot = projection_chunk.get(signal_id)
+                    live_market = (snapshot.get("payload_json") or {}).get(_LIVE_MARKET_PAYLOAD_KEY)
+                    if projection_snapshot is None or not isinstance(live_market, dict):
+                        continue
+                    payload = projection_snapshot.get("payload_json")
+                    if not isinstance(payload, dict):
+                        payload = {}
+                    else:
+                        payload = dict(payload)
+                    payload[_LIVE_MARKET_PAYLOAD_KEY] = copy.deepcopy(live_market)
+                    projection_snapshot["payload_json"] = payload
+                snapshots_by_event_type: dict[str, dict[str, dict[str, Any]]] = {}
+                for signal_id, snapshot in actionable_chunk.items():
+                    event_type = str(event_type_chunk.get(signal_id) or "upsert_update")
+                    snapshots_by_event_type.setdefault(event_type, {})[signal_id] = snapshot
+                for event_type, snapshots in snapshots_by_event_type.items():
+                    emitted_at_iso = _to_iso(utcnow())
+                    for signal_id, snapshot in snapshots.items():
+                        _restamp_signal_emitted_at(snapshot, emitted_at_iso)
+                        projection_snapshot = projection_chunk.get(signal_id)
+                        if isinstance(projection_snapshot, dict):
+                            _restamp_signal_emitted_at(projection_snapshot, emitted_at_iso)
+                    await publish_signal_batch(
+                        event_type=event_type,
+                        source=source,
+                        signal_ids=sorted(snapshots.keys()),
+                        trigger="intent_runtime",
+                        emitted_at=emitted_at_iso,
+                        signal_snapshots=snapshots,
+                    )
+        if projection_snapshots:
+            projection_items = list(projection_snapshots.items())
+            for chunk_start in range(0, len(projection_items), _SIGNAL_PUBLICATION_BATCH_SIZE):
+                projection_chunk = dict(
+                    projection_items[chunk_start : chunk_start + _SIGNAL_PUBLICATION_BATCH_SIZE]
+                )
+                await self._enqueue_projection(
+                    {
+                        "kind": "upsert",
+                        "source": str(source),
+                        "signal_type": signal_type,
+                        "snapshots": projection_chunk,
+                        "sweep_missing": False,
+                        "keep_dedupe_keys": [],
+                    }
+                )
+        if sweep_missing:
             await self._enqueue_projection(
                 {
                     "kind": "upsert",
                     "source": str(source),
                     "signal_type": signal_type,
-                    "snapshots": copy.deepcopy(projection_snapshots),
-                    "sweep_missing": bool(sweep_missing),
+                    "snapshots": {},
+                    "sweep_missing": True,
                     "keep_dedupe_keys": sorted(active_dedupe_keys),
                 }
             )
@@ -1793,6 +1878,7 @@ class IntentRuntime:
                 self._clear_deferred_state_locked(normalized_signal_id)
             elif normalized_status == "pending" and previous_status != "pending" and not bool(snapshot.get("deferred_until_ws")):
                 snapshot["runtime_sequence"] = self._allocate_runtime_sequence_locked()
+                _ensure_execution_armed_at(snapshot, _to_iso(utcnow()))
             projection_snapshot = copy.deepcopy(snapshot)
         if (
             projection_snapshot is not None

@@ -90,7 +90,7 @@ from services.trader_order_verification import (
 )
 from utils.utcnow import utcnow
 from utils.secrets import decrypt_secret
-from utils.converters import safe_float, safe_int, to_iso
+from utils.converters import coerce_bool, safe_float, safe_int, to_iso
 from utils.market_urls import build_polymarket_market_url
 
 logger = get_logger(__name__)
@@ -954,6 +954,87 @@ def _read_wallet_float(payload: dict[str, Any], *keys: str) -> Optional[float]:
     return None
 
 
+def _wallet_outcome_index(outcome: Any) -> Optional[int]:
+    outcome_text = str(outcome or "").strip().lower()
+    if outcome_text in {"yes", "buy_yes"}:
+        return 0
+    if outcome_text in {"no", "buy_no"}:
+        return 1
+    return None
+
+
+def _live_trading_position_to_wallet_row(row: LiveTradingPosition) -> Optional[dict[str, Any]]:
+    token_id = str(row.token_id or "").strip()
+    if not token_id:
+        return None
+    size = max(0.0, safe_float(row.size, 0.0) or 0.0)
+    if size <= 0.0:
+        return None
+    market_id = str(row.market_id or "").strip() or token_id
+    average_cost = safe_float(row.average_cost, None)
+    current_price = safe_float(row.current_price, None)
+    initial_value = (
+        float(size * average_cost)
+        if average_cost is not None and average_cost > 0.0
+        else None
+    )
+    current_value = (
+        float(size * current_price)
+        if current_price is not None and current_price > 0.0
+        else None
+    )
+    unrealized_pnl = safe_float(row.unrealized_pnl, None)
+    outcome_text = str(row.outcome or "").strip()
+    outcome_index = _wallet_outcome_index(outcome_text)
+    payload: dict[str, Any] = {
+        "asset": token_id,
+        "asset_id": token_id,
+        "token_id": token_id,
+        "tokenId": token_id,
+        "conditionId": market_id,
+        "condition_id": market_id,
+        "market": market_id,
+        "market_id": market_id,
+        "marketId": market_id,
+        "title": str(row.market_question or "").strip(),
+        "market_question": str(row.market_question or "").strip(),
+        "marketQuestion": str(row.market_question or "").strip(),
+        "question": str(row.market_question or "").strip(),
+        "outcome": outcome_text,
+        "position_side": outcome_text.lower(),
+        "side": outcome_text.lower(),
+        "size": float(size),
+        "positionSize": float(size),
+        "shares": float(size),
+        "avgPrice": float(average_cost) if average_cost is not None and average_cost > 0.0 else None,
+        "avg_price": float(average_cost) if average_cost is not None and average_cost > 0.0 else None,
+        "avgCost": float(average_cost) if average_cost is not None and average_cost > 0.0 else None,
+        "average_cost": float(average_cost) if average_cost is not None and average_cost > 0.0 else None,
+        "currentPrice": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "current_price": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "curPrice": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "cur_price": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "markPrice": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "mark_price": float(current_price) if current_price is not None and current_price > 0.0 else None,
+        "initialValue": initial_value,
+        "initial_value": initial_value,
+        "currentValue": current_value,
+        "current_value": current_value,
+        "cashPnl": unrealized_pnl,
+        "cash_pnl": unrealized_pnl,
+        "unrealizedPnl": unrealized_pnl,
+        "unrealized_pnl": unrealized_pnl,
+        "redeemable": bool(getattr(row, "redeemable", False)),
+        "counts_as_open": coerce_bool(getattr(row, "counts_as_open", True), default=True),
+        "endDate": str(getattr(row, "end_date", "") or "").strip() or None,
+        "end_date": str(getattr(row, "end_date", "") or "").strip() or None,
+    }
+    if outcome_index is not None:
+        payload["outcomeIndex"] = outcome_index
+        payload["outcome_index"] = outcome_index
+    return payload
+
+
 def _extract_market_token_ids(market_info: dict[str, Any]) -> list[str]:
     for key in ("token_ids", "tokenIds", "clob_token_ids", "clobTokenIds"):
         raw = market_info.get(key)
@@ -1148,6 +1229,9 @@ def _normalize_wallet_position_row(
         "market_slug": market_slug or None,
         "event_slug": event_slug or None,
         "market_url": market_url or None,
+        "redeemable": coerce_bool(wallet_position.get("redeemable"), default=False),
+        "counts_as_open": coerce_bool(wallet_position.get("counts_as_open"), default=True),
+        "end_date": _read_wallet_text(wallet_position, "endDate", "end_date") or None,
     }
 
 
@@ -1685,6 +1769,45 @@ def _merge_missing_mapping_values(target: dict[str, Any], source: dict[str, Any]
     return merged, changed
 
 
+def _live_order_authority_strategy_payload(
+    *,
+    trader_source_configs: Any,
+    source_key: str,
+    strategy_key: str,
+) -> dict[str, Any]:
+    normalized_source_key = normalize_source_key(source_key)
+    normalized_strategy_key = _normalize_strategy_for_source(normalized_source_key, strategy_key)
+    strategy_payload: dict[str, Any] = {}
+    if normalized_strategy_key:
+        strategy_payload["strategy_type"] = normalized_strategy_key
+    if not normalized_source_key:
+        return strategy_payload
+    try:
+        source_configs = _normalize_source_configs(trader_source_configs)
+    except Exception:
+        return strategy_payload
+    matched_source_config = next(
+        (
+            source_config
+            for source_config in source_configs
+            if str(source_config.get("source_key") or "").strip().lower() == normalized_source_key
+        ),
+        None,
+    )
+    if matched_source_config is None:
+        return strategy_payload
+    matched_strategy_key = str(matched_source_config.get("strategy_key") or "").strip().lower()
+    resolved_strategy_key = normalized_strategy_key or matched_strategy_key
+    if resolved_strategy_key:
+        strategy_payload["strategy_type"] = resolved_strategy_key
+    if normalized_strategy_key and matched_strategy_key and matched_strategy_key != normalized_strategy_key:
+        return strategy_payload
+    explicit_strategy_params = dict(matched_source_config.get("strategy_params") or {})
+    if explicit_strategy_params:
+        strategy_payload["strategy_exit_config"] = explicit_strategy_params
+    return strategy_payload
+
+
 def _live_order_authority_key_from_payload(payload: dict[str, Any]) -> str:
     provider_clob_id, live_order_id = _extract_live_order_authority_ids_from_payload(payload)
     if provider_clob_id:
@@ -1839,6 +1962,17 @@ def _build_live_order_authority_payload(
 ) -> dict[str, Any]:
     fill_size = max(0.0, safe_float(live_row.filled_size, 0.0) or 0.0)
     average_fill_price = safe_float(live_row.average_fill_price, None)
+    if position_row is not None:
+        wallet_position_size = max(0.0, safe_float(position_row.size, 0.0) or 0.0)
+        wallet_average_cost = safe_float(position_row.average_cost, None)
+        if fill_size <= 0.0 and wallet_position_size > 0.0:
+            fill_size = wallet_position_size
+        if (
+            (average_fill_price is None or average_fill_price <= 0.0)
+            and wallet_average_cost is not None
+            and wallet_average_cost > 0.0
+        ):
+            average_fill_price = wallet_average_cost
     filled_notional_usd = 0.0
     if fill_size > 0.0 and average_fill_price is not None and average_fill_price > 0.0:
         filled_notional_usd = fill_size * average_fill_price
@@ -2207,7 +2341,7 @@ def _map_live_trading_order_status_to_trader_order_status(
     if mapped_status == "executed":
         if side == "SELL":
             return "resolved"
-        return "open"
+        return "executed"
     if mapped_status == "open":
         return "open" if filled_notional_usd > 0.0 else "submitted"
     if mapped_status:
@@ -2236,6 +2370,7 @@ async def _infer_live_order_authority_candidate(
                 TraderDecision.strategy_key.label("strategy_key"),
                 TraderDecision.strategy_version.label("strategy_version"),
                 TraderDecision.decision.label("decision"),
+                TraderDecision.reason.label("decision_reason"),
                 TraderDecision.created_at.label("decision_created_at"),
                 TradeSignal.id.label("signal_id"),
                 TradeSignal.source.label("signal_source"),
@@ -2245,6 +2380,7 @@ async def _infer_live_order_authority_candidate(
                 TradeSignal.payload_json.label("signal_payload_json"),
                 Trader.is_enabled.label("is_enabled"),
                 Trader.is_paused.label("is_paused"),
+                Trader.source_configs_json.label("trader_source_configs_json"),
             )
             .join(TradeSignal, TradeSignal.id == TraderDecision.signal_id)
             .join(Trader, Trader.id == TraderDecision.trader_id)
@@ -2303,11 +2439,13 @@ async def _infer_live_order_authority_candidate(
             "strategy_version": int(row.strategy_version) if row.strategy_version is not None else None,
             "signal_id": str(row.signal_id or "").strip() or None,
             "source": str(row.signal_source or "").strip() or "scanner",
+            "decision_reason": str(row.decision_reason or "").strip() or None,
             "market_id": market_id,
             "market_question": question,
             "direction": direction,
             "decision_created_at": decision_created_at,
             "signal_payload": dict(row.signal_payload_json or {}),
+            "trader_source_configs": row.trader_source_configs_json,
         }
         existing = best_by_trader.get(trader_id)
         if existing is None or score > existing[0]:
@@ -2449,6 +2587,22 @@ async def recover_missing_live_trader_orders(
         .scalars()
         .all()
     )
+    existing_trader_ids = {str(row.trader_id or "").strip() for row in existing_rows if str(row.trader_id or "").strip()}
+    trader_source_configs_by_id: dict[str, Any] = {}
+    if existing_trader_ids:
+        trader_rows = (
+            await session.execute(
+                select(
+                    Trader.id,
+                    Trader.source_configs_json,
+                ).where(Trader.id.in_(list(existing_trader_ids)))
+            )
+        ).all()
+        trader_source_configs_by_id = {
+            str(row.id or "").strip(): row.source_configs_json
+            for row in trader_rows
+            if str(row.id or "").strip()
+        }
     now = _now()
     existing_provider_rows_by_clob_id: dict[str, TraderOrder] = {}
     existing_rows_by_live_order_id: dict[str, TraderOrder] = {}
@@ -2625,6 +2779,17 @@ async def recover_missing_live_trader_orders(
                 existing_payload,
                 dict(recovery_state["payload_json"] or {}),
             )
+            recovery_strategy_payload = _live_order_authority_strategy_payload(
+                trader_source_configs=trader_source_configs_by_id.get(str(existing_row.trader_id or "").strip()),
+                source_key=str(existing_row.source or "").strip(),
+                strategy_key=str(existing_row.strategy_key or "").strip(),
+            )
+            if recovery_strategy_payload:
+                merged_payload, strategy_payload_changed = _merge_missing_mapping_values(
+                    merged_payload,
+                    recovery_strategy_payload,
+                )
+                payload_changed = payload_changed or strategy_payload_changed
             recovered_verification = derive_trader_order_verification(
                 mode="live",
                 status=str(recovery_state["trader_status"]),
@@ -2732,6 +2897,18 @@ async def recover_missing_live_trader_orders(
                 existing_rows_by_live_order_id[live_order_id] = existing_row
             continue
 
+        live_wallet_size = max(0.0, safe_float(getattr(position_row, "size", None), 0.0) or 0.0)
+        recovered_notional = max(0.0, safe_float(recovery_state.get("order_notional_usd"), 0.0) or 0.0)
+        recovered_status = _normalize_status_key(recovery_state.get("trader_status"))
+        if (
+            live_side != "SELL"
+            and recovered_status in LIVE_ACTIVE_ORDER_STATUSES
+            and live_wallet_size <= 0.0
+            and recovered_notional <= 0.0
+        ):
+            ambiguous_orders += 1
+            continue
+
         age_seconds = (now - created_at).total_seconds() if created_at else 0
         if age_seconds < 90 and len(trader_id_filter) != 1:
             ambiguous_orders += 1
@@ -2768,6 +2945,13 @@ async def recover_missing_live_trader_orders(
         recovered_payload = dict(recovery_state["payload_json"] or {})
         candidate_signal_payload = dict(candidate.get("signal_payload") or {})
         recovered_payload, _ = _merge_missing_mapping_values(recovered_payload, candidate_signal_payload)
+        recovery_strategy_payload = _live_order_authority_strategy_payload(
+            trader_source_configs=candidate.get("trader_source_configs"),
+            source_key=str(candidate.get("source") or "").strip(),
+            strategy_key=str(candidate.get("strategy_key") or "").strip(),
+        )
+        if recovery_strategy_payload:
+            recovered_payload, _ = _merge_missing_mapping_values(recovered_payload, recovery_strategy_payload)
         recovered_verification = derive_trader_order_verification(
             mode="live",
             status=str(recovery_state["trader_status"]),
@@ -2803,11 +2987,16 @@ async def recover_missing_live_trader_orders(
             edge_percent=None,
             confidence=None,
             actual_profit=None,
-            reason="Recovered from live venue authority",
+            reason=str(candidate.get("decision_reason") or "").strip() or "Recovered from live venue authority",
             payload_json=recovered_payload,
             error_message=live_row.error_message,
             created_at=created_at,
-            executed_at=live_row.updated_at if str(recovery_state["trader_status"]) == "open" else None,
+            executed_at=(
+                live_row.updated_at or live_row.created_at or now
+                if max(0.0, safe_float(recovery_state.get("order_notional_usd"), 0.0) or 0.0) > 0.0
+                or str(recovery_state["trader_status"]) == "executed"
+                else None
+            ),
             updated_at=live_row.updated_at or now,
         )
         session.add(recovered_row)
@@ -5711,7 +5900,6 @@ async def record_signal_consumption(
     if commit:
         await _commit_with_retry(session)
 
-
 async def list_unconsumed_trade_signals(
     session: AsyncSession,
     *,
@@ -5749,6 +5937,10 @@ async def list_unconsumed_trade_signals(
         max_consumed_subq.c.max_consumed_at.is_not(None),
         signal_sort_ts > max_consumed_subq.c.max_consumed_at,
     )
+    pending_unconsumed_clause = and_(
+        max_consumed_subq.c.max_consumed_at.is_(None),
+        func.lower(func.coalesce(TradeSignal.status, "")) == "pending",
+    )
     query = (
         select(TradeSignal)
         .outerjoin(max_consumed_subq, TradeSignal.id == max_consumed_subq.c.signal_id)
@@ -5770,6 +5962,7 @@ async def list_unconsumed_trade_signals(
     if normalized_cursor_runtime_sequence is not None:
         query = query.where(
             or_(
+                pending_unconsumed_clause,
                 reactivated_after_consumption_clause,
                 TradeSignal.runtime_sequence.is_(None),
                 TradeSignal.runtime_sequence > normalized_cursor_runtime_sequence,
@@ -5779,6 +5972,7 @@ async def list_unconsumed_trade_signals(
         if normalized_cursor_signal_id:
             query = query.where(
                 or_(
+                    pending_unconsumed_clause,
                     reactivated_after_consumption_clause,
                     signal_sort_ts > normalized_cursor_created_at,
                     and_(signal_sort_ts == normalized_cursor_created_at, TradeSignal.id > normalized_cursor_signal_id),
@@ -5787,6 +5981,7 @@ async def list_unconsumed_trade_signals(
         else:
             query = query.where(
                 or_(
+                    pending_unconsumed_clause,
                     reactivated_after_consumption_clause,
                     signal_sort_ts > normalized_cursor_created_at,
                 )
@@ -6525,13 +6720,23 @@ async def list_live_wallet_positions_for_trader(
             },
         }
 
-    async with release_conn(session):
-        try:
-            wallet_positions_raw = await polymarket_client.get_wallet_positions_with_prices(wallet_address)
-        except Exception as exc:
-            raise ValueError(f"Failed to fetch execution wallet positions: {exc}") from exc
-    if not isinstance(wallet_positions_raw, list):
-        wallet_positions_raw = []
+    wallet_address_key = str(wallet_address).strip().lower()
+    wallet_position_rows = list(
+        (
+            await session.execute(
+                select(LiveTradingPosition)
+                .where(func.lower(func.coalesce(LiveTradingPosition.wallet_address, "")) == wallet_address_key)
+                .order_by(LiveTradingPosition.updated_at.desc(), LiveTradingPosition.created_at.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    wallet_positions_raw = [
+        wallet_position
+        for wallet_position in (_live_trading_position_to_wallet_row(row) for row in wallet_position_rows)
+        if isinstance(wallet_position, dict)
+    ]
 
     active_live_rows = list(
         (
@@ -6553,40 +6758,10 @@ async def list_live_wallet_positions_for_trader(
         if token_id and token_id not in managed_by_token:
             managed_by_token[token_id] = str(row.id)
 
-    condition_lookups: dict[str, Any] = {}
-    token_lookups: dict[str, Any] = {}
-    for wallet_position in wallet_positions_raw:
-        if not isinstance(wallet_position, dict):
-            continue
-        token_id = _read_wallet_text(wallet_position, "asset", "asset_id", "assetId", "token_id", "tokenId")
-        if not token_id:
-            continue
-        condition_id = _normalize_condition_id(
-            _read_wallet_text(wallet_position, "conditionId", "condition_id", "market", "market_id", "marketId")
-        )
-        if condition_id:
-            if condition_id not in condition_lookups:
-                condition_lookups[condition_id] = polymarket_client.get_market_by_condition_id(condition_id)
-        token_key = _wallet_position_token_key(token_id)
-        if token_key and token_key not in token_lookups:
-            token_lookups[token_key] = polymarket_client.get_market_by_token_id(token_id)
-
-    markets_by_condition: dict[str, dict[str, Any]] = {}
-    markets_by_token: dict[str, dict[str, Any]] = {}
-    async with release_conn(session):
-        if condition_lookups:
-            condition_results = await asyncio.gather(*condition_lookups.values(), return_exceptions=True)
-            for condition_id, result in zip(condition_lookups.keys(), condition_results):
-                if isinstance(result, dict):
-                    markets_by_condition[condition_id] = result
-        if token_lookups:
-            token_results = await asyncio.gather(*token_lookups.values(), return_exceptions=True)
-            for token_key, result in zip(token_lookups.keys(), token_results):
-                if isinstance(result, dict):
-                    markets_by_token[token_key] = result
-
     total_positions = 0
+    open_positions = 0
     managed_positions = 0
+    managed_open_positions = 0
     normalized_positions: list[dict[str, Any]] = []
     seen_tokens: set[str] = set()
     for wallet_position in wallet_positions_raw:
@@ -6598,25 +6773,23 @@ async def list_live_wallet_positions_for_trader(
             continue
         seen_tokens.add(token_key)
 
-        condition_id = _normalize_condition_id(
-            _read_wallet_text(wallet_position, "conditionId", "condition_id", "market", "market_id", "marketId")
-        )
-        market_info = dict(markets_by_condition.get(condition_id) or {})
-        if not market_info:
-            market_info = dict(markets_by_token.get(token_key) or {})
-
         normalized = _normalize_wallet_position_row(
             wallet_position,
-            market_info=market_info,
+            market_info={},
         )
         if normalized is None:
             continue
 
         total_positions += 1
+        counts_as_open = bool(normalized.get("counts_as_open", True))
+        if counts_as_open:
+            open_positions += 1
         managed_order_id = managed_by_token.get(token_key)
         is_managed = managed_order_id is not None
         if is_managed:
             managed_positions += 1
+            if counts_as_open:
+                managed_open_positions += 1
         normalized["is_managed"] = is_managed
         normalized["managed_order_id"] = managed_order_id
         if include_managed or not is_managed:
@@ -6624,6 +6797,7 @@ async def list_live_wallet_positions_for_trader(
 
     normalized_positions.sort(
         key=lambda item: (
+            not bool(item.get("counts_as_open", True)),
             bool(item.get("is_managed", False)),
             -float(item.get("current_value") or item.get("initial_value") or 0.0),
         )
@@ -6637,8 +6811,11 @@ async def list_live_wallet_positions_for_trader(
         "managed_order_ids": sorted(set(managed_by_token.values())),
         "summary": {
             "total_positions": total_positions,
+            "open_positions": open_positions,
             "managed_positions": managed_positions,
+            "managed_open_positions": managed_open_positions,
             "unmanaged_positions": max(0, total_positions - managed_positions),
+            "unmanaged_open_positions": max(0, open_positions - managed_open_positions),
             "returned_positions": len(normalized_positions),
         },
     }
@@ -6811,7 +6988,7 @@ async def adopt_live_wallet_position(
     }
     verification_fields = derive_trader_order_verification(
         mode="live",
-        status="open",
+        status="executed",
         reason=reason_text,
         payload=payload_json,
     )
@@ -6828,7 +7005,7 @@ async def adopt_live_wallet_position(
         market_question=market_question,
         direction=direction,
         mode="live",
-        status="open",
+        status="executed",
         notional_usd=float(notional_usd),
         entry_price=float(entry_price),
         effective_price=float(entry_price),
@@ -7541,7 +7718,7 @@ async def cleanup_trader_open_orders(
                         taker_rescue_succeeded += 1
                         rescue_payload = dict(rescue.get("payload") or {})
                         rescue_status = _normalize_status_key(rescue.get("status"))
-                        row.status = "open" if rescue_status in {"executed", "open", "submitted"} else "failed"
+                        row.status = rescue_status if rescue_status in {"executed", "open", "submitted"} else "failed"
                         row.updated_at = now
                         if row.status == "failed":
                             import services.trader_hot_state as _hs
@@ -8764,7 +8941,6 @@ async def get_trader_orders_summary(
         resolved_statuses=resolved_statuses,
         failed_statuses=failed_statuses,
     )
-
     by_source_query = select(
         TraderOrder.source,
         func.count().label("orders"),

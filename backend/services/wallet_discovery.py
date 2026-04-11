@@ -170,6 +170,7 @@ class WalletDiscoveryEngine:
         self._leaderboard_scan_cursor: int = 0
         self._leaderboard_offsets: dict[str, int] = {}
         self._discovered_wallet_numeric_bounds: dict[str, float] | None = None
+        self._metrics_backfill_exhausted_version: str | None = None
 
     @staticmethod
     def _coerce_int(
@@ -2414,28 +2415,57 @@ class WalletDiscoveryEngine:
             )
             gap_refresh = [str(row.address).lower() for row in gap_refresh_rows.all() if row.address]
 
-        async with AsyncSessionLocal() as session:
-            backfill_rows = await session.execute(
-                select(DiscoveredWallet.address)
-                .where(
-                    DiscoveredWallet.last_analyzed_at.is_not(None),
-                    or_(
-                        DiscoveredWallet.metrics_source_version.is_(None),
-                        DiscoveredWallet.metrics_source_version != METRICS_SOURCE_VERSION,
-                    ),
+        backfill: list[str] = []
+        if self._metrics_backfill_exhausted_version != METRICS_SOURCE_VERSION:
+            async with AsyncSessionLocal() as session:
+                version_rows = await session.execute(
+                    select(DiscoveredWallet.metrics_source_version)
+                    .where(DiscoveredWallet.last_analyzed_at.is_not(None))
+                    .group_by(DiscoveredWallet.metrics_source_version)
                 )
-                .order_by(
-                    desc(func.coalesce(DiscoveredWallet.in_top_pool, False)),
-                    desc(
-                        DiscoveredWallet.recommendation.in_(["copy_candidate", "monitor"]),
-                    ),
-                    desc(func.coalesce(DiscoveredWallet.is_profitable, False)),
-                    desc(func.coalesce(DiscoveredWallet.trades_24h, 0)),
-                    DiscoveredWallet.last_analyzed_at.asc(),
-                )
-                .limit(backfill_limit)
-            )
-            backfill = [str(row.address).lower() for row in backfill_rows.all() if row.address]
+                include_null_version = False
+                legacy_versions: set[str] = set()
+                for (raw_version,) in version_rows.all():
+                    if raw_version is None:
+                        include_null_version = True
+                        continue
+                    normalized_version = str(raw_version).strip()
+                    if normalized_version and normalized_version != METRICS_SOURCE_VERSION:
+                        legacy_versions.add(normalized_version)
+
+                if not include_null_version and not legacy_versions:
+                    self._metrics_backfill_exhausted_version = METRICS_SOURCE_VERSION
+                else:
+                    if include_null_version and legacy_versions:
+                        backfill_filter = or_(
+                            DiscoveredWallet.metrics_source_version.is_(None),
+                            DiscoveredWallet.metrics_source_version.in_(sorted(legacy_versions)),
+                        )
+                    elif include_null_version:
+                        backfill_filter = DiscoveredWallet.metrics_source_version.is_(None)
+                    else:
+                        backfill_filter = DiscoveredWallet.metrics_source_version.in_(sorted(legacy_versions))
+
+                    backfill_rows = await session.execute(
+                        select(DiscoveredWallet.address)
+                        .where(
+                            DiscoveredWallet.last_analyzed_at.is_not(None),
+                            backfill_filter,
+                        )
+                        .order_by(
+                            desc(func.coalesce(DiscoveredWallet.in_top_pool, False)),
+                            desc(
+                                DiscoveredWallet.recommendation.in_(["copy_candidate", "monitor"]),
+                            ),
+                            desc(func.coalesce(DiscoveredWallet.is_profitable, False)),
+                            desc(func.coalesce(DiscoveredWallet.trades_24h, 0)),
+                            DiscoveredWallet.last_analyzed_at.asc(),
+                        )
+                        .limit(backfill_limit)
+                    )
+                    backfill = [str(row.address).lower() for row in backfill_rows.all() if row.address]
+                    if not backfill:
+                        self._metrics_backfill_exhausted_version = METRICS_SOURCE_VERSION
 
         ordered = self._merge_unique_addresses(top_pool, smart_pool, gap_refresh, backfill)
         counts = {

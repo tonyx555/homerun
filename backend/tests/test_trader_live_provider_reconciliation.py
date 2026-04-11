@@ -11,13 +11,14 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import Base, LiveTradingOrder, LiveTradingPosition, TradeSignal, Trader, TraderDecision, TraderOrder
+from models.database import Base, LiveTradingOrder, LiveTradingPosition, TradeSignal, Trader, TraderDecision, TraderOrder, TraderPosition
 from services import trader_hot_state, trader_orchestrator_state
 from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
     cleanup_trader_open_orders,
     get_open_order_count_for_trader,
     get_open_position_count_for_trader,
+    get_trader_orders_summary,
     recover_missing_live_trader_orders,
     reconcile_live_provider_orders,
     sync_trader_position_inventory,
@@ -68,13 +69,14 @@ async def _build_session_factory(_tmp_path: Path):
     return await build_postgres_session_factory(Base, "trader_live_provider_reconciliation")
 
 
-async def _seed_trader(session, trader_id: str) -> None:
+async def _seed_trader(session, trader_id: str, *, source_configs: list[dict] | None = None) -> None:
     now = utcnow()
     session.add(
         Trader(
             id=trader_id,
             name="Live Trader",
-            source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+            source_configs_json=source_configs
+            or [{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
             risk_limits_json={},
             metadata_json={},
             mode="live",
@@ -133,6 +135,35 @@ async def _seed_decision(
     await session.flush()
 
 
+def test_inter_trader_sleep_skips_startup_delay():
+    assert trader_reconciliation_worker._inter_trader_sleep_seconds(reason="startup") == 0.0
+    assert trader_reconciliation_worker._inter_trader_sleep_seconds(reason="scheduled") == 0.1
+
+
+def test_post_cycle_cooldown_prioritizes_fast_event_cycles():
+    assert (
+        trader_reconciliation_worker._post_cycle_cooldown_seconds(
+            reason="scheduled",
+            provider_pass=True,
+        )
+        == 1.0
+    )
+    assert (
+        trader_reconciliation_worker._post_cycle_cooldown_seconds(
+            reason="event:trader_order",
+            provider_pass=True,
+        )
+        == 0.5
+    )
+    assert (
+        trader_reconciliation_worker._post_cycle_cooldown_seconds(
+            reason="position_tick",
+            provider_pass=False,
+        )
+        == 0.25
+    )
+
+
 @pytest.mark.asyncio
 async def test_sync_inventory_ignores_unfilled_live_open_orders(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
@@ -183,6 +214,82 @@ async def test_sync_inventory_noop_does_not_leave_transaction_open(tmp_path):
 
             assert result["open_positions"] == 0
             assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_trader_orders_summary_uses_position_inventory_for_open_trade_counts(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-summary-open-positions"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add_all(
+                [
+                    TraderOrder(
+                        id="summary-open-order-a",
+                        trader_id=trader_id,
+                        signal_id=None,
+                        source="crypto",
+                        market_id="market-summary",
+                        market_question="Will Example settle above 50?",
+                        direction="buy_yes",
+                        mode="live",
+                        status="executed",
+                        notional_usd=10.0,
+                        entry_price=0.5,
+                        effective_price=0.5,
+                        payload_json={
+                            "token_id": "token-summary-a",
+                            "provider_reconciliation": {
+                                "filled_size": 20.0,
+                                "average_fill_price": 0.5,
+                                "filled_notional_usd": 10.0,
+                            },
+                        },
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                    ),
+                    TraderOrder(
+                        id="summary-open-order-b",
+                        trader_id=trader_id,
+                        signal_id=None,
+                        source="crypto",
+                        market_id="market-summary",
+                        market_question="Will Example settle above 50?",
+                        direction="buy_yes",
+                        mode="live",
+                        status="executed",
+                        notional_usd=8.0,
+                        entry_price=0.4,
+                        effective_price=0.4,
+                        payload_json={
+                            "token_id": "token-summary-b",
+                            "provider_reconciliation": {
+                                "filled_size": 20.0,
+                                "average_fill_price": 0.4,
+                                "filled_notional_usd": 8.0,
+                            },
+                        },
+                        created_at=now,
+                        executed_at=now,
+                        updated_at=now,
+                    ),
+                ]
+            )
+            await session.commit()
+
+            await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+            summary = await get_trader_orders_summary(session, mode="live")
+            trader_summary = next(row for row in summary["by_trader"] if row["trader_id"] == trader_id)
+
+            assert summary["open"] == 2
+            assert summary["open_trades"] == 1
+            assert trader_summary["open"] == 2
+            assert trader_summary["open_trades"] == 1
     finally:
         await engine.dispose()
 
@@ -377,14 +484,27 @@ async def test_recover_missing_live_trader_orders_adopts_existing_provider_autho
     trader_id = "live-trader-adopt-authority"
     try:
         async with session_factory() as session:
-            await _seed_trader(session, trader_id)
+            await _seed_trader(
+                session,
+                trader_id,
+                source_configs=[
+                    {
+                        "source_key": "scanner",
+                        "strategy_key": "generic_strategy",
+                        "strategy_params": {
+                            "take_profit_pct": 8,
+                            "stop_loss_pct": 12,
+                        },
+                    }
+                ],
+            )
             now = utcnow()
             session.add(
                 TraderOrder(
                     id="live-order-existing",
                     trader_id=trader_id,
-                    source="crypto",
-                    strategy_key="tail_end_carry",
+                    source="scanner",
+                    strategy_key="generic_strategy",
                     market_id="market-mavs-cavs",
                     market_question="Mavericks vs. Cavaliers",
                     direction="buy_no",
@@ -449,6 +569,9 @@ async def test_recover_missing_live_trader_orders_adopts_existing_provider_autho
             payload = dict(rows[0].payload_json or {})
             assert payload["provider_clob_order_id"] == "clob-mavs-cavs"
             assert payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-mavs-cavs"
+            assert payload["strategy_type"] == "generic_strategy"
+            assert payload["strategy_exit_config"]["take_profit_pct"] == 8
+            assert payload["strategy_exit_config"]["stop_loss_pct"] == 12
             assert rows[0].reason == "Tail carry signal selected"
             assert rows[0].status == "resolved_win"
     finally:
@@ -969,13 +1092,17 @@ async def test_recover_missing_live_trader_orders_promotes_failed_existing_entry
 
             refreshed = await session.get(TraderOrder, "failed-existing-order")
             assert refreshed is not None
-            assert refreshed.status == "open"
+            assert refreshed.status == "executed"
             assert refreshed.error_message is None
             assert refreshed.provider_clob_order_id == "clob-manchester-over"
             assert refreshed.verification_status == "venue_fill"
             payload = dict(refreshed.payload_json or {})
             assert payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-manchester-over"
             assert payload["provider_reconciliation"]["snapshot_status"] == "filled"
+            open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
+            open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
+            assert open_orders == 0
+            assert open_positions == 1
     finally:
         await engine.dispose()
 
@@ -1073,7 +1200,20 @@ async def test_recover_missing_live_trader_orders_carries_full_bundle_signal_met
     trader_id = "live-trader-bundle-authority"
     try:
         async with session_factory() as session:
-            await _seed_trader(session, trader_id)
+            await _seed_trader(
+                session,
+                trader_id,
+                source_configs=[
+                    {
+                        "source_key": "scanner",
+                        "strategy_key": "generic_strategy",
+                        "strategy_params": {
+                            "take_profit_pct": 9,
+                            "stop_loss_pct": 11,
+                        },
+                    }
+                ],
+            )
             now = utcnow()
             session.add(
                 TradeSignal(
@@ -1168,15 +1308,34 @@ async def test_recover_missing_live_trader_orders_carries_full_bundle_signal_met
                 await session.execute(select(TraderOrder).where(TraderOrder.trader_id == trader_id).order_by(TraderOrder.created_at.asc()))
             ).scalars().all()
             assert len(recovered_rows) == 1
+            assert recovered_rows[0].status == "executed"
             payload = dict(recovered_rows[0].payload_json or {})
             execution_plan = payload.get("execution_plan")
             execution_plan = execution_plan if isinstance(execution_plan, dict) else {}
             metadata = execution_plan.get("metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
             assert payload.get("is_guaranteed") is True
+            assert payload.get("strategy_type") == "generic_strategy"
+            assert payload.get("strategy_exit_config", {}).get("take_profit_pct") == 9
+            assert payload.get("strategy_exit_config", {}).get("stop_loss_pct") == 11
             assert len(payload.get("positions_to_take") or []) == 2
             assert metadata.get("full_bundle_execution_required") is True
             assert metadata.get("full_bundle_execution_mode") == "live_ioc_complete_or_flatten"
+            open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
+            open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
+            assert open_orders == 0
+            assert open_positions == 1
+            position_rows = (
+                await session.execute(
+                    select(TraderPosition)
+                    .where(TraderPosition.trader_id == trader_id)
+                    .order_by(TraderPosition.created_at.asc())
+                )
+            ).scalars().all()
+            assert len(position_rows) == 1
+            position_payload = dict(position_rows[0].payload_json or {})
+            assert position_payload.get("strategy_exit_config", {}).get("take_profit_pct") == 9
+            assert position_payload.get("strategy_exit_config", {}).get("stop_loss_pct") == 11
     finally:
         await engine.dispose()
 

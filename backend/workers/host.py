@@ -9,7 +9,7 @@ import signal
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 os.environ["HOMERUN_PROCESS_ROLE"] = "worker"
 
@@ -185,6 +185,49 @@ class WorkerHost:
 
     def _enabled(self, key: str) -> bool:
         return bool(self._plane_config.get(key, False))
+
+    def _schedule_background_task(self, coro: Awaitable[Any], *, name: str) -> asyncio.Task[Any]:
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.append(task)
+        return task
+
+    def _schedule_background_startup(
+        self,
+        *,
+        task_name: str,
+        starter: Callable[[], Awaitable[Any]],
+        failure_message: str,
+        started_attr: str | None = None,
+        started_check: Callable[[], bool] | None = None,
+    ) -> None:
+        async def _run() -> None:
+            try:
+                if started_check is not None and started_check():
+                    return
+                await starter()
+                if started_attr is not None:
+                    setattr(self, started_attr, True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning(failure_message, plane=self._plane_name, exc_info=exc)
+
+        self._schedule_background_task(_run(), name=f"{self._plane_name}-{task_name}")
+
+    async def _initialize_live_execution_background(self) -> None:
+        try:
+            trading_initialized = await live_execution_service.initialize()
+            if trading_initialized:
+                logger.info("Live execution service initialized", plane=self._plane_name)
+            else:
+                logger.info(
+                    "Live execution service not initialized - credentials not configured",
+                    plane=self._plane_name,
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Live execution initialization failed", plane=self._plane_name, exc_info=exc)
 
     async def _acquire_plane_lock(self) -> None:
         self._plane_lock.acquire()
@@ -543,18 +586,34 @@ class WorkerHost:
                 logger.warning("Failed to apply runtime settings overrides", plane=self._plane_name, exc_info=exc)
 
         if self._enabled("start_intent_runtime"):
-            await get_intent_runtime().start()
-            self._intent_runtime_started = True
+            intent_runtime = get_intent_runtime()
+            self._schedule_background_startup(
+                task_name="intent-runtime-init",
+                starter=intent_runtime.start,
+                failure_message="Intent runtime initialization failed",
+                started_attr="_intent_runtime_started",
+                started_check=lambda: intent_runtime.started,
+            )
 
         if self._enabled("start_feed_manager"):
             feed_manager = get_feed_manager()
-            if not getattr(feed_manager, "_started", False):
-                await feed_manager.start()
-                self._feed_manager_started = True
+            self._schedule_background_startup(
+                task_name="feed-manager-init",
+                starter=feed_manager.start,
+                failure_message="Feed manager initialization failed",
+                started_attr="_feed_manager_started",
+                started_check=lambda: bool(getattr(feed_manager, "_started", False)),
+            )
 
         if self._enabled("start_market_runtime"):
-            await get_market_runtime().start()
-            self._market_runtime_started = True
+            market_runtime = get_market_runtime()
+            self._schedule_background_startup(
+                task_name="market-runtime-init",
+                starter=market_runtime.start,
+                failure_message="Market runtime initialization failed",
+                started_attr="_market_runtime_started",
+                started_check=lambda: bool(getattr(market_runtime, "_started", False)),
+            )
 
         if self._enabled("load_market_cache"):
             try:
@@ -565,40 +624,67 @@ class WorkerHost:
                 logger.warning("Market cache load failed", plane=self._plane_name, exc_info=exc)
 
         if self._enabled("load_news_feed"):
-            try:
+            async def _load_news_feed() -> None:
                 from services.news.feed_service import news_feed_service
 
                 await news_feed_service.load_from_db()
-            except Exception as exc:
-                logger.warning("News feed preload failed", plane=self._plane_name, exc_info=exc)
+
+            self._schedule_background_startup(
+                task_name="news-feed-preload",
+                starter=_load_news_feed,
+                failure_message="News feed preload failed",
+            )
 
         if self._enabled("initialize_live_execution"):
-            try:
-                trading_initialized = await live_execution_service.initialize()
-                if trading_initialized:
-                    logger.info("Live execution service initialized", plane=self._plane_name)
-                else:
-                    logger.info("Live execution service not initialized - credentials not configured", plane=self._plane_name)
-            except Exception as exc:
-                logger.warning("Live execution initialization failed", plane=self._plane_name, exc_info=exc)
+            self._background_tasks.append(
+                asyncio.create_task(
+                    self._initialize_live_execution_background(),
+                    name=f"{self._plane_name}-live-execution-init",
+                )
+            )
 
         if self._enabled("start_copy_trade_service"):
-            await traders_copy_trade_signal_service.start()
-            await traders_copy_trade_signal_service.refresh_scope()
-            self._copy_trade_service_started = True
+            async def _start_copy_trade_service() -> None:
+                await traders_copy_trade_signal_service.start()
+                await traders_copy_trade_signal_service.refresh_scope()
+
+            self._schedule_background_startup(
+                task_name="copy-trade-service-init",
+                starter=_start_copy_trade_service,
+                failure_message="Copy-trade service initialization failed",
+                started_attr="_copy_trade_service_started",
+                started_check=lambda: bool(getattr(traders_copy_trade_signal_service, "_running", False)),
+            )
 
         if self._enabled("start_position_monitor"):
-            await position_monitor.start()
-            self._position_monitor_started = True
+            self._schedule_background_startup(
+                task_name="position-monitor-init",
+                starter=position_monitor.start,
+                failure_message="Position monitor start failed",
+                started_attr="_position_monitor_started",
+                started_check=lambda: bool(getattr(position_monitor, "_running", False)),
+            )
 
         if self._enabled("start_fill_monitor"):
-            try:
+            async def _start_fill_monitor() -> None:
                 from services.fill_monitor import fill_monitor
 
                 await fill_monitor.start()
-                self._fill_monitor_started = True
-            except Exception as exc:
-                logger.warning("Fill monitor start failed", plane=self._plane_name, exc_info=exc)
+
+            def _fill_monitor_started() -> bool:
+                try:
+                    from services.fill_monitor import fill_monitor
+                except Exception:
+                    return False
+                return bool(getattr(fill_monitor, "_running", False))
+
+            self._schedule_background_startup(
+                task_name="fill-monitor-init",
+                starter=_start_fill_monitor,
+                failure_message="Fill monitor start failed",
+                started_attr="_fill_monitor_started",
+                started_check=_fill_monitor_started,
+            )
 
     async def _start_plane(self) -> None:
         loop = asyncio.get_running_loop()
@@ -706,28 +792,48 @@ class WorkerHost:
             except Exception:
                 pass
 
-        if self._fill_monitor_started:
+        background_tasks = list(self._background_tasks)
+        for task in background_tasks:
+            if not task.done():
+                task.cancel()
+        for task in background_tasks:
             try:
-                from services.fill_monitor import fill_monitor
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+        self._background_tasks.clear()
 
-                fill_monitor.stop()
+        try:
+            from services.fill_monitor import fill_monitor
+        except Exception:
+            fill_monitor = None
+
+        if self._fill_monitor_started or (fill_monitor is not None and bool(getattr(fill_monitor, "_running", False))):
+            try:
+                if fill_monitor is not None:
+                    fill_monitor.stop()
             except Exception:
                 pass
             self._fill_monitor_started = False
-        if self._position_monitor_started:
+        if self._position_monitor_started or bool(getattr(position_monitor, "_running", False)):
             position_monitor.stop()
             self._position_monitor_started = False
-        if self._copy_trade_service_started:
+        if self._copy_trade_service_started or bool(getattr(traders_copy_trade_signal_service, "_running", False)):
             traders_copy_trade_signal_service.stop()
             self._copy_trade_service_started = False
-        if self._market_runtime_started:
-            await get_market_runtime().stop()
+        market_runtime = get_market_runtime()
+        if self._market_runtime_started or bool(getattr(market_runtime, "_started", False)):
+            await market_runtime.stop()
             self._market_runtime_started = False
-        if self._feed_manager_started:
-            await get_feed_manager().stop()
+        feed_manager = get_feed_manager()
+        if self._feed_manager_started or bool(getattr(feed_manager, "_started", False)):
+            await feed_manager.stop()
             self._feed_manager_started = False
-        if self._intent_runtime_started:
-            await get_intent_runtime().stop()
+        intent_runtime = get_intent_runtime()
+        if self._intent_runtime_started or bool(getattr(intent_runtime, "started", False)):
+            await intent_runtime.stop()
             self._intent_runtime_started = False
         if self._event_dispatcher_started:
             await event_dispatcher.stop()
@@ -735,16 +841,6 @@ class WorkerHost:
         if self._event_bus_started:
             await event_bus.stop()
             self._event_bus_started = False
-
-        for task in self._background_tasks:
-            task.cancel()
-        for task in self._background_tasks:
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
 
         if self._cpu_executor is not None:
             self._cpu_executor.shutdown(wait=False, cancel_futures=True)

@@ -220,6 +220,9 @@ export interface TradingPosition {
   average_cost: number
   current_price: number
   unrealized_pnl: number
+  redeemable?: boolean
+  counts_as_open?: boolean
+  end_date?: string | null
 }
 
 export interface SimulationPosition {

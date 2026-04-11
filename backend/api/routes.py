@@ -10,10 +10,12 @@ from datetime import datetime, timezone
 from utils.utcnow import utcnow, utcfromtimestamp
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import select
-from models import Opportunity, OpportunityFilter
+from sqlalchemy import func, select
+from models import Opportunity
 from models.database import (
     AsyncSessionLocal,
+    OpportunityState,
+    ScannerSnapshot,
     Strategy,
     StrategyValidationProfile,
     get_db_session,
@@ -73,6 +75,7 @@ STRATEGY_META_BY_TYPE: dict[str, dict[str, object]] = {
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.2
 DB_RETRY_MAX_DELAY_SECONDS = 1.5
+OPPORTUNITY_PAGE_PREFETCH_MULTIPLIER = 2
 
 
 from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa: E402
@@ -226,11 +229,224 @@ async def _resolve_strategy_to_filter(strategy_param: Optional[str]) -> list[str
     strategy_param = _resolve_fastapi_param(strategy_param)
     if not strategy_param:
         return []
-    strategy_param = strategy_param.strip().lower()
-    return [strategy_param]
+    return [
+        part
+        for part in {piece.strip().lower() for piece in str(strategy_param).split(",")}
+        if part
+    ]
 
 
-async def _list_filtered_opportunities(
+def _normalize_weather_edge_title(title: str) -> str:
+    prefix = "weather edge:"
+    return title[len(prefix) :].lstrip() if title.lower().startswith(prefix) else title
+
+
+def _coerce_payload_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _payload_title(payload: Mapping[str, Any]) -> str:
+    return _normalize_weather_edge_title(str(payload.get("title") or ""))
+
+
+def _payload_search_matches(payload: Mapping[str, Any], search_lower: str) -> bool:
+    if search_lower in _payload_title(payload).lower():
+        return True
+    event_title = str(payload.get("event_title") or "").lower()
+    if event_title and search_lower in event_title:
+        return True
+    for market in payload.get("markets") or []:
+        if not isinstance(market, Mapping):
+            continue
+        if search_lower in str(market.get("question") or "").lower():
+            return True
+    return False
+
+
+def _sort_opportunity_payloads(
+    payloads: list[dict[str, Any]],
+    *,
+    sort_by: Optional[str],
+    sort_dir: Optional[str],
+) -> None:
+    reverse = (sort_dir or "desc") != "asc"
+    effective_sort = sort_by or "ai_score"
+
+    def _ai_analysis(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        value = payload.get("ai_analysis")
+        return value if isinstance(value, Mapping) else {}
+
+    if effective_sort == "ai_score":
+        payloads.sort(
+            key=lambda payload: (
+                bool(_ai_analysis(payload))
+                and str(_ai_analysis(payload).get("recommendation") or "").strip().lower() != "pending",
+                _coerce_payload_float(_ai_analysis(payload).get("overall_score"), 0.0),
+                _coerce_payload_float(payload.get("roi_percent"), 0.0),
+            ),
+            reverse=reverse,
+        )
+        return
+
+    if effective_sort == "profit":
+        payloads.sort(key=lambda payload: _coerce_payload_float(payload.get("net_profit"), 0.0), reverse=reverse)
+        return
+
+    if effective_sort == "liquidity":
+        payloads.sort(key=lambda payload: _coerce_payload_float(payload.get("min_liquidity"), 0.0), reverse=reverse)
+        return
+
+    if effective_sort == "risk":
+        payloads.sort(key=lambda payload: _coerce_payload_float(payload.get("risk_score"), 0.0), reverse=reverse)
+        return
+
+    if effective_sort == "roi":
+        payloads.sort(
+            key=lambda payload: (
+                str(_ai_analysis(payload).get("recommendation") or "").strip().lower() in {"skip", "strong_skip"},
+                -_coerce_payload_float(payload.get("roi_percent"), 0.0)
+                if reverse
+                else _coerce_payload_float(payload.get("roi_percent"), 0.0),
+            ),
+        )
+
+
+async def _list_market_opportunity_payload_page_fast(
+    session: AsyncSession,
+    *,
+    min_profit: float,
+    max_risk: float,
+    strategy: Optional[str],
+    min_liquidity: float,
+    search: Optional[str],
+    category: Optional[str],
+    sort_by: Optional[str],
+    sort_dir: Optional[str],
+    exclude_strategy: Optional[str],
+    sub_strategy: Optional[str],
+    limit: int,
+    offset: int,
+    source: Literal["markets", "traders", "all"],
+) -> Optional[tuple[int, list[dict[str, Any]]]]:
+    payloads = await _list_filtered_opportunity_payloads(
+        session,
+        min_profit=min_profit,
+        max_risk=max_risk,
+        strategy=strategy,
+        min_liquidity=min_liquidity,
+        search=search,
+        category=category,
+        sort_by=sort_by,
+        sort_dir=sort_dir,
+        exclude_strategy=exclude_strategy,
+        sub_strategy=sub_strategy,
+        source=source,
+    )
+    total = len(payloads)
+    page_window = max(limit, limit * OPPORTUNITY_PAGE_PREFETCH_MULTIPLIER)
+    return total, payloads[offset : offset + page_window]
+
+
+async def _get_market_opportunity_counts_fast(
+    session: AsyncSession,
+    *,
+    min_profit: float,
+    max_risk: float,
+    min_liquidity: float,
+    search: Optional[str],
+    strategy: Optional[str],
+    sub_strategy: Optional[str],
+    category: Optional[str],
+    source: Literal["markets", "traders", "all"],
+) -> Optional[dict[str, Any]]:
+    payloads = await _list_filtered_opportunity_payloads(
+        session,
+        min_profit=min_profit,
+        max_risk=max_risk,
+        strategy=strategy,
+        min_liquidity=min_liquidity,
+        search=search,
+        category=category,
+        sort_by=None,
+        sort_dir=None,
+        exclude_strategy=None,
+        sub_strategy=sub_strategy,
+        source=source,
+        sort_results=False,
+    )
+    strategy_counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    sub_strategy_counts: dict[str, int] = {}
+    for payload in payloads:
+        strategy_name = str(payload.get("strategy") or "").strip()
+        if strategy_name:
+            strategy_counts[strategy_name] = strategy_counts.get(strategy_name, 0) + 1
+        category_name = str(payload.get("category") or "").strip().lower()
+        if category_name:
+            category_counts[category_name] = category_counts.get(category_name, 0) + 1
+        subtype = _derive_opportunity_sub_strategy(payload)
+        if subtype:
+            sub_strategy_counts[subtype] = sub_strategy_counts.get(subtype, 0) + 1
+    return {
+        "strategies": strategy_counts,
+        "categories": category_counts,
+        "sub_strategies": sub_strategy_counts,
+    }
+
+
+async def _read_market_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
+    payload_rows = (
+        (
+            await session.execute(
+                select(OpportunityState.opportunity_json)
+                .where(OpportunityState.is_active == True)  # noqa: E712
+                .order_by(OpportunityState.last_updated_at.desc(), OpportunityState.stable_id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [dict(payload) for payload in payload_rows if isinstance(payload, Mapping)]
+
+
+async def _read_trader_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
+    result = await session.execute(
+        select(ScannerSnapshot.opportunities_json).where(ScannerSnapshot.id == shared_state.TRADERS_SNAPSHOT_ID)
+    )
+    raw_payloads = result.scalar_one_or_none() or []
+    payloads: list[dict[str, Any]] = []
+    for item in raw_payloads:
+        if not isinstance(item, Mapping):
+            continue
+        payload = dict(item)
+        strategy_context = payload.get("strategy_context")
+        context = dict(strategy_context) if isinstance(strategy_context, Mapping) else {}
+        if str(context.get("source_key") or "").strip().lower() != "traders":
+            context["source_key"] = "traders"
+            payload["strategy_context"] = context
+        payloads.append(payload)
+    return payloads
+
+
+async def _read_opportunity_payloads(
+    session: AsyncSession,
+    *,
+    source: Literal["markets", "traders", "all"],
+) -> list[dict[str, Any]]:
+    source_key = _resolve_fastapi_param(source) or "markets"
+    if source_key == "traders":
+        return await _read_trader_opportunity_payloads(session)
+    if source_key == "all":
+        market_payloads = await _read_market_opportunity_payloads(session)
+        trader_payloads = await _read_trader_opportunity_payloads(session)
+        return market_payloads + trader_payloads
+    return await _read_market_opportunity_payloads(session)
+
+
+async def _list_filtered_opportunity_payloads(
     session: AsyncSession,
     *,
     min_profit: float,
@@ -244,7 +460,8 @@ async def _list_filtered_opportunities(
     exclude_strategy: Optional[str],
     sub_strategy: Optional[str],
     source: Literal["markets", "traders", "all"],
-) -> list[Opportunity]:
+    sort_results: bool = True,
+) -> list[dict[str, Any]]:
     min_profit = _coerce_float_param(min_profit, 0.0)
     max_risk = _coerce_float_param(max_risk, 1.0)
     min_liquidity = _coerce_float_param(min_liquidity, 0.0)
@@ -257,59 +474,139 @@ async def _list_filtered_opportunities(
     sub_strategy = _resolve_fastapi_param(sub_strategy)
     source = _resolve_fastapi_param(source) or "markets"
 
-    strategies = await _resolve_strategy_to_filter(strategy)
-    filter = OpportunityFilter(
-        min_profit=min_profit / 100,
-        max_risk=max_risk,
-        strategies=strategies,
-        min_liquidity=min_liquidity,
-        category=category,
-    )
+    strategies = set(await _resolve_strategy_to_filter(strategy))
+    payloads = await _read_opportunity_payloads(session, source=source)
 
-    opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
+    if min_profit > 0:
+        payloads = [
+            payload
+            for payload in payloads
+            if _coerce_payload_float(payload.get("roi_percent"), 0.0) >= min_profit
+        ]
+
+    if max_risk < 1.0:
+        payloads = [
+            payload
+            for payload in payloads
+            if _coerce_payload_float(payload.get("risk_score"), 1.0) <= max_risk
+        ]
+
+    if strategies:
+        payloads = [payload for payload in payloads if str(payload.get("strategy") or "").strip().lower() in strategies]
+
+    if min_liquidity > 0:
+        payloads = [
+            payload
+            for payload in payloads
+            if _coerce_payload_float(payload.get("min_liquidity"), 0.0) >= min_liquidity
+        ]
+
+    if category:
+        category_lower = str(category).strip().lower()
+        payloads = [
+            payload
+            for payload in payloads
+            if str(payload.get("category") or "").strip().lower() == category_lower
+        ]
 
     if exclude_strategy:
-        opportunities = [opp for opp in opportunities if opp.strategy != exclude_strategy]
+        exclude_strategy_lower = str(exclude_strategy).strip().lower()
+        payloads = [
+            payload
+            for payload in payloads
+            if str(payload.get("strategy") or "").strip().lower() != exclude_strategy_lower
+        ]
 
     if search:
-        search_lower = search.lower()
-        opportunities = [
-            opp
-            for opp in opportunities
-            if search_lower in opp.title.lower()
-            or (opp.event_title and search_lower in opp.event_title.lower())
-            or any(search_lower in m.get("question", "").lower() for m in opp.markets)
-        ]
+        search_lower = str(search).strip().lower()
+        payloads = [payload for payload in payloads if _payload_search_matches(payload, search_lower)]
 
     normalized_sub = _normalize_sub_strategy(sub_strategy)
     if normalized_sub:
-        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
+        payloads = [
+            payload
+            for payload in payloads
+            if _derive_opportunity_sub_strategy(payload) == normalized_sub
+        ]
 
-    reverse = sort_dir != "asc"
-    effective_sort = sort_by or "ai_score"
+    if sort_results:
+        _sort_opportunity_payloads(payloads, sort_by=sort_by, sort_dir=sort_dir)
 
-    if effective_sort == "ai_score":
-        opportunities.sort(
-            key=lambda o: (
-                o.ai_analysis is not None and o.ai_analysis.recommendation != "pending",
-                o.ai_analysis.overall_score if o.ai_analysis else 0.0,
-                o.roi_percent,
-            ),
-            reverse=reverse,
-        )
-    elif effective_sort == "profit":
-        opportunities.sort(key=lambda o: o.net_profit, reverse=reverse)
-    elif effective_sort == "liquidity":
-        opportunities.sort(key=lambda o: o.min_liquidity, reverse=reverse)
-    elif effective_sort == "risk":
-        opportunities.sort(key=lambda o: o.risk_score, reverse=reverse)
-    elif effective_sort == "roi":
-        opportunities.sort(
-            key=lambda o: (
-                o.ai_analysis is not None and o.ai_analysis.recommendation in ("skip", "strong_skip"),
-                -o.roi_percent if reverse else o.roi_percent,
-            ),
-        )
+    return payloads
+
+
+async def _rollback_session_if_needed(session: AsyncSession) -> None:
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
+
+
+async def _hydrate_opportunity_payloads(
+    session: AsyncSession,
+    payloads: list[dict[str, Any]],
+    *,
+    source: Literal["markets", "traders", "all"],
+    include_live_prices: bool = False,
+    include_price_history: bool = False,
+    block_for_history_backfill: bool = False,
+) -> list[Opportunity]:
+    opportunities: list[Opportunity] = []
+    for payload in payloads:
+        try:
+            item = dict(payload)
+            item["title"] = _payload_title(item)
+            opportunities.append(Opportunity.model_validate(item))
+        except Exception:
+            continue
+
+    await _rollback_session_if_needed(session)
+
+    if not include_price_history:
+        for opportunity in opportunities:
+            for market in opportunity.markets:
+                if isinstance(market, dict):
+                    market.pop("price_history", None)
+
+    source_key = _resolve_fastapi_param(source) or "markets"
+    if opportunities and include_live_prices and source_key in {"markets", "all"}:
+        try:
+            from services.scanner import scanner as market_scanner
+
+            opportunities = await market_scanner.refresh_opportunity_prices(
+                opportunities,
+                drop_stale=False,
+            )
+        except Exception:
+            pass
+
+    if not opportunities:
+        return []
+
+    if not include_price_history:
+        return opportunities
+
+    missing_history = []
+    for opportunity in opportunities:
+        if any(
+            not isinstance(market.get("price_history"), list) or len(market.get("price_history") or []) < 2
+            for market in opportunity.markets
+            if isinstance(market, dict)
+        ):
+            missing_history.append(opportunity)
+
+    if missing_history:
+        try:
+            from services.scanner import scanner as market_scanner
+
+            await market_scanner.attach_price_history_to_opportunities(
+                missing_history,
+                timeout_seconds=2.0 if block_for_history_backfill else 0.0,
+                block_for_backfill=block_for_history_backfill,
+            )
+        except Exception:
+            pass
 
     return opportunities
 
@@ -351,10 +648,11 @@ async def get_opportunities(
     ),
 ):
     """Get current arbitrage opportunities (from DB snapshot)."""
-    opportunities: list[Opportunity] = []
+    total = 0
+    page_payloads: list[dict[str, Any]] = []
     for attempt in range(DB_RETRY_ATTEMPTS):
         try:
-            opportunities = await _list_filtered_opportunities(
+            fast_path_result = await _list_market_opportunity_payload_page_fast(
                 session,
                 min_profit=min_profit,
                 max_risk=max_risk,
@@ -366,8 +664,30 @@ async def get_opportunities(
                 sort_dir=sort_dir,
                 exclude_strategy=exclude_strategy,
                 sub_strategy=sub_strategy,
+                limit=limit,
+                offset=offset,
                 source=source,
             )
+            if fast_path_result is not None:
+                total, page_payloads = fast_path_result
+            else:
+                opportunity_payloads = await _list_filtered_opportunity_payloads(
+                    session,
+                    min_profit=min_profit,
+                    max_risk=max_risk,
+                    strategy=strategy,
+                    min_liquidity=min_liquidity,
+                    search=search,
+                    category=category,
+                    sort_by=sort_by,
+                    sort_dir=sort_dir,
+                    exclude_strategy=exclude_strategy,
+                    sub_strategy=sub_strategy,
+                    source=source,
+                )
+                total = len(opportunity_payloads)
+                page_window = max(limit, limit * OPPORTUNITY_PAGE_PREFETCH_MULTIPLIER)
+                page_payloads = opportunity_payloads[offset : offset + page_window]
             break
         except Exception as exc:
             if isinstance(exc, HTTPException):
@@ -387,30 +707,16 @@ async def get_opportunities(
                 pass
             await asyncio.sleep(_db_retry_delay(attempt))
 
-    # Apply pagination
-    total = len(opportunities)
-    paginated = opportunities[offset : offset + limit]
-
-    if paginated:
-        missing_history = []
-        for opp in paginated:
-            if any(
-                not isinstance(market.get("price_history"), list) or len(market.get("price_history") or []) < 2
-                for market in opp.markets
-                if isinstance(market, dict)
-            ):
-                missing_history.append(opp)
-        if missing_history:
-            try:
-                from services.scanner import scanner as market_scanner
-
-                await market_scanner.attach_price_history_to_opportunities(
-                    missing_history,
-                    timeout_seconds=2.0,
-                    block_for_backfill=True,
-                )
-            except Exception:
-                pass
+    paginated = (
+        await _hydrate_opportunity_payloads(
+            session,
+            page_payloads,
+            source=source,
+            include_live_prices=False,
+            include_price_history=False,
+            block_for_history_backfill=False,
+        )
+    )[:limit]
 
     # Set total count header and return serialised list directly.
     # Using Response injection (not JSONResponse) lets FastAPI handle
@@ -453,7 +759,7 @@ async def get_opportunity_ids(
 ):
     limit = _coerce_int_param(limit, 500)
     offset = _coerce_int_param(offset, 0)
-    opportunities = await _list_filtered_opportunities(
+    opportunity_payloads = await _list_filtered_opportunity_payloads(
         session,
         min_profit=min_profit,
         max_risk=max_risk,
@@ -468,14 +774,14 @@ async def get_opportunity_ids(
         source=source,
     )
 
-    total = len(opportunities)
-    paginated = opportunities[offset : offset + limit]
+    total = len(opportunity_payloads)
+    paginated = opportunity_payloads[offset : offset + limit]
 
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
-        "ids": [opp.id for opp in paginated],
+        "ids": [str(payload.get("id") or "") for payload in paginated if str(payload.get("id") or "").strip()],
     }
 
 
@@ -721,18 +1027,37 @@ async def get_opportunity_counts(
     Applies base filters (profit, risk, liquidity, search). Optional strategy/category
     filters can be supplied to narrow subtype counts for strategy-specific subfilters.
     """
-    filter = OpportunityFilter(
-        min_profit=min_profit / 100,
-        max_risk=max_risk,
-        strategies=await _resolve_strategy_to_filter(strategy),
-        min_liquidity=min_liquidity,
-        category=category,
-    )
-
-    opportunities: list[Opportunity] = []
+    opportunity_payloads: list[dict[str, Any]] = []
     for attempt in range(DB_RETRY_ATTEMPTS):
         try:
-            opportunities = await shared_state.get_opportunities_from_db(session, filter, source=source)
+            fast_counts = await _get_market_opportunity_counts_fast(
+                session,
+                min_profit=min_profit,
+                max_risk=max_risk,
+                min_liquidity=min_liquidity,
+                search=search,
+                strategy=strategy,
+                sub_strategy=sub_strategy,
+                category=category,
+                source=source,
+            )
+            if fast_counts is not None:
+                return fast_counts
+            opportunity_payloads = await _list_filtered_opportunity_payloads(
+                session,
+                min_profit=min_profit,
+                max_risk=max_risk,
+                strategy=strategy,
+                min_liquidity=min_liquidity,
+                search=search,
+                category=category,
+                sort_by=None,
+                sort_dir=None,
+                exclude_strategy=None,
+                sub_strategy=sub_strategy,
+                source=source,
+                sort_results=False,
+            )
             break
         except Exception as exc:
             if isinstance(exc, HTTPException):
@@ -752,31 +1077,19 @@ async def get_opportunity_counts(
                 pass
             await asyncio.sleep(_db_retry_delay(attempt))
 
-    # Apply search filter if provided
-    if search:
-        search_lower = search.lower()
-        opportunities = [
-            opp
-            for opp in opportunities
-            if search_lower in opp.title.lower()
-            or (opp.event_title and search_lower in opp.event_title.lower())
-            or any(search_lower in m.get("question", "").lower() for m in opp.markets)
-        ]
-
-    normalized_sub = _normalize_sub_strategy(sub_strategy)
-    if normalized_sub:
-        opportunities = [opp for opp in opportunities if _derive_opportunity_sub_strategy(opp) == normalized_sub]
-
     # Count by strategy
     strategy_counts: dict[str, int] = {}
     category_counts: dict[str, int] = {}
     sub_strategy_counts: dict[str, int] = {}
-    for opp in opportunities:
-        strategy_counts[opp.strategy] = strategy_counts.get(opp.strategy, 0) + 1
-        if opp.category:
-            cat = opp.category.lower()
+    for payload in opportunity_payloads:
+        strategy_name = str(payload.get("strategy") or "").strip()
+        if strategy_name:
+            strategy_counts[strategy_name] = strategy_counts.get(strategy_name, 0) + 1
+        category_name = str(payload.get("category") or "").strip().lower()
+        if category_name:
+            cat = category_name
             category_counts[cat] = category_counts.get(cat, 0) + 1
-        sub = _derive_opportunity_sub_strategy(opp)
+        sub = _derive_opportunity_sub_strategy(payload)
         if sub:
             sub_strategy_counts[sub] = sub_strategy_counts.get(sub, 0) + 1
 
@@ -797,25 +1110,19 @@ async def get_opportunity(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Get a specific opportunity by ID"""
-    opportunities = await shared_state.get_opportunities_from_db(session, None, source=source)
-    for opp in opportunities:
-        if opp.id == opportunity_id:
-            if any(
-                not isinstance(market.get("price_history"), list) or len(market.get("price_history") or []) < 2
-                for market in opp.markets
-                if isinstance(market, dict)
-            ):
-                try:
-                    from services.scanner import scanner as market_scanner
-
-                    await market_scanner.attach_price_history_to_opportunities(
-                        [opp],
-                        timeout_seconds=2.0,
-                        block_for_backfill=True,
-                    )
-                except Exception:
-                    pass
-            return _serialize_with_sub_strategy(opp)
+    payloads = await _read_opportunity_payloads(session, source=source)
+    matching_payload = next((payload for payload in payloads if str(payload.get("id") or "") == opportunity_id), None)
+    if matching_payload is not None:
+        opportunities = await _hydrate_opportunity_payloads(
+            session,
+            [matching_payload],
+            source=source,
+            include_live_prices=True,
+            include_price_history=True,
+            block_for_history_backfill=True,
+        )
+        if opportunities:
+            return _serialize_with_sub_strategy(opportunities[0])
     raise HTTPException(status_code=404, detail="Opportunity not found")
 
 

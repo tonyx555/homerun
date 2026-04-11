@@ -3,7 +3,7 @@ import sys
 from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -23,6 +23,9 @@ class _FakeScalarResult:
         self._scalars_list = list(scalars_list or [])
 
     def scalar_one_or_none(self):
+        return self._scalar_value
+
+    def scalar_one(self):
         return self._scalar_value
 
     def one_or_none(self):
@@ -114,22 +117,11 @@ def _build_opportunity(*, market_id: str) -> Opportunity:
 async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opportunity_event_inserts(monkeypatch):
     publish_mock = AsyncMock()
     commit_mock = AsyncMock()
-    persist_mock = AsyncMock(
-        return_value=[
-            {
-                "id": "event-1",
-                "stable_id": "stable-1",
-                "run_id": "run-1",
-                "event_type": "detected",
-                "opportunity": {"revision": 3, "strategy": "tail_end_carry"},
-                "created_at": "2026-04-06T12:39:04Z",
-            }
-        ]
-    )
+    schedule_mock = Mock()
     history_upsert_mock = AsyncMock(return_value=0)
     monkeypatch.setattr(shared_state.event_bus, "publish", publish_mock)
     monkeypatch.setattr(shared_state, "_commit_with_retry", commit_mock)
-    monkeypatch.setattr(shared_state, "_persist_incremental_state", persist_mock)
+    monkeypatch.setattr(shared_state, "_schedule_scanner_state_projection", schedule_mock)
     monkeypatch.setattr(shared_state, "upsert_scanner_market_history", history_upsert_mock)
 
     session = _FakeSession()
@@ -148,24 +140,21 @@ async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opport
 
     assert isinstance(session.snapshot_row, ScannerSnapshot)
     assert session.snapshot_row.opportunities_count == 1
-    assert session.snapshot_row.opportunities_json == []
+    assert list(session.snapshot_row.opportunities_json or []) == []
     assert not any(isinstance(row, OpportunityEvent) for row in session.added)
     commit_mock.assert_awaited_once()
-    persist_mock.assert_awaited_once()
+    schedule_mock.assert_called_once()
+    scheduled = schedule_mock.call_args.kwargs["opportunities"]
+    assert len(scheduled) == 1
+    assert scheduled[0].stable_id == opportunity.stable_id
     history_upsert_mock.assert_not_awaited()
 
     published_types = [call.args[0] for call in publish_mock.await_args_list]
     assert "scanner_status" in published_types
     assert "scanner_activity" in published_types
     assert "opportunities_update" in published_types
-    assert "opportunity_events" in published_types
-    assert "opportunity_update" in published_types
-
-    opportunity_update_payload = next(
-        call.args[1] for call in publish_mock.await_args_list if call.args[0] == "opportunity_update"
-    )
-    assert opportunity_update_payload["stable_id"] == "stable-1"
-    assert opportunity_update_payload["revision"] == 3
+    assert "opportunity_events" not in published_types
+    assert "opportunity_update" not in published_types
 
 
 @pytest.mark.asyncio
@@ -173,7 +162,7 @@ async def test_persist_incremental_state_updates_state_and_returns_runtime_event
     opportunity = _build_opportunity(market_id="market-2")
     payload = [opportunity.model_dump(mode="json")]
     completed_at = utcnow().replace(tzinfo=None)
-    session = _FakeSession(execute_results=[{"scalars_list": []}])
+    session = _FakeSession(execute_results=[{"scalars_list": []}, {"scalars_list": []}])
 
     event_messages = await shared_state._persist_incremental_state(
         session,
@@ -188,6 +177,35 @@ async def test_persist_incremental_state_updates_state_and_returns_runtime_event
     assert OpportunityEvent not in added_types
     assert len(event_messages) == 1
     assert event_messages[0]["event_type"] == "detected"
+    assert event_messages[0]["stable_id"] == opportunity.stable_id
+
+
+@pytest.mark.asyncio
+async def test_persist_incremental_state_fetches_missing_current_ids_without_loading_all_active_and_current_rows_together():
+    opportunity = _build_opportunity(market_id="market-4")
+    payload = [opportunity.model_dump(mode="json")]
+    completed_at = utcnow().replace(tzinfo=None)
+    existing_row = OpportunityState(
+        stable_id=opportunity.stable_id,
+        opportunity_json=opportunity.model_dump(mode="json"),
+        first_seen_at=utcnow().replace(tzinfo=None),
+        last_seen_at=utcnow().replace(tzinfo=None),
+        last_updated_at=utcnow().replace(tzinfo=None),
+        is_active=False,
+        last_run_id=None,
+    )
+    session = _FakeSession(execute_results=[{"scalars_list": []}, {"scalars_list": [existing_row]}])
+
+    event_messages = await shared_state._persist_incremental_state(
+        session,
+        payload,
+        {"current_activity": "Fast scan complete - 1 found, 1 total"},
+        completed_at,
+    )
+
+    assert existing_row.is_active is True
+    assert len(event_messages) == 1
+    assert event_messages[0]["event_type"] == "reactivated"
     assert event_messages[0]["stable_id"] == opportunity.stable_id
 
 

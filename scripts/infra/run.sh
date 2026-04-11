@@ -75,6 +75,29 @@ except Exception:
 PY
 }
 
+port_available_for_bind() {
+    python3 - "$1" "$2" <<'PY'
+import socket
+import sys
+
+host = sys.argv[1]
+port = int(sys.argv[2])
+
+family = socket.AF_INET6 if ":" in host and host not in {"0.0.0.0", ""} else socket.AF_INET
+bind_host = "::" if family == socket.AF_INET6 and host in {"", "0.0.0.0"} else (host or "0.0.0.0")
+
+sock = socket.socket(family, socket.SOCK_STREAM)
+try:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind((bind_host, port))
+    raise SystemExit(0)
+except OSError:
+    raise SystemExit(1)
+finally:
+    sock.close()
+PY
+}
+
 wait_for_service() {
     local host="$1"
     local port="$2"
@@ -269,7 +292,7 @@ find_available_postgres_port() {
     local max_port=$((start_port + 32))
     local port
     for port in $(seq "$start_port" "$max_port"); do
-        if ! tcp_ping "$POSTGRES_HOST" "$port"; then
+        if port_available_for_bind "$POSTGRES_HOST" "$port"; then
             echo "$port"
             return 0
         fi
@@ -286,7 +309,7 @@ ensure_postgres() {
         return 0
     fi
 
-    if postgres_ping; then
+    if ! port_available_for_bind "$POSTGRES_HOST" "$POSTGRES_PORT"; then
         if postgres_listener_owned_by_launcher; then
             echo -e "${GREEN}Postgres already running on ${POSTGRES_HOST}:${POSTGRES_PORT}${NC}"
             return 0
@@ -532,10 +555,10 @@ else
     export DATABASE_URL="postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}"
 fi
 
+backend/venv/bin/python scripts/infra/ensure_postgres_ready.py --database-url "$DATABASE_URL"
+
 mkdir -p backend/.runtime
 printf '%s\n' "$DATABASE_URL" > backend/.runtime/database_url
-
-backend/venv/bin/python scripts/infra/ensure_postgres_ready.py --database-url "$DATABASE_URL"
 
 source backend/venv/bin/activate
 

@@ -1,6 +1,7 @@
 """
 Shared state: DB as single source of truth.
-Scanner worker writes snapshot; API and other workers read from DB.
+Scanner worker writes a small status snapshot plus normalized active opportunity state;
+API and other workers read from DB.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
+    AsyncSessionLocal,
     ScannerControl,
     ScannerMarketHistory,
     ScannerSnapshot,
@@ -27,7 +29,6 @@ from models.database import (
 )
 from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
-from services.market_tradability import get_market_tradability_map
 from utils.converters import format_iso_utc_z, normalize_market_id, parse_iso_datetime
 from utils.retry import commit_with_retry as _shared_commit_with_retry
 from utils.utcnow import utcnow
@@ -45,6 +46,11 @@ def _chunked_in(column, values, chunk_size: int = SQL_IN_CLAUSE_CHUNK_SIZE):
     return or_(*clauses)
 
 
+def _chunked_values(values: set[str] | list[str], chunk_size: int = SQL_IN_CLAUSE_CHUNK_SIZE) -> list[list[str]]:
+    ordered = list(values)
+    return [ordered[i : i + chunk_size] for i in range(0, len(ordered), chunk_size)]
+
+
 logger = logging.getLogger(__name__)
 
 SNAPSHOT_ID = "latest"
@@ -55,6 +61,10 @@ CONTROL_ID = "default"
 # Set by the evaluate endpoint, consumed and cleared by the scanner worker.
 _pending_targeted_condition_ids: list[str] = []
 _pending_targeted_condition_ids_lock = Lock()
+_scanner_projection_lock = Lock()
+_scanner_projection_task: asyncio.Task | None = None
+_scanner_projection_pending: dict[str, Any] | None = None
+_SCANNER_STATE_PROJECTION_TIMEOUT_SECONDS = 15.0
 
 
 async def _commit_with_retry(session: AsyncSession) -> None:
@@ -62,6 +72,127 @@ async def _commit_with_retry(session: AsyncSession) -> None:
         await _shared_commit_with_retry(session)
     except DBAPIError:
         raise
+
+
+async def _publish_opportunity_runtime_events(event_messages: list[dict[str, Any]]) -> None:
+    if not event_messages:
+        return
+    try:
+        await event_bus.publish(
+            "opportunity_events",
+            {
+                "events": event_messages,
+            },
+        )
+        for event in event_messages:
+            opportunity_payload = event.get("opportunity") if isinstance(event, dict) else {}
+            if not isinstance(opportunity_payload, dict):
+                opportunity_payload = {}
+            await event_bus.publish(
+                "opportunity_update",
+                {
+                    "id": event.get("id"),
+                    "stable_id": event.get("stable_id"),
+                    "run_id": event.get("run_id"),
+                    "event_type": event.get("event_type"),
+                    "revision": int(opportunity_payload.get("revision") or 0),
+                    "opportunity": opportunity_payload,
+                    "created_at": event.get("created_at"),
+                },
+            )
+    except Exception:
+        pass
+
+
+async def _project_scanner_state(
+    opportunities: list[Opportunity],
+    status: dict[str, Any],
+    completed_at: datetime,
+) -> None:
+    try:
+        payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
+        if skipped:
+            logger.warning(
+                "Skipped %d/%d opportunities while projecting scanner state",
+                skipped,
+                len(opportunities),
+            )
+    except Exception:
+        logger.exception("Scanner opportunity-state serialization failed")
+        return
+
+    async def _run_projection() -> list[dict[str, Any]]:
+        async with AsyncSessionLocal() as session:
+            event_messages = await _persist_incremental_state(session, payload, status, completed_at)
+            await _commit_with_retry(session)
+            return event_messages
+
+    try:
+        event_messages = await asyncio.wait_for(
+            _run_projection(),
+            timeout=_SCANNER_STATE_PROJECTION_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Scanner opportunity-state projection timed out; dropped batch count=%s", len(payload))
+        return
+    except Exception:
+        logger.exception("Scanner opportunity-state projection failed")
+        return
+
+    await _publish_opportunity_runtime_events(event_messages)
+
+
+async def _run_scanner_state_projection_loop() -> None:
+    global _scanner_projection_pending
+    global _scanner_projection_task
+
+    try:
+        while True:
+            with _scanner_projection_lock:
+                pending = _scanner_projection_pending
+                _scanner_projection_pending = None
+            if pending is None:
+                return
+            await _project_scanner_state(
+                pending["opportunities"],
+                pending["status"],
+                pending["completed_at"],
+            )
+    finally:
+        with _scanner_projection_lock:
+            _scanner_projection_task = None
+            should_restart = _scanner_projection_pending is not None
+        if should_restart:
+            _schedule_scanner_state_projection(
+                opportunities=[],
+                status={},
+                completed_at=utcnow(),
+                reuse_pending=True,
+            )
+
+
+def _schedule_scanner_state_projection(
+    *,
+    opportunities: list[Opportunity],
+    status: dict[str, Any],
+    completed_at: datetime,
+    reuse_pending: bool = False,
+) -> None:
+    global _scanner_projection_pending
+    global _scanner_projection_task
+
+    with _scanner_projection_lock:
+        if not reuse_pending:
+            _scanner_projection_pending = {
+                "opportunities": list(opportunities),
+                "status": {"current_activity": status.get("current_activity")},
+                "completed_at": completed_at,
+            }
+        if _scanner_projection_task is None or _scanner_projection_task.done():
+            _scanner_projection_task = asyncio.create_task(
+                _run_scanner_state_projection_loop(),
+                name="scanner-state-projection",
+            )
 
 
 def _normalize_history_points(points: Any) -> list[dict[str, Any]]:
@@ -177,7 +308,7 @@ async def write_scanner_snapshot(
     opportunities: list[Opportunity],
     status: dict[str, Any],
 ) -> None:
-    """Write current opportunities and status to scanner_snapshot (worker calls this)."""
+    """Write scanner status/counts and schedule normalized active-state projection."""
     last_scan = status.get("last_scan")
     if isinstance(last_scan, str):
         try:
@@ -188,13 +319,6 @@ async def write_scanner_snapshot(
     elif last_scan is None:
         last_scan = utcnow()
 
-    payload, skipped = await asyncio.to_thread(_serialize_opportunity_payload, opportunities)
-    if skipped:
-        logger.warning(
-            "Skipped %d/%d opportunities while writing scanner snapshot",
-            skipped,
-            len(opportunities),
-        )
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
     row = result.scalar_one_or_none()
     if row is None:
@@ -225,8 +349,8 @@ async def write_scanner_snapshot(
     row.strategy_diagnostics_json = status.get("strategy_diagnostics", {})
     row.tiered_scanning_json = status.get("tiered_scanning")
     row.ws_feeds_json = status.get("ws_feeds")
-    opportunity_events = await _persist_incremental_state(session, payload, status, last_scan)
     await _commit_with_retry(session)
+    _schedule_scanner_state_projection(opportunities=opportunities, status=status, completed_at=last_scan)
 
     async def _publish_snapshot_events() -> None:
         try:
@@ -257,29 +381,6 @@ async def write_scanner_snapshot(
                     "source": "scanner_snapshot_write",
                 },
             )
-            if opportunity_events:
-                await event_bus.publish(
-                    "opportunity_events",
-                    {
-                        "events": opportunity_events,
-                    },
-                )
-                for event in opportunity_events:
-                    opportunity_payload = event.get("opportunity") if isinstance(event, dict) else {}
-                    if not isinstance(opportunity_payload, dict):
-                        opportunity_payload = {}
-                    await event_bus.publish(
-                        "opportunity_update",
-                        {
-                            "id": event.get("id"),
-                            "stable_id": event.get("stable_id"),
-                            "run_id": event.get("run_id"),
-                            "event_type": event.get("event_type"),
-                            "revision": int(opportunity_payload.get("revision") or 0),
-                            "opportunity": opportunity_payload,
-                            "created_at": event.get("created_at"),
-                        },
-                    )
         except Exception:
             pass
 
@@ -555,34 +656,31 @@ async def _persist_incremental_state(
 
     current_ids = set(current_map.keys())
 
-    # Pull active rows and any rows that appear in current payload.
+    active_rows = (
+        (
+            await session.execute(
+                select(OpportunityState).where(OpportunityState.is_active == True)  # noqa: E712
+            )
+        )
+        .scalars()
+        .all()
+    )
+    existing_by_id = {row.stable_id: row for row in active_rows}
+
     if current_ids:
-        existing_rows = (
-            (
-                await session.execute(
-                    select(OpportunityState).where(
-                        or_(
-                            OpportunityState.is_active == True,  # noqa: E712
-                            _chunked_in(OpportunityState.stable_id, current_ids),
-                        )
+        missing_current_ids = [stable_id for stable_id in current_ids if stable_id not in existing_by_id]
+        for stable_id_chunk in _chunked_values(missing_current_ids):
+            existing_rows = (
+                (
+                    await session.execute(
+                        select(OpportunityState).where(OpportunityState.stable_id.in_(stable_id_chunk))
                     )
                 )
+                .scalars()
+                .all()
             )
-            .scalars()
-            .all()
-        )
-    else:
-        existing_rows = (
-            (
-                await session.execute(
-                    select(OpportunityState).where(OpportunityState.is_active == True)  # noqa: E712
-                )
-            )
-            .scalars()
-            .all()
-        )
-
-    existing_by_id = {row.stable_id: row for row in existing_rows}
+            for row in existing_rows:
+                existing_by_id.setdefault(row.stable_id, row)
 
     # Upsert current opportunities and emit detected/updated/reactivated events.
     for stable_id, item in current_map.items():
@@ -709,10 +807,25 @@ async def update_scanner_activity(session: AsyncSession, activity: str) -> None:
         pass  # fire-and-forget
 
 
+async def _read_active_market_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
+    payload_rows = (
+        (
+            await session.execute(
+                select(OpportunityState.opportunity_json)
+                .where(OpportunityState.is_active == True)  # noqa: E712
+                .order_by(OpportunityState.last_updated_at.desc(), OpportunityState.stable_id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [dict(payload) for payload in payload_rows if isinstance(payload, dict)]
+
+
 async def read_scanner_snapshot(
     session: AsyncSession,
 ) -> tuple[list[Opportunity], dict[str, Any]]:
-    """Read latest opportunities and status from DB. Returns (opportunities, status_dict)."""
+    """Read current status row plus normalized active market opportunities."""
     result = await session.execute(
         select(
             ScannerSnapshot.running,
@@ -731,13 +844,7 @@ async def read_scanner_snapshot(
     if row is None:
         return [], _default_status()
 
-    raw_opps = list(
-        (
-            await session.execute(
-                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
-            )
-        ).scalars().all()
-    )
+    raw_opps = await _read_active_market_opportunity_payloads(session)
     market_history = await read_scanner_market_history(
         session,
         market_ids=_market_history_ids_from_payloads(raw_opps),
@@ -782,7 +889,7 @@ async def read_scanner_snapshot(
         "last_scan": format_iso_utc_z(row.last_scan_at),
         "last_fast_scan": tiered.get("last_fast_scan"),
         "last_heavy_scan": tiered.get("last_heavy_scan") or tiered.get("last_full_snapshot_strategy_scan"),
-        "opportunities_count": int(row.opportunities_count or len(opportunities)),
+        "opportunities_count": len(opportunities),
         "current_activity": row.current_activity,
         "lane_watchdogs": tiered.get("lane_watchdogs"),
         "strategies": row.strategies_json or [],
@@ -823,7 +930,16 @@ async def read_scanner_status(
 
     opportunities_count = 0
     if include_opportunity_count:
-        opportunities_count = int(row.opportunities_count or 0)
+        opportunities_count = int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(OpportunityState)
+                    .where(OpportunityState.is_active == True)  # noqa: E712
+                )
+            ).scalar_one()
+            or 0
+        )
 
     tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}
     status = {
@@ -990,36 +1106,6 @@ def _stable_id_from_opportunity_id(opportunity_id: Optional[str]) -> Optional[st
     return text
 
 
-def _is_traders_opportunity(opp: Opportunity) -> bool:
-    context = opp.strategy_context if isinstance(opp.strategy_context, dict) else {}
-    return str(context.get("source_key") or "").strip().lower() == "traders"
-
-
-def _market_ids_from_opportunity(opp: Opportunity) -> list[str]:
-    ids: list[str] = []
-    seen: set[str] = set()
-
-    for market in opp.markets or []:
-        if not isinstance(market, dict):
-            continue
-        mid = str(market.get("id") or market.get("condition_id") or "").strip().lower()
-        if not mid or mid in seen:
-            continue
-        seen.add(mid)
-        ids.append(mid)
-
-    for position in opp.positions_to_take or []:
-        if not isinstance(position, dict):
-            continue
-        mid = str(position.get("market_id") or position.get("market") or position.get("id") or "").strip().lower()
-        if not mid or mid in seen:
-            continue
-        seen.add(mid)
-        ids.append(mid)
-
-    return ids
-
-
 async def update_opportunity_ai_analysis_in_snapshot(
     session: AsyncSession,
     opportunity_id: str,
@@ -1064,7 +1150,7 @@ async def get_opportunities_from_db(
     else:
         opportunities, _ = await read_scanner_snapshot(session)
 
-    # Release the DB connection before price overlays/tradability checks,
+    # Release the DB connection before price overlays/history fetches,
     # which may perform network or cache I/O.
     try:
         if session.in_transaction():
@@ -1115,26 +1201,6 @@ async def get_opportunities_from_db(
                 )
             except Exception:
                 pass
-
-    apply_tradability_filter = source_key in {"markets", "all"}
-    if opportunities and apply_tradability_filter:
-        by_index: dict[int, list[str]] = {}
-        all_market_ids: set[str] = set()
-        for idx, opp in enumerate(opportunities):
-            if _is_traders_opportunity(opp):
-                by_index[idx] = []
-                continue
-            market_ids = _market_ids_from_opportunity(opp)
-            by_index[idx] = market_ids
-            all_market_ids.update(market_ids)
-
-        if all_market_ids:
-            tradability = await get_market_tradability_map(all_market_ids)
-            opportunities = [
-                opp
-                for idx, opp in enumerate(opportunities)
-                if _is_traders_opportunity(opp) or all(tradability.get(mid, True) for mid in by_index.get(idx, []))
-            ]
 
     if not filter:
         return opportunities

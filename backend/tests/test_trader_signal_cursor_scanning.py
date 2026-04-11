@@ -597,6 +597,80 @@ async def test_unconsumed_signals_can_filter_specific_ids_and_runtime_sequence(t
 
 
 @pytest.mark.asyncio
+async def test_pending_unconsumed_signals_bypass_runtime_and_created_cursor_filters(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            stranded_pending = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="scanner-stranded",
+                signal_type="scanner_opportunity",
+                strategy_type="scanner_strategy",
+                market_id="market-stranded",
+                direction="buy_no",
+                dedupe_key="scanner-stranded",
+                status="pending",
+                runtime_sequence=21,
+                created_at=now,
+                updated_at=now,
+            )
+            later_consumed = TradeSignal(
+                id=uuid.uuid4().hex,
+                source="scanner",
+                source_item_id="scanner-later",
+                signal_type="scanner_opportunity",
+                strategy_type="scanner_strategy",
+                market_id="market-later",
+                direction="buy_no",
+                dedupe_key="scanner-later",
+                status="pending",
+                runtime_sequence=25,
+                created_at=now + timedelta(seconds=30),
+                updated_at=now + timedelta(seconds=30),
+            )
+            trader = Trader(
+                id=trader_id,
+                name="Pending Recovery Trader",
+                source_configs_json=[{"source_key": "scanner", "strategy_key": "scanner_strategy", "strategy_params": {}}],
+            )
+            session.add_all([trader, stranded_pending, later_consumed])
+            await session.commit()
+
+            await record_signal_consumption(
+                session,
+                trader_id=trader_id,
+                signal_id=later_consumed.id,
+                outcome="selected",
+            )
+            await upsert_trader_signal_cursor(
+                session,
+                trader_id=trader_id,
+                last_signal_created_at=later_consumed.updated_at,
+                last_signal_id=later_consumed.id,
+                last_runtime_sequence=later_consumed.runtime_sequence,
+            )
+
+            rows = await list_unconsumed_trade_signals(
+                session,
+                trader_id=trader_id,
+                sources=["scanner"],
+                statuses=["pending"],
+                strategy_types_by_source={"scanner": ["scanner_strategy"]},
+                cursor_runtime_sequence=later_consumed.runtime_sequence,
+                cursor_created_at=later_consumed.updated_at,
+                cursor_signal_id=later_consumed.id,
+                limit=10,
+            )
+
+            assert [row.id for row in rows] == [stranded_pending.id]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_unconsumed_signals_return_pending_markets_without_fetch_exclusion(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = uuid.uuid4().hex
