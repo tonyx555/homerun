@@ -6,7 +6,7 @@ from typing import Any
 
 from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, make_aware
-from services.quality_filter import QualityFilterOverrides
+from services.quality_filter import QualityFilterOverrides, quality_filter
 from utils.converters import to_float
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,51 @@ class NegRiskStrategy(BaseStrategy):
 
         return opportunities
 
+    @staticmethod
+    def _build_position(
+        market: Market,
+        *,
+        outcome: str,
+        price: float,
+        token_index: int,
+    ) -> dict[str, Any]:
+        token_id = None
+        if market.clob_token_ids and token_index < len(market.clob_token_ids):
+            token_id = market.clob_token_ids[token_index]
+        return {
+            "action": "BUY",
+            "outcome": outcome,
+            "market": market.question,
+            "market_id": market.id,
+            "market_question": market.question,
+            "price": price,
+            "token_id": token_id,
+        }
+
+    def _finalize_opportunity(self, opportunity: Opportunity | None) -> Opportunity | None:
+        if opportunity is None:
+            return None
+        execution_plan = getattr(opportunity, "execution_plan", None)
+        if execution_plan is None:
+            return None
+        legs = list(execution_plan.legs or [])
+        if len(legs) != len(opportunity.positions_to_take):
+            return None
+        for leg in legs:
+            if not str(getattr(leg, "market_id", "") or "").strip():
+                return None
+            if not str(getattr(leg, "token_id", "") or "").strip():
+                return None
+        if float(getattr(opportunity, "net_profit", 0.0) or 0.0) <= 0.0:
+            return None
+        report = quality_filter.evaluate_opportunity(
+            opportunity,
+            overrides=self.quality_filter_overrides,
+        )
+        if not report.passed:
+            return None
+        return opportunity
+
     def _detect_negrisk_event(self, event: Event, prices: dict[str, dict]) -> Opportunity | None:
         """Detect arbitrage in official NegRisk events.
 
@@ -145,15 +190,7 @@ class NegRiskStrategy(BaseStrategy):
                     yes_price = prices[yes_token].get("mid", yes_price)
 
             total_yes += yes_price
-            positions.append(
-                {
-                    "action": "BUY",
-                    "outcome": "YES",
-                    "market": market.question[:50],
-                    "price": yes_price,
-                    "token_id": market.clob_token_ids[0] if market.clob_token_ids else None,
-                }
-            )
+            positions.append(self._build_position(market, outcome="YES", price=yes_price, token_index=0))
 
         # In NegRisk, exactly one outcome wins, so total YES should = $1
         if total_yes >= 1.0:
@@ -225,7 +262,7 @@ class NegRiskStrategy(BaseStrategy):
                     0,
                     f"Total YES ({total_yes:.1%}) below {warn_total_yes:.1%} — possible missing outcomes",
                 )
-        return opp
+        return self._finalize_opportunity(opp)
 
     def _detect_negrisk_short(
         self, event: Event, active_markets: list[Market], prices: dict[str, dict]
@@ -272,17 +309,7 @@ class NegRiskStrategy(BaseStrategy):
                     no_price = prices[no_token].get("mid", no_price)
 
             total_no += no_price
-            positions.append(
-                {
-                    "action": "BUY",
-                    "outcome": "NO",
-                    "market": market.question[:50],
-                    "price": no_price,
-                    "token_id": market.clob_token_ids[1]
-                    if (market.clob_token_ids and len(market.clob_token_ids) > 1)
-                    else None,
-                }
-            )
+            positions.append(self._build_position(market, outcome="NO", price=no_price, token_index=1))
 
         expected_payout = float(n - 1)  # N-1 NOs win
 
@@ -303,7 +330,7 @@ class NegRiskStrategy(BaseStrategy):
             opp.risk_factors.insert(0, f"Short NegRisk: buying NO on all {n} outcomes")
             opp.risk_factors.insert(1, f"Exhaustiveness verified: {exhaustiveness_reason.replace('_', ' ')}")
 
-        return opp
+        return self._finalize_opportunity(opp)
 
     def _is_election_market(self, title: str) -> bool:
         """Check if an event title suggests an election or primary."""
@@ -721,15 +748,7 @@ class NegRiskStrategy(BaseStrategy):
                     yes_price = prices[yes_token].get("mid", yes_price)
 
             total_yes += yes_price
-            positions.append(
-                {
-                    "action": "BUY",
-                    "outcome": "YES",
-                    "market": market.question[:50],
-                    "price": yes_price,
-                    "token_id": market.clob_token_ids[0] if market.clob_token_ids else None,
-                }
-            )
+            positions.append(self._build_position(market, outcome="YES", price=yes_price, token_index=0))
 
         if total_yes >= 1.0:
             # Check for SHORT arbitrage (total YES > $1 means NOs are cheap)
@@ -789,7 +808,7 @@ class NegRiskStrategy(BaseStrategy):
                     f"LOW TOTAL ({total_yes:.1%}) suggests possible missing outcomes",
                 )
 
-        return opp
+        return self._finalize_opportunity(opp)
 
     def _detect_multi_outcome_short(
         self, event: Event, exclusive_markets: list[Market], prices: dict[str, dict]
@@ -840,17 +859,7 @@ class NegRiskStrategy(BaseStrategy):
                     no_price = prices[no_token].get("mid", no_price)
 
             total_no += no_price
-            positions.append(
-                {
-                    "action": "BUY",
-                    "outcome": "NO",
-                    "market": market.question[:50],
-                    "price": no_price,
-                    "token_id": market.clob_token_ids[1]
-                    if (market.clob_token_ids and len(market.clob_token_ids) > 1)
-                    else None,
-                }
-            )
+            positions.append(self._build_position(market, outcome="NO", price=no_price, token_index=1))
 
         expected_payout = float(n - 1)  # N-1 NOs win
 
@@ -871,7 +880,7 @@ class NegRiskStrategy(BaseStrategy):
             opp.risk_factors.insert(0, f"Short Multi-Outcome: buying NO on all {n} outcomes")
             opp.risk_factors.insert(1, "Exhaustiveness verified: sports three way complete")
 
-        return opp
+        return self._finalize_opportunity(opp)
 
     SOURCES = {"scanner"}
     STRUCTURAL_TYPES = {"within_market", "cross_market", "settlement_lag"}

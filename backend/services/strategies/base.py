@@ -1211,19 +1211,26 @@ class BaseStrategy(ABC):
         single_market = markets[0] if len(markets) == 1 else None
 
         for index, position in enumerate(positions):
-            market_id = str(
-                position.get("market_id")
-                or position.get("id")
-                or position.get("market")
-                or (markets[index].id if index < len(markets) else "")
-                or (single_market.id if single_market is not None else "")
-            ).strip()
+            explicit_market_id = str(position.get("market_id") or position.get("id") or "").strip()
+            legacy_market_ref = str(position.get("market") or "").strip()
+            indexed_market_id = str(markets[index].id if index < len(markets) else "").strip()
+            single_market_id = str(single_market.id if single_market is not None else "").strip()
+            market_id = explicit_market_id
+            if not market_id and legacy_market_ref in market_by_id:
+                market_id = legacy_market_ref
+            if not market_id and indexed_market_id:
+                market_id = indexed_market_id
+            if not market_id and single_market_id:
+                market_id = single_market_id
+            if not market_id and legacy_market_ref:
+                market_id = legacy_market_ref
             if not market_id:
                 continue
 
             market = market_by_id.get(market_id)
             if market is None and single_market is not None and str(single_market.id) == market_id:
                 market = single_market
+            legacy_market_label = legacy_market_ref if legacy_market_ref and legacy_market_ref != market_id else ""
             action = str(position.get("action") or position.get("side") or "").strip().lower()
             side = "sell" if action.startswith("sell") else "buy"
             outcome = str(position.get("outcome") or "").strip().lower() or None
@@ -1240,6 +1247,7 @@ class BaseStrategy(ABC):
                         position.get("market_question")
                         or (market.question if market is not None else "")
                         or (single_market.question if single_market is not None else "")
+                        or legacy_market_label
                     )
                     or None,
                     token_id=token_id,
@@ -1490,6 +1498,9 @@ class BaseStrategy(ABC):
 
         confidence_score = to_confidence(confidence if confidence is not None else 0.5, 0.5)
 
+        market_by_id = {str(m.id): m for m in markets}
+        single_market = markets[0] if len(markets) == 1 else None
+
         # Build enriched market dicts with VWAP metadata
         market_dicts = []
         for m in markets:
@@ -1505,6 +1516,16 @@ class BaseStrategy(ABC):
                 "event_slug": getattr(m, "event_slug", ""),
                 "event_ticker": getattr(m, "event_slug", ""),
                 "clob_token_ids": list(getattr(m, "clob_token_ids", []) or []),
+                "active": getattr(m, "active", True),
+                "closed": getattr(m, "closed", False),
+                "archived": getattr(m, "archived", None),
+                "accepting_orders": getattr(m, "accepting_orders", None),
+                "resolved": getattr(m, "resolved", None),
+                "winner": getattr(m, "winner", None),
+                "winning_outcome": getattr(m, "winning_outcome", None),
+                "enable_order_book": getattr(m, "enable_order_book", None),
+                "status": getattr(m, "status", None),
+                "neg_risk": bool(getattr(m, "neg_risk", False)),
                 "yes_price": m.yes_price,
                 "no_price": m.no_price,
                 "outcome_labels": outcome_labels,
@@ -1512,13 +1533,40 @@ class BaseStrategy(ABC):
                 "liquidity": m.liquidity,
                 "volume": getattr(m, "volume", 0.0),
                 "platform": getattr(m, "platform", "polymarket"),
+                "end_date": getattr(m, "end_date", None),
                 "game_start_time": getattr(m, "game_start_time", None),
                 "sports_market_type": getattr(m, "sports_market_type", None),
+                "line": getattr(m, "line", None),
             }
             market_dicts.append(entry)
 
         # Attach realistic-profit metadata to positions_to_take
-        enriched_positions = list(positions)  # shallow copy
+        enriched_positions = []
+        for index, position in enumerate(positions):
+            enriched_position = dict(position)
+            explicit_market_id = str(
+                enriched_position.get("market_id") or enriched_position.get("id") or ""
+            ).strip()
+            legacy_market_ref = str(enriched_position.get("market") or "").strip()
+            reference_market = None
+            if explicit_market_id and explicit_market_id in market_by_id:
+                reference_market = market_by_id[explicit_market_id]
+            elif legacy_market_ref and legacy_market_ref in market_by_id:
+                reference_market = market_by_id[legacy_market_ref]
+                enriched_position.setdefault("market_id", legacy_market_ref)
+            elif index < len(markets):
+                reference_market = markets[index]
+                enriched_position.setdefault("market_id", str(reference_market.id))
+            elif single_market is not None:
+                reference_market = single_market
+                enriched_position.setdefault("market_id", str(reference_market.id))
+
+            if reference_market is not None:
+                enriched_position.setdefault("market_question", str(reference_market.question or ""))
+            elif legacy_market_ref and legacy_market_ref != explicit_market_id:
+                enriched_position.setdefault("market_question", legacy_market_ref)
+            enriched_positions.append(enriched_position)
+
         if enriched_positions:
             enriched_positions[0] = {
                 **enriched_positions[0],

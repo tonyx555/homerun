@@ -111,3 +111,49 @@ def test_normalize_execution_plan_preserves_leg_level_execution_contract():
     assert leg["max_entry_price"] == 0.94
     assert leg["allow_taker_limit_buy_above_signal"] is True
     assert leg["aggressive_limit_buy_submit_as_gtc"] is True
+
+
+def test_create_opportunity_backfills_market_identity_for_multileg_positions():
+    strategy = DummyExecutionPlanStrategy()
+    market_a = _market()
+    market_b = Market(
+        id="market-2",
+        condition_id="condition-2",
+        question="Will a second example happen?",
+        slug="example-market-2",
+        clob_token_ids=["token-yes-2", "token-no-2"],
+        outcome_prices=[0.43, 0.57],
+        liquidity=2500.0,
+        volume=5000.0,
+    )
+
+    opportunity = strategy.create_opportunity(
+        title="Example pair",
+        description="Legacy multileg labels should not become market ids",
+        total_cost=0.91,
+        markets=[market_a, market_b],
+        positions=[
+            {"action": "BUY", "outcome": "YES", "market": market_a.question[:50], "price": 0.48, "token_id": "token-yes"},
+            {
+                "action": "BUY",
+                "outcome": "YES",
+                "market": market_b.question[:50],
+                "price": 0.43,
+                "token_id": "token-yes-2",
+            },
+        ],
+        is_guaranteed=True,
+    )
+
+    assert opportunity is not None
+    assert [position["market_id"] for position in opportunity.positions_to_take] == ["market-1", "market-2"]
+    assert [position["market_question"] for position in opportunity.positions_to_take] == [
+        "Will example happen?",
+        "Will a second example happen?",
+    ]
+    assert opportunity.execution_plan is not None
+    assert [leg.market_id for leg in opportunity.execution_plan.legs] == ["market-1", "market-2"]
+    assert [leg.market_question for leg in opportunity.execution_plan.legs] == [
+        "Will example happen?",
+        "Will a second example happen?",
+    ]

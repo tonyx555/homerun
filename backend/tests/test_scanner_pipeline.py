@@ -194,6 +194,13 @@ def _make_quality_pass():
     return report
 
 
+def _make_quality_fail():
+    """Return a mock quality report that always fails."""
+    report = MagicMock()
+    report.passed = False
+    return report
+
+
 class TestScanPipeline:
     """Tests for ArbitrageScanner.refresh_catalog + scan_fast pipeline."""
 
@@ -685,6 +692,44 @@ async def test_enqueue_detection_batch_publishes_runtime_signals_when_snapshot_p
         assert len(results) == 3
         assert results[0].roi_percent >= results[1].roi_percent
         assert results[1].roi_percent >= results[2].roi_percent
+
+    @pytest.mark.asyncio
+    async def test_scan_fast_publishes_only_actionable_opportunities(
+        self,
+        mock_polymarket_client,
+        sample_opportunity,
+    ):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        _seed_scanner_cache(scanner)
+        rejected = sample_opportunity.model_copy(deep=True)
+        rejected.stable_id = f"{sample_opportunity.stable_id}_rejected"
+        rejected.id = f"{sample_opportunity.id}_rejected"
+        rejected.title = "Rejected"
+        callback = AsyncMock()
+        scanner.add_callback(callback)
+        reports = {
+            sample_opportunity.stable_id: _make_quality_pass(),
+            rejected.stable_id: _make_quality_fail(),
+        }
+
+        with (
+            patch.object(
+                scanner,
+                "_dispatch_market_refresh",
+                new_callable=AsyncMock,
+                return_value=[rejected, sample_opportunity],
+            ),
+            patch("services.scanner.quality_filter") as mock_qf,
+        ):
+            mock_qf.evaluate_opportunity = MagicMock(
+                side_effect=lambda opp, overrides=None: reports[opp.stable_id]
+            )
+            results = await scanner.scan_fast()
+
+        assert [opp.stable_id for opp in results] == [sample_opportunity.stable_id]
+        callback.assert_awaited_once()
+        assert [opp.stable_id for opp in callback.call_args[0][0]] == [sample_opportunity.stable_id]
+        assert set(scanner.quality_reports.keys()) == {sample_opportunity.stable_id}
 
     @pytest.mark.asyncio
     async def test_scan_fast_handles_dispatch_exception_gracefully(
@@ -2114,6 +2159,73 @@ class TestScannerCallbacks:
         call_args = callback.call_args[0][0]
         assert len(call_args) == 1
         assert call_args[0].title == "Full snapshot callback opportunity"
+
+    @pytest.mark.asyncio
+    async def test_full_snapshot_scan_publishes_only_actionable_opportunities(self, mock_polymarket_client):
+        scanner = _build_scanner(mock_client=mock_polymarket_client)
+        market = Market(
+            id="m_full_callback_2",
+            condition_id="c_full_callback_2",
+            question="Will only actionable heavy-lane results survive?",
+            slug="full-callback-2",
+            clob_token_ids=["tok_full_cb2_yes_" + ("0" * 20), "tok_full_cb2_no_" + ("0" * 20)],
+            outcome_prices=[0.47, 0.53],
+        )
+        scanner._cached_markets = [market]
+        scanner._cached_market_by_id = {market.id: market}
+        scanner._cached_events = []
+        passed = Opportunity(
+            strategy="basic",
+            title="Heavy lane actionable opportunity",
+            description="Should remain in pool",
+            total_cost=0.96,
+            expected_payout=1.0,
+            gross_profit=0.04,
+            fee=0.02,
+            net_profit=0.02,
+            roi_percent=2.08,
+            risk_score=0.3,
+            markets=[
+                {
+                    "id": market.id,
+                    "question": market.question,
+                    "yes_price": 0.47,
+                    "no_price": 0.53,
+                    "clob_token_ids": list(market.clob_token_ids),
+                }
+            ],
+            mispricing_type=MispricingType.WITHIN_MARKET,
+            last_seen_at=utcnow(),
+            detected_at=utcnow(),
+        )
+        rejected = passed.model_copy(deep=True)
+        rejected.stable_id = f"{passed.stable_id}_rejected"
+        rejected.id = f"{passed.id}_rejected"
+        rejected.title = "Heavy lane rejected opportunity"
+        callback = AsyncMock()
+        scanner.add_callback(callback)
+        reports = {
+            passed.stable_id: _make_quality_pass(),
+            rejected.stable_id: _make_quality_fail(),
+        }
+
+        with (
+            patch.object(scanner, "_ensure_runtime_strategies_loaded", new_callable=AsyncMock),
+            patch.object(scanner, "_partition_market_refresh_strategies", return_value=(set(), {"full_only"})),
+            patch.object(scanner, "_snapshot_ws_prices", new_callable=AsyncMock, return_value={}),
+            patch.object(scanner, "_dispatch_market_refresh", new_callable=AsyncMock, return_value=[rejected, passed]),
+            patch.object(scanner, "_set_activity", new_callable=AsyncMock),
+            patch("services.scanner.quality_filter") as mock_qf,
+        ):
+            mock_qf.evaluate_opportunity = MagicMock(
+                side_effect=lambda opp, overrides=None: reports[opp.stable_id]
+            )
+            results = await scanner.scan_full_snapshot_strategies(force=True)
+
+        assert [opp.stable_id for opp in results] == [passed.stable_id]
+        callback.assert_awaited_once()
+        assert [opp.stable_id for opp in callback.call_args[0][0]] == [passed.stable_id]
+        assert set(scanner.quality_reports.keys()) == {passed.stable_id}
 
     @pytest.mark.asyncio
     async def test_callback_exception_does_not_break_scan(self, mock_polymarket_client, sample_opportunity):

@@ -1801,6 +1801,24 @@ class ArbitrageScanner:
 
         return all_opportunities
 
+    def _filter_actionable_opportunities(
+        self,
+        opportunities: list[Opportunity],
+    ) -> tuple[dict[str, object], list[Opportunity]]:
+        quality_reports: dict[str, object] = {}
+        actionable: list[Opportunity] = []
+        for opp in opportunities:
+            strategy_instance = strategy_loader.get_instance(opp.strategy)
+            overrides = getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
+            stable_id = str(getattr(opp, "stable_id", None) or getattr(opp, "id", "") or "").strip()
+            report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
+            if stable_id:
+                quality_reports[stable_id] = report
+            if report.passed:
+                actionable.append(opp)
+        actionable.sort(key=lambda item: item.roi_percent, reverse=True)
+        return quality_reports, actionable
+
     def _merge_market_history_points(self, market_id: str, incoming: list[dict[str, object]], now_ms: int) -> int:
         """Merge incoming history into in-memory store and return merged length."""
         if not incoming:
@@ -3459,18 +3477,7 @@ class ArbitrageScanner:
                     if tail_end_fast_opportunities:
                         fast_opportunities.extend(tail_end_fast_opportunities)
 
-                fast_quality_reports: dict = {}
-                fast_actionable: list = []
-                for opp in fast_opportunities:
-                    strategy_instance = strategy_loader.get_instance(opp.strategy)
-                    overrides = (
-                        getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                    )
-                    report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
-                    fast_quality_reports[opp.stable_id or opp.id] = report
-                    if report.passed:
-                        fast_actionable.append(opp)
-                fast_actionable.sort(key=lambda x: x.roi_percent, reverse=True)
+                fast_quality_reports, fast_actionable = self._filter_actionable_opportunities(fast_opportunities)
 
                 def _update_prioritizer_state(prioritizer, mkts, ts):
                     unchanged_count = prioritizer.update_after_evaluation(mkts, ts)
@@ -3487,9 +3494,9 @@ class ArbitrageScanner:
 
                 if fast_actionable:
                     await self._attach_ai_judgments(fast_actionable)
-                if fast_opportunities:
+                if fast_actionable:
                     self._opportunities = await loop.run_in_executor(
-                        None, self._merge_opportunities, fast_opportunities
+                        None, self._merge_opportunities, fast_actionable
                     )
 
                 self._opportunities = await self.refresh_opportunity_prices(
@@ -3522,18 +3529,18 @@ class ArbitrageScanner:
 
                 for callback in self._scan_callbacks:
                     try:
-                        await callback(fast_opportunities)
+                        await callback(fast_actionable)
                     except Exception as e:
                         logger.warning(f"  Callback error: {e}", exc_info=e)
 
                 logger.info(
                     f"Fast scan complete ({scan_mode}). "
-                    f"{len(fast_opportunities)} detected, "
+                    f"{len(fast_actionable)} actionable / {len(fast_opportunities)} detected, "
                     f"{len(self._opportunities)} total in pool "
                     f"({unchanged} unchanged markets skipped)"
                 )
                 await self._set_activity(
-                    f"Fast scan complete — {len(fast_opportunities)} found, {len(self._opportunities)} total"
+                    f"Fast scan complete — {len(fast_actionable)} actionable, {len(self._opportunities)} total"
                 )
                 return self._opportunities
 
@@ -3865,19 +3872,7 @@ class ArbitrageScanner:
                         handler_timeout_seconds=handler_timeout_seconds,
                     )
 
-                    full_quality_reports: dict = {}
-                    full_actionable: list[Opportunity] = []
-                    for opp in full_opportunities:
-                        strategy_instance = strategy_loader.get_instance(opp.strategy)
-                        overrides = (
-                            getattr(strategy_instance, "quality_filter_overrides", None) if strategy_instance else None
-                        )
-                        report = quality_filter.evaluate_opportunity(opp, overrides=overrides)
-                        full_quality_reports[opp.stable_id or opp.id] = report
-                        if report.passed:
-                            full_actionable.append(opp)
-
-                    full_actionable.sort(key=lambda item: item.roi_percent, reverse=True)
+                    full_quality_reports, full_actionable = self._filter_actionable_opportunities(full_opportunities)
 
                     if full_actionable:
                         await self._attach_ai_judgments(full_actionable)
@@ -3899,9 +3894,9 @@ class ArbitrageScanner:
                             self._full_snapshot_cycle_completed_at = chunk_now
                         elif chunk_start == 0:
                             self._full_snapshot_cycle_completed_at = None
-                        if full_opportunities:
+                        if full_actionable:
                             self._opportunities = await asyncio.get_running_loop().run_in_executor(
-                                None, self._merge_opportunities, full_opportunities
+                                None, self._merge_opportunities, full_actionable
                             )
                         opportunities_snapshot = [_clone_model(opp) for opp in self._opportunities]
 
@@ -3937,14 +3932,14 @@ class ArbitrageScanner:
 
                     for callback in self._scan_callbacks:
                         try:
-                            await callback(full_opportunities)
+                            await callback(full_actionable)
                         except Exception as e:
                             logger.warning(f"  Callback error: {e}", exc_info=e)
 
                     last_chunk_start = chunk_start
                     last_chunk_end = chunk_end
                     last_processed_markets = processed_markets
-                    last_full_filtered = full_opportunities
+                    last_full_filtered = full_actionable
                     if targeted_mode or cycle_completed:
                         break
                     if (per_run_deadline - time.monotonic()) < 10.0:

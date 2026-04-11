@@ -45,6 +45,7 @@ from services.polymarket import polymarket_client
 from services.simulation import simulation_service
 from services.live_execution_service import live_execution_service
 from services.trader_orchestrator.risk_manager import evaluate_risk
+from services.trader_orchestrator.strategies.base import StrategyDecision
 from services.trader_orchestrator.decision_gates import (
     apply_platform_decision_gates,
     is_within_trading_schedule_utc,
@@ -113,7 +114,7 @@ logger = get_logger("trader_orchestrator_worker")
 strategy_db_loader = strategy_loader
 
 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
-_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS = 20.0
+_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS = 20.0  # soft budget for live signal-processing cycles
 _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
 _SIGNAL_DEADLOCK_MAX_RETRIES = 3
 _SIGNAL_DEADLOCK_BASE_DELAY = 0.1
@@ -131,6 +132,7 @@ def _is_transient_db_error(exc: Exception) -> bool:
 
 _STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="strategy-eval")
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
+_backgrounded_trader_cycle_tasks: set[asyncio.Task] = set()
 _inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
 _inflight_trader_cycle_start: dict[str, float] = {}  # trader_id -> monotonic start time
 _inflight_trader_cycle_process_signals: dict[str, bool] = {}
@@ -262,10 +264,38 @@ async def _launch_pending_runtime_cycle_if_any(trader_id: str) -> None:
 
 
 def _handle_trader_cycle_task_done(trader_id: str, task: asyncio.Task) -> None:
+    backgrounded = task in _backgrounded_trader_cycle_tasks
+    _backgrounded_trader_cycle_tasks.discard(task)
     _clear_inflight_trader_cycle_task(trader_id, task)
     _inflight_trader_cycle_start.pop(trader_id, None)
     _skip_log_last_at.pop(trader_id, None)
     _skip_log_suppressed.pop(trader_id, None)
+    if backgrounded:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            logger.warning(
+                "Backgrounded live trader cycle was cancelled before completion trader=%s",
+                trader_id,
+            )
+        except OperationalError as exc:
+            if _is_retryable_db_error(exc):
+                logger.warning(
+                    "Backgrounded live trader cycle ended with transient DB error trader=%s",
+                    trader_id,
+                )
+            else:
+                logger.warning(
+                    "Backgrounded live trader cycle raised database error trader=%s",
+                    trader_id,
+                    exc_info=exc,
+                )
+        except Exception as exc:
+            logger.warning(
+                "Backgrounded live trader cycle raised after exceeding soft timeout trader=%s",
+                trader_id,
+                exc_info=exc,
+            )
     if not trader_id or trader_id not in _pending_runtime_cycle_specs:
         return
     try:
@@ -7218,6 +7248,7 @@ async def _run_trader_once_with_timeout(
     requested_timeout = max(1.0, min(180.0, float(effective_timeout)))
     timeout = requested_timeout
     run_mode = _canonical_trader_mode(control.get("mode"), default="shadow")
+    allow_background_completion = bool(process_signals and run_mode == "live")
     if process_signals and run_mode == "live":
         timeout = max(_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS, timeout)
     trader_id = str(trader.get("id") or "")
@@ -7355,6 +7386,35 @@ async def _run_trader_once_with_timeout(
         done, _ = await asyncio.wait({task}, timeout=timeout)
         if done:
             return task.result()
+
+        if allow_background_completion:
+            _backgrounded_trader_cycle_tasks.add(task)
+            logger.warning(
+                "Live trader cycle exceeded soft timeout; leaving inflight task running to finish live submission trader=%s process_signals=%s timeout=%.1fs",
+                trader_id,
+                process_signals,
+                timeout,
+            )
+            if trader_id:
+                try:
+                    async with AsyncSessionLocal() as session:
+                        await create_trader_event(
+                            session,
+                            trader_id=trader_id,
+                            event_type="cycle_budget_exceeded",
+                            severity="warn",
+                            source="worker",
+                            message=f"Trader cycle exceeded soft live budget after {timeout:.1f}s; leaving inflight submission running.",
+                            payload={
+                                "process_signals": bool(process_signals),
+                                "timeout_seconds": timeout,
+                                "background_completion": True,
+                            },
+                            commit=True,
+                        )
+                except Exception as exc:
+                    logger.warning("Failed to persist trader soft-timeout event: %s", exc)
+            return 0, 0, 0
 
         task.cancel()
         done_after, _ = await asyncio.wait({task}, timeout=_TRADER_TIMEOUT_CANCEL_GRACE_SECONDS)

@@ -1469,6 +1469,74 @@ async def test_run_trader_once_with_timeout_preempts_inflight_maintenance_for_ru
 
 
 @pytest.mark.asyncio
+async def test_run_trader_once_with_timeout_leaves_live_signal_cycle_running_after_soft_timeout(monkeypatch):
+    trader_id = "trader-soft-timeout"
+    finish_cycle = asyncio.Event()
+    created_events: list[dict[str, object]] = []
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def _slow_run_once(*args, **kwargs):
+        await finish_cycle.wait()
+        return 5, 6, 7
+
+    async def _create_event(_session, **kwargs):
+        created_events.append(kwargs)
+        return None
+
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once", _slow_run_once)
+    monkeypatch.setattr(trader_orchestrator_worker, "_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _FakeSessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", _create_event)
+
+    trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
+    trader_orchestrator_worker._backgrounded_trader_cycle_tasks.clear()
+    trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
+    trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
+    trader_orchestrator_worker._inflight_trader_cycle_start.pop(trader_id, None)
+
+    try:
+        result = await trader_orchestrator_worker._run_trader_once_with_timeout(
+            {"id": trader_id},
+            {"mode": "live"},
+            process_signals=True,
+            trigger_signal_ids_by_source={"scanner": ["signal-1"]},
+            trigger_signal_snapshots_by_source={"scanner": {"signal-1": {"id": "signal-1"}}},
+            timeout_seconds=0.01,
+        )
+        live_task = trader_orchestrator_worker._inflight_trader_cycle_tasks.get(trader_id)
+
+        assert result == (0, 0, 0)
+        assert live_task is not None
+        assert not live_task.done()
+        assert live_task in trader_orchestrator_worker._backgrounded_trader_cycle_tasks
+        assert created_events
+        assert created_events[-1]["event_type"] == "cycle_budget_exceeded"
+
+        finish_cycle.set()
+        assert await live_task == (5, 6, 7)
+        await asyncio.sleep(0)
+    finally:
+        finish_cycle.set()
+        trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
+        background_task = trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
+        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
+        trader_orchestrator_worker._inflight_trader_cycle_start.pop(trader_id, None)
+        trader_orchestrator_worker._backgrounded_trader_cycle_tasks.clear()
+        if background_task is not None and not background_task.done():
+            background_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await background_task
+
+    assert trader_orchestrator_worker._inflight_trader_cycle_tasks.get(trader_id) is None
+
+
+@pytest.mark.asyncio
 async def test_launch_pending_runtime_cycle_dispatches_queued_trigger(monkeypatch):
     trader_id = "trader-dispatch"
     run_once_mock = AsyncMock(return_value=(1, 1, 1))

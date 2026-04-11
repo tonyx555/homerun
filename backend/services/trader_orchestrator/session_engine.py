@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -1175,6 +1176,117 @@ class ExecutionSessionEngine:
                 except Exception:
                     pass
 
+        async def _persist_execution_projection_safely(
+            *,
+            signal_status: str,
+            effective_price: float | None,
+        ) -> None:
+            persist = _persist_execution_projection(
+                signal_status=signal_status,
+                effective_price=effective_price,
+            )
+            if mode == "live" and entry_submit_placeholders:
+                await asyncio.shield(persist)
+                return
+            await persist
+
+        async def _finalize_cancelled_live_submit(
+            *,
+            error_message: str,
+        ) -> None:
+            if mode != "live" or not entry_submit_placeholders:
+                return
+            cancelled_at = utcnow()
+            for leg_id, (trader_order, execution_order) in entry_submit_placeholders.items():
+                leg_row = leg_rows.get(leg_id)
+                if leg_row is not None:
+                    _update_leg_row(
+                        leg_row=leg_row,
+                        status="failed",
+                        last_error=error_message,
+                        metadata_patch={"submit_cancelled": True},
+                    )
+                persisted_payload = dict(trader_order.payload_json or {})
+                submission_intent = dict(persisted_payload.get("submission_intent") or {})
+                submission_intent["state"] = "submit_cancelled"
+                submission_intent["last_submit_result_at"] = _iso_utc(cancelled_at)
+                submission_intent["submit_status"] = "cancelled"
+                submission_intent["error_message"] = error_message
+                persisted_payload["submission_intent"] = submission_intent
+                persisted_payload = _sync_order_runtime_payload(
+                    payload=persisted_payload,
+                    status="failed",
+                    now=cancelled_at,
+                    provider_snapshot_status="cancelled",
+                    mapped_status="failed",
+                )
+                trader_order.status = "failed"
+                trader_order.notional_usd = 0.0
+                trader_order.error_message = error_message
+                trader_order.payload_json = persisted_payload
+                trader_order.updated_at = cancelled_at
+                verification_fields = derive_trader_order_verification(
+                    mode=mode,
+                    status="failed",
+                    reason=reason,
+                    payload=persisted_payload,
+                )
+                apply_trader_order_verification(
+                    trader_order,
+                    verification_status=str(verification_fields.get("verification_status") or ""),
+                    verification_source=str(verification_fields.get("verification_source") or "").strip() or None,
+                    verification_reason=str(verification_fields.get("verification_reason") or "").strip() or None,
+                    provider_order_id=str(verification_fields.get("provider_order_id") or "").strip() or None,
+                    provider_clob_order_id=str(verification_fields.get("provider_clob_order_id") or "").strip() or None,
+                    execution_wallet_address=str(verification_fields.get("execution_wallet_address") or "").strip() or None,
+                    verification_tx_hash=str(verification_fields.get("verification_tx_hash") or "").strip() or None,
+                    verified_at=cancelled_at,
+                    force=True,
+                )
+                execution_payload = dict(execution_order.payload_json or {})
+                execution_payload["submission_intent"] = dict(submission_intent)
+                execution_order.status = "failed"
+                execution_order.payload_json = execution_payload
+                execution_order.error_message = error_message
+                execution_order.updated_at = cancelled_at
+            _update_session_status(
+                status="failed",
+                error_message=error_message,
+                payload_patch={
+                    "orders_written": 0,
+                    "submit_cancelled": True,
+                },
+            )
+            _append_event(
+                event_type="session_failed",
+                severity="error",
+                message=error_message,
+                payload={
+                    "submit_cancelled": True,
+                    "failed_legs": len(entry_submit_placeholders),
+                },
+            )
+            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
+
+        async def _submit_execution_wave_with_cancellation_protection(
+            *,
+            legs_with_notionals: list[tuple[dict[str, Any], float]],
+            wave_error_message: str,
+        ) -> list[LegSubmitResult]:
+            try:
+                async with release_conn(self.db):
+                    return await submit_execution_wave(
+                        mode=mode,
+                        signal=signal,
+                        legs_with_notionals=legs_with_notionals,
+                        strategy_params=strategy_params,
+                    )
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    _finalize_cancelled_live_submit(error_message=wave_error_message)
+                )
+                raise
+
         _append_event(
             event_type="session_created",
             message=f"Execution session created with {len(legs)} leg(s)",
@@ -1198,7 +1310,7 @@ class ExecutionSessionEngine:
                     "bundle_coverage": bundle_coverage,
                 },
             )
-            await _persist_execution_projection(signal_status="failed", effective_price=None)
+            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
             return SessionExecutionResult(
                 session_id=session_row.id,
                 status="failed",
@@ -1238,7 +1350,7 @@ class ExecutionSessionEngine:
                     "bundle_preflight": preflight_violation,
                 },
             )
-            await _persist_execution_projection(signal_status="failed", effective_price=None)
+            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
             return SessionExecutionResult(
                 session_id=session_row.id,
                 status="failed",
@@ -1280,13 +1392,10 @@ class ExecutionSessionEngine:
                     created_pre_submit_placeholders = True
                 if created_pre_submit_placeholders:
                     await _commit_pre_submit_projection()
-            async with release_conn(self.db):
-                wave_results = await submit_execution_wave(
-                    mode=mode,
-                    signal=signal,
-                    legs_with_notionals=wave_with_notionals,
-                    strategy_params=strategy_params,
-                )
+            wave_results = await _submit_execution_wave_with_cancellation_protection(
+                legs_with_notionals=wave_with_notionals,
+                wave_error_message="Execution session cancelled during live order submission.",
+            )
 
             for result in wave_results:
                 leg_id = str(result.leg_id)
@@ -1336,17 +1445,14 @@ class ExecutionSessionEngine:
                             except Exception:
                                 pass
                         leg_payload["limit_price"] = reprice_price
-                        async with release_conn(self.db):
-                            retry_result = (
-                                await submit_execution_wave(
-                                    mode=mode,
-                                    signal=signal,
-                                    legs_with_notionals=[
-                                        (leg_payload, safe_float(leg_payload.get("requested_notional_usd"), 0.0))
-                                    ],
-                                    strategy_params=strategy_params,
-                                )
-                            )[0]
+                        retry_result = (
+                            await _submit_execution_wave_with_cancellation_protection(
+                                legs_with_notionals=[
+                                    (leg_payload, safe_float(leg_payload.get("requested_notional_usd"), 0.0))
+                                ],
+                                wave_error_message="Execution session cancelled during live order repricing.",
+                            )
+                        )[0]
                         normalized_retry = str(retry_result.status or "").strip().lower()
                         if normalized_retry in {"executed", "open", "submitted"}:
                             result = retry_result
@@ -1648,7 +1754,7 @@ class ExecutionSessionEngine:
                         "cancel_failed_provider_orders": cancel_failed_provider_orders,
                     },
                 )
-                await _persist_execution_projection(signal_status="failed", effective_price=effective_price)
+                await _persist_execution_projection_safely(signal_status="failed", effective_price=effective_price)
                 return SessionExecutionResult(
                     session_id=session_row.id,
                     status="failed",
@@ -1745,13 +1851,13 @@ class ExecutionSessionEngine:
 
             rescue_results: list[Any] = []
             if rescue_inputs:
-                async with release_conn(self.db):
-                    rescue_results = await submit_execution_wave(
-                        mode=mode,
-                        signal=signal,
-                        legs_with_notionals=[(leg_payload, rescue_notional) for leg_payload, rescue_notional, _, _, _ in rescue_inputs],
-                        strategy_params=strategy_params,
-                    )
+                rescue_results = await _submit_execution_wave_with_cancellation_protection(
+                    legs_with_notionals=[
+                        (leg_payload, rescue_notional)
+                        for leg_payload, rescue_notional, _, _, _ in rescue_inputs
+                    ],
+                    wave_error_message="Execution session cancelled during bundle rescue submission.",
+                )
 
             for rescue_result, (_, _, item, rescue_price, remaining_shares) in zip(rescue_results, rescue_inputs):
                 rescue_filled_shares = _result_filled_shares(rescue_result)
@@ -2442,7 +2548,7 @@ class ExecutionSessionEngine:
                 "hedging_deadline_at": (_iso_utc(hedging_deadline_at) if hedging_deadline_at is not None else None),
             },
         )
-        await _persist_execution_projection(signal_status=signal_status, effective_price=effective_price)
+        await _persist_execution_projection_safely(signal_status=signal_status, effective_price=effective_price)
 
         return SessionExecutionResult(
             session_id=session_row.id,

@@ -1,3 +1,4 @@
+import asyncio
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -558,6 +559,99 @@ async def test_execute_signal_does_not_preplace_take_profit_exit_from_runtime_de
     order_rows = db.persisted_rows_by_type.get("TraderOrder") or []
     assert len(order_rows) == 1
     assert "pending_live_exit" not in order_rows[0].payload_json
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_finalizes_pre_submit_placeholder_when_live_submit_is_cancelled(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-live-cancel"}
+    legs = [
+        {
+            "leg_id": "leg-live-cancel-1",
+            "market_id": "market-live-cancel-1",
+            "market_question": "Will Example cancel cleanly?",
+            "token_id": "token-live-cancel-1",
+            "side": "buy",
+            "outcome": "yes",
+            "requested_notional_usd": 9.0,
+            "requested_shares": 18.0,
+            "limit_price": 0.5,
+            "price_policy": "taker_limit",
+            "time_in_force": "IOC",
+            "post_only": False,
+        }
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", AsyncMock(return_value=None))
+
+    submit_started = asyncio.Event()
+
+    async def _submit_wave(**kwargs):
+        trader_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+        execution_rows = db.persisted_rows_by_type.get("ExecutionSessionOrder") or []
+        assert [str(row.status or "") for row in trader_rows] == ["placing"]
+        assert [str(row.status or "") for row in execution_rows] == ["placing"]
+        submit_started.set()
+        await asyncio.Future()
+
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", AsyncMock(side_effect=_submit_wave))
+
+    signal = SimpleNamespace(
+        id="signal-live-cancel",
+        source="scanner",
+        trace_id="trace-live-cancel",
+        strategy_type="tail_end_carry",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-live-cancel-1",
+        market_question="Will Example cancel cleanly?",
+        direction="buy_yes",
+        entry_price=0.5,
+        edge_percent=3.0,
+        confidence=0.8,
+    )
+    task = asyncio.create_task(
+        engine.execute_signal(
+            trader_id="trader-live-cancel",
+            signal=signal,
+            decision_id="decision-live-cancel",
+            strategy_key="tail_end_carry",
+            strategy_version=None,
+            strategy_params={},
+            risk_limits={},
+            mode="live",
+            size_usd=9.0,
+            reason="Tail carry signal selected",
+        )
+    )
+
+    await submit_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    session_rows = db.persisted_rows_by_type.get("ExecutionSession") or []
+    trader_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    execution_rows = db.persisted_rows_by_type.get("ExecutionSessionOrder") or []
+
+    assert db.commit_calls >= 1
+    assert len(session_rows) == 1
+    assert len(trader_rows) == 1
+    assert len(execution_rows) == 1
+    assert str(session_rows[-1].status or "") == "failed"
+    assert bool(dict(session_rows[-1].payload_json or {}).get("submit_cancelled")) is True
+    assert str(trader_rows[-1].status or "") == "failed"
+    assert dict(trader_rows[-1].payload_json or {}).get("submission_intent", {}).get("state") == "submit_cancelled"
+    assert str(execution_rows[-1].status or "") == "failed"
 
 
 @pytest.mark.asyncio
