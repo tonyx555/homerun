@@ -4124,7 +4124,7 @@ async def _run_trader_once(
                     mode=run_mode,
                 )
         session_engine = ExecutionSessionEngine(session)
-        run_execution_maintenance = bool(run_trader_maintenance and run_mode != "live" and hasattr(session, "execute"))
+        run_execution_maintenance = bool(run_trader_maintenance and hasattr(session, "execute"))
         if run_execution_maintenance:
             try:
                 reconcile_result = await asyncio.wait_for(
@@ -6905,6 +6905,7 @@ async def _run_trader_once(
                         last_signal_id=signal_id,
                         commit=False,
                     )
+                    await _commit_with_retry(session)
                     cursor_created_at = _signal_cursor_timestamp(signal)
                     cursor_signal_id = signal_id
                     cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence

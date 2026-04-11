@@ -2059,6 +2059,87 @@ async def test_run_trader_once_persists_heartbeat_when_idle_gate_short_circuits(
 
 
 @pytest.mark.asyncio
+async def test_run_trader_once_runs_live_execution_session_maintenance(monkeypatch):
+    trader_id = "trader-live-maintenance"
+
+    commit_mock = AsyncMock(return_value=None)
+    create_event_mock = AsyncMock(return_value=None)
+    backfill_mock = AsyncMock(return_value={"attempted": 0, "backfilled": 0, "skipped": 0, "errors": []})
+    paper_reconcile_mock = AsyncMock(
+        return_value={
+            "matched": 0,
+            "closed": 0,
+            "held": 0,
+            "skipped": 0,
+            "total_realized_pnl": 0.0,
+            "by_status": {},
+        }
+    )
+    sync_mock = AsyncMock(return_value={})
+    open_positions_mock = AsyncMock(return_value=0)
+    open_markets_mock = AsyncMock(return_value=set())
+    reconcile_calls: list[dict[str, object]] = []
+
+    async def _reconcile_active_sessions(self, *, mode, trader_id=None):
+        del self
+        reconcile_calls.append({"mode": mode, "trader_id": trader_id})
+        return {"active_seen": 2, "expired": 1, "completed": 0, "failed": 1}
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _DummySessionContext())
+    monkeypatch.setattr(trader_orchestrator_worker, "_commit_with_retry", commit_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "create_trader_event", create_event_mock)
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_backfill_simulation_ledger_for_active_paper_orders",
+        backfill_mock,
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "reconcile_paper_positions", paper_reconcile_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "sync_trader_position_inventory", sync_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_position_count_for_trader", open_positions_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "get_open_order_count_for_trader", AsyncMock(return_value=0))
+    monkeypatch.setattr(trader_orchestrator_worker, "get_occupied_market_ids_for_trader", open_markets_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "get_trader_signal_cursor", AsyncMock(return_value=(None, None)))
+    monkeypatch.setattr(trader_orchestrator_worker, "list_unconsumed_trade_signals", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        trader_orchestrator_worker.ExecutionSessionEngine,
+        "reconcile_active_sessions",
+        _reconcile_active_sessions,
+    )
+
+    trader_orchestrator_worker._trader_cycle_heartbeat_last_emitted.clear()
+    trader_orchestrator_worker._trader_idle_maintenance_last_run[trader_id] = datetime.now(timezone.utc)
+    try:
+        decisions_written, orders_written, _processed_signals = await trader_orchestrator_worker._run_trader_once(
+            {
+                "id": trader_id,
+                "source_configs": [
+                    {
+                        "source_key": "scanner",
+                        "strategy_key": "basic",
+                        "strategy_params": {},
+                    }
+                ],
+                "risk_limits": {},
+                "metadata": {"resume_policy": "resume_full"},
+            },
+            {"mode": "live", "settings": {}},
+            process_signals=True,
+        )
+    finally:
+        trader_orchestrator_worker._trader_idle_maintenance_last_run.pop(trader_id, None)
+        trader_orchestrator_worker._trader_cycle_heartbeat_last_emitted.clear()
+
+    assert decisions_written == 0
+    assert orders_written == 0
+    assert reconcile_calls == [{"mode": "live", "trader_id": trader_id}]
+    backfill_mock.assert_not_awaited()
+    paper_reconcile_mock.assert_not_awaited()
+    sync_mock.assert_not_awaited()
+    open_positions_mock.assert_not_awaited()
+    open_markets_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_trader_once_persists_heartbeat_when_signal_queue_is_empty(monkeypatch):
     heartbeat_mock = AsyncMock(return_value=None)
     persist_mock = AsyncMock(return_value=None)
@@ -3358,6 +3439,11 @@ async def test_run_trader_once_claims_live_signal_before_submit(monkeypatch):
     assert call_log.count("status:selected") == 1
     assert "consumption:claiming" in call_log
     assert "submit" in call_log
+    submit_index = call_log.index("submit")
+    commit_indexes = [index for index, value in enumerate(call_log) if value == "commit"]
+    assert len(commit_indexes) == 2
+    assert sum(1 for index in commit_indexes if index < submit_index) == 1
+    assert sum(1 for index in commit_indexes if index > submit_index) == 1
 
 
 @pytest.mark.asyncio

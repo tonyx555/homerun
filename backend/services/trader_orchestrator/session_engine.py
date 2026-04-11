@@ -58,6 +58,7 @@ import services.trader_hot_state as hot_state
 
 _MIN_BUNDLE_EXECUTION_SHARES = 5.0
 _PRE_SUBMIT_ORDER_STATUS = "placing"
+_STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS = 45.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -2584,6 +2585,25 @@ class ExecutionSessionEngine:
             status_key = str(row.status or "").strip().lower()
             if status_key == "paused":
                 continue
+            if status_key == "placing":
+                baseline_ts = row.updated_at or row.created_at or now
+                if baseline_ts.tzinfo is None:
+                    baseline_ts = baseline_ts.replace(tzinfo=timezone.utc)
+                else:
+                    baseline_ts = baseline_ts.astimezone(timezone.utc)
+                placing_age_seconds = max(0.0, (now - baseline_ts).total_seconds())
+                if placing_age_seconds >= _STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS:
+                    timeout_reason = (
+                        "Live order submission did not persist provider acknowledgement within "
+                        f"{int(_STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS)}s."
+                    )
+                    await self.cancel_session(
+                        session_id=row.id,
+                        reason=timeout_reason,
+                        terminal_status="failed",
+                    )
+                    cancelled += 1
+                    continue
             if row.expires_at is not None and now > row.expires_at:
                 await self.cancel_session(
                     session_id=row.id,
@@ -2703,7 +2723,7 @@ class ExecutionSessionEngine:
             {
                 str(order.get("trader_order_id") or "").strip()
                 for order in detail.get("orders", [])
-                if str(order.get("status") or "").strip().lower() in {"open", "submitted"}
+                if str(order.get("status") or "").strip().lower() in {"open", "submitted", "placing"}
                 and str(order.get("trader_order_id") or "").strip()
             }
         )
@@ -2721,13 +2741,13 @@ class ExecutionSessionEngine:
         total_orders_filled = 0
         for order in detail.get("orders", []):
             status_key = str(order.get("status") or "").strip().lower()
-            if status_key not in {"open", "submitted"}:
+            if status_key not in {"open", "submitted", "placing"}:
                 continue
             trader_order_id = str(order.get("trader_order_id") or "").strip()
             trader_order = trader_orders_by_id.get(trader_order_id) if trader_order_id else None
             if trader_order is not None:
                 local_status_key = str(trader_order.status or "").strip().lower()
-                if local_status_key not in {"open", "submitted", "executed"}:
+                if local_status_key not in {"open", "submitted", "executed", "placing"}:
                     continue
 
             provider_order_id = str(order.get("provider_order_id") or "").strip()
@@ -2749,6 +2769,9 @@ class ExecutionSessionEngine:
                 continue
             total_orders_processed += 1
             payload = dict(trader_order.payload_json or {})
+            submission_intent = payload.get("submission_intent")
+            submission_intent = dict(submission_intent) if isinstance(submission_intent, dict) else {}
+            is_pre_submit_placeholder = status_key == "placing" or str(trader_order.status or "").strip().lower() == "placing"
 
             # Merge live provider snapshot into payload so _extract_live_fill_metrics
             # sees the latest fill data even if reconciliation hasn't written it yet.
@@ -2792,9 +2815,16 @@ class ExecutionSessionEngine:
                 if leg_id:
                     filled_leg_ids.add(leg_id)
             else:
-                next_status = "cancelled"
+                next_status = "failed" if terminal_key == "failed" or is_pre_submit_placeholder else "cancelled"
                 trader_order.status = next_status
                 trader_order.notional_usd = 0.0
+                trader_order.error_message = reason
+                if is_pre_submit_placeholder:
+                    submission_intent["state"] = "submit_timeout"
+                    submission_intent["submit_status"] = "timed_out"
+                    submission_intent["error_message"] = reason
+                    submission_intent["last_submit_result_at"] = _iso_utc(now)
+                    payload["submission_intent"] = submission_intent
 
             payload["session_cancel"] = {
                 "cancelled_at": _iso_utc(now),
@@ -2808,8 +2838,8 @@ class ExecutionSessionEngine:
                 payload=payload,
                 status=next_status,
                 now=now,
-                provider_snapshot_status=next_status if next_status == "cancelled" else None,
-                mapped_status="cancelled" if next_status == "cancelled" else "executed",
+                provider_snapshot_status=next_status if next_status in {"cancelled", "failed"} else None,
+                mapped_status="failed" if next_status == "failed" else "cancelled" if next_status == "cancelled" else "executed",
             )
             trader_order.updated_at = now
             if reason:
@@ -2817,7 +2847,7 @@ class ExecutionSessionEngine:
                     trader_order.reason = f"{trader_order.reason} | session:{terminal_key}:{reason}"
                 else:
                     trader_order.reason = f"session:{terminal_key}:{reason}"
-            if next_status == "cancelled":
+            if next_status in {"cancelled", "failed"}:
                 hot_state.record_order_cancelled(
                     trader_id=str(trader_order.trader_id or ""),
                     mode=str(trader_order.mode or ""),
@@ -2847,7 +2877,7 @@ class ExecutionSessionEngine:
                 await update_execution_leg(
                     self.db,
                     leg_row_id=leg_id,
-                    status="cancelled",
+                    status="failed" if terminal_key == "failed" else "cancelled",
                     last_error=reason,
                     commit=False,
                 )

@@ -1100,6 +1100,41 @@ async def test_reconcile_active_sessions_escalates_hedging_timeout(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_reconcile_active_sessions_fails_stale_pre_submit_placeholders(monkeypatch):
+    db = SimpleNamespace(commit=AsyncMock())
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    stale_row = SimpleNamespace(
+        id="sess-stale-submit",
+        status="placing",
+        expires_at=utcnow() + timedelta(minutes=30),
+        payload_json={},
+        created_at=utcnow() - timedelta(minutes=3),
+        updated_at=utcnow() - timedelta(minutes=2),
+    )
+
+    monkeypatch.setattr(
+        session_engine_module,
+        "list_active_execution_sessions",
+        AsyncMock(return_value=[stale_row]),
+    )
+    cancel_session_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine, "cancel_session", cancel_session_mock)
+    leg_rollups_mock = AsyncMock(
+        return_value={"sess-stale-submit": {"legs_total": 0, "legs_completed": 0, "legs_failed": 0, "legs_open": 0}}
+    )
+    monkeypatch.setattr(session_engine_module, "get_execution_session_leg_rollups", leg_rollups_mock)
+
+    result = await engine.reconcile_active_sessions(mode="live", trader_id="trader-1")
+
+    assert result["active_seen"] == 1
+    assert result["failed"] == 1
+    assert cancel_session_mock.await_count == 1
+    assert cancel_session_mock.await_args.kwargs["terminal_status"] == "failed"
+    assert "did not persist provider acknowledgement" in cancel_session_mock.await_args.kwargs["reason"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
     db = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock())
     engine = session_engine_module.ExecutionSessionEngine(db)
@@ -1162,6 +1197,85 @@ async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
     assert update_status_mock.await_count == 1
     assert set_signal_status_mock.await_count == 1
     assert create_event_mock.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_session_fails_pre_submit_placeholder_orders(monkeypatch):
+    db = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock())
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    timeout_reason = "Live order submission did not persist provider acknowledgement within 45s."
+    session_detail = {
+        "session": {"status": "placing", "signal_id": "signal-1", "trader_id": "trader-1", "mode": "live"},
+        "orders": [
+            {
+                "status": "placing",
+                "trader_order_id": "order-1",
+                "provider_order_id": None,
+                "provider_clob_order_id": None,
+                "leg_id": "leg-1",
+            }
+        ],
+        "legs": [{"id": "leg-1", "status": "placing"}],
+    }
+    placing_order = SimpleNamespace(
+        id="order-1",
+        trader_id="trader-1",
+        mode="live",
+        market_id="market-1",
+        source="scanner",
+        payload_json={"submission_intent": {"state": "pre_submit_persisted"}},
+        reason="Tail carry signal selected",
+        notional_usd=None,
+        executed_at=None,
+        updated_at=None,
+        error_message=None,
+        status="placing",
+    )
+    db.execute = AsyncMock(
+        return_value=SimpleNamespace(
+            scalars=lambda: SimpleNamespace(all=lambda: [placing_order])
+        )
+    )
+
+    monkeypatch.setattr(
+        session_engine_module,
+        "get_execution_session_detail",
+        AsyncMock(return_value=session_detail),
+    )
+    cancel_provider_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(session_engine_module, "cancel_live_provider_order", cancel_provider_mock)
+    update_leg_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module, "update_execution_leg", update_leg_mock)
+    update_status_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module, "update_execution_session_status", update_status_mock)
+    set_signal_status_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
+    create_event_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module, "create_execution_session_event", create_event_mock)
+    publish_mock = AsyncMock()
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", publish_mock)
+
+    result = await engine.cancel_session(
+        session_id="session-1",
+        reason=timeout_reason,
+        terminal_status="failed",
+    )
+
+    assert result is True
+    assert cancel_provider_mock.await_count == 0
+    assert placing_order.status == "failed"
+    assert placing_order.error_message == timeout_reason
+    assert placing_order.payload_json["submission_intent"]["state"] == "submit_timeout"
+    assert placing_order.payload_json["submission_intent"]["submit_status"] == "timed_out"
+    assert update_leg_mock.await_count == 1
+    assert update_leg_mock.await_args.kwargs["status"] == "failed"
+    assert update_status_mock.await_count == 1
+    assert update_status_mock.await_args.kwargs["status"] == "failed"
+    assert set_signal_status_mock.await_count == 1
+    assert set_signal_status_mock.await_args.kwargs["status"] == "failed"
+    assert create_event_mock.await_count == 1
+    assert db.commit.await_count == 1
 
 
 @pytest.mark.asyncio
