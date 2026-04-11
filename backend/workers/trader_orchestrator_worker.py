@@ -635,9 +635,9 @@ _STANDARD_DEFAULT_MAX_SIGNALS_PER_CYCLE = 200
 _HIGH_FREQUENCY_MAX_SIGNALS_PER_CYCLE = 5000
 _HIGH_FREQUENCY_DEFAULT_MAX_SIGNALS_PER_CYCLE = 2000
 _HIGH_FREQUENCY_DEFAULT_SCAN_BATCH_SIZE = 1000
-_STANDARD_RUNTIME_TRIGGER_SIGNAL_LIMIT = 8
+_STANDARD_RUNTIME_TRIGGER_SIGNAL_LIMIT = 1
 _HIGH_FREQUENCY_RUNTIME_TRIGGER_SIGNAL_LIMIT = 32
-_STANDARD_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 4
+_STANDARD_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 1
 _HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 16
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
 _TRADER_CYCLE_HEARTBEAT_EVENT_INTERVAL_SECONDS = 1
@@ -1436,6 +1436,8 @@ def _build_execution_latency_sample(
     armed_at = _parse_iso(str(payload.get("execution_armed_at") or ""))
     emitted_at = _parse_iso(str(payload.get("signal_emitted_at") or payload.get("ingested_at") or ""))
     released_at = armed_at or emitted_at
+    if emitted_at is not None and (armed_at is None or emitted_at > armed_at):
+        released_at = emitted_at
 
     def _delta_ms(start: datetime | None, end: datetime | None) -> int | None:
         if start is None or end is None:
@@ -7641,7 +7643,13 @@ async def run_runtime_trigger_loop(*, lane: str = _LANE_GENERAL) -> None:
             )
 
 
-async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = True, process_runtime_triggers: bool = True) -> None:
+async def run_worker_loop(
+    *,
+    lane: str = _LANE_GENERAL,
+    write_snapshot: bool = True,
+    process_runtime_triggers: bool = True,
+    process_scheduled_signals: bool = True,
+) -> None:
     global _ws_auto_paused
     lane_key = str(lane or _LANE_GENERAL).strip().lower()
     stream_group = _stream_group_name_for_lane(lane_key)
@@ -8003,12 +8011,19 @@ async def run_worker_loop(*, lane: str = _LANE_GENERAL, write_snapshot: bool = T
 
                     is_paused = bool(trader.get("is_paused", False))
                     runtime_trigger_for_trader = _runtime_trigger_matches_trader(trader, cycle_trigger)
-                    due = manual_force_cycle or runtime_trigger_for_trader or _is_due(trader, now)
+                    due = bool(manual_force_cycle or runtime_trigger_for_trader)
+                    if process_scheduled_signals:
+                        due = bool(due or _is_due(trader, now))
                     if trader_id in high_frequency_trader_ids and not manage_only_cycle and not is_paused:
-                        due = manual_force_cycle or runtime_trigger_for_trader or _is_high_frequency_maintenance_due(
-                            trader,
-                            now,
-                        )
+                        due = bool(manual_force_cycle or runtime_trigger_for_trader)
+                        if process_scheduled_signals:
+                            due = bool(
+                                due
+                                or _is_high_frequency_maintenance_due(
+                                    trader,
+                                    now,
+                                )
+                            )
                     process_signals_for_trader = True
                     if manage_only_cycle or is_paused or not due:
                         process_signals_for_trader = False
@@ -8317,6 +8332,7 @@ async def start_loop(*, lane: str = _LANE_GENERAL, notifier_enabled: bool = True
                     lane=lane,
                     write_snapshot=write_snapshot,
                     process_runtime_triggers=False,
+                    process_scheduled_signals=False,
                 )
             else:
                 await run_worker_loop(lane=lane, write_snapshot=write_snapshot)

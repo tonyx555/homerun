@@ -162,8 +162,10 @@ def _terminal_row_requires_reopen_audit(row: TraderOrder, now_naive: datetime) -
     pending_exit = payload.get("pending_live_exit")
     status_key = str(getattr(row, "status", None) or "").strip().lower()
     close_trigger = ""
+    close_price_source = ""
     if isinstance(position_close, dict):
         close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
+        close_price_source = str(position_close.get("price_source") or "").strip().lower()
     pending_status = ""
     if isinstance(pending_exit, dict):
         pending_status = str(pending_exit.get("status") or "").strip().lower()
@@ -172,7 +174,11 @@ def _terminal_row_requires_reopen_audit(row: TraderOrder, now_naive: datetime) -
         return False
     if age_anchor.tzinfo is not None:
         age_anchor = age_anchor.astimezone(timezone.utc).replace(tzinfo=None)
-    if close_trigger in {"wallet_absent_close", "wallet_flat_override"} or pending_status == "filled":
+    if (
+        close_trigger in {"wallet_absent_close", "wallet_flat_override"}
+        or pending_status == "filled"
+        or close_price_source in {"provider_exit_fill", "resolved_settlement"}
+    ):
         return age_anchor >= (now_naive - timedelta(hours=_TERMINAL_REOPEN_LOOKBACK_HOURS))
     if status_key not in {"cancelled", "failed", "rejected", "error"}:
         return False
@@ -3094,7 +3100,7 @@ async def reconcile_live_positions(
     terminal_stmt = select(TraderOrder).where(
         TraderOrder.trader_id == trader_id,
         TraderOrder.mode == "live",
-        TraderOrder.status.in_(("closed_win", "closed_loss", "cancelled", "failed", "rejected", "error")),
+        TraderOrder.status.in_(("closed_win", "closed_loss", "resolved_win", "resolved_loss", "cancelled", "failed", "rejected", "error")),
     )
     if max_age_hours is not None:
         cutoff = now - timedelta(hours=max(1, int(max_age_hours)))
@@ -3135,6 +3141,7 @@ async def reconcile_live_positions(
             if cond_key:
                 wallet_position = wallet_positions_by_token.get(cond_key)
         wallet_position_size = _extract_wallet_position_size(wallet_position)
+        terminal_wallet_settlement_price = _extract_wallet_settlement_price(wallet_position)
         status_key = str(row.status or "").strip().lower()
         if (
             status_key in {"cancelled", "failed", "rejected", "error"}
@@ -3175,6 +3182,83 @@ async def reconcile_live_positions(
         position_close = payload.get("position_close")
         if isinstance(position_close, dict):
             close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
+            close_price_source = str(position_close.get("price_source") or "").strip().lower()
+            if (
+                close_price_source == "resolved_settlement"
+                and terminal_wallet_settlement_price is None
+                and wallet_position_size > _WALLET_SIZE_EPSILON
+            ):
+                reopened_at = _iso_utc(now)
+                if not dry_run:
+                    row.status = "open"
+                    row.actual_profit = None
+                    row.updated_at = now
+                    payload.pop("position_close", None)
+                    payload["resolution_reopen"] = {
+                        "reopened_at": reopened_at,
+                        "reopen_reason": "resolved_settlement_not_wallet_terminal",
+                        "wallet_position_size": wallet_position_size,
+                    }
+                    row.payload_json = payload
+                    state_updates += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "next_status": "open",
+                        "note": "reopened_resolved_settlement_not_wallet_terminal",
+                    }
+                )
+                candidates.append(row)
+                candidate_ids.add(row_id)
+                continue
+            if close_price_source == "provider_exit_fill" and wallet_position_size > _WALLET_SIZE_EPSILON:
+                pending_exit = payload.get("pending_live_exit")
+                pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
+                provider_status = _provider_snapshot_status(payload)
+                provider_remaining_size = _provider_snapshot_remaining_size(payload)
+                reopened_at = _iso_utc(now)
+                if not dry_run:
+                    row.status = "open"
+                    row.actual_profit = None
+                    row.updated_at = now
+                    payload.pop("position_close", None)
+                    if pending_exit:
+                        pending_exit["status"] = (
+                            "submitted"
+                            if str(pending_exit.get("exit_order_id") or "").strip()
+                            or str(pending_exit.get("provider_clob_order_id") or "").strip()
+                            else "pending"
+                        )
+                        pending_exit["reopened_at"] = reopened_at
+                        pending_exit["reopen_reason"] = "provider_exit_fill_not_wallet_flat"
+                        pending_exit["provider_status"] = provider_status or pending_exit.get("provider_status")
+                        if provider_remaining_size is not None:
+                            pending_exit["provider_remaining_size"] = provider_remaining_size
+                        payload["pending_live_exit"] = pending_exit
+                    payload["provider_exit_reopen"] = {
+                        "reopened_at": reopened_at,
+                        "reopen_reason": "provider_exit_fill_not_wallet_flat",
+                        "provider_status": provider_status,
+                        "provider_remaining_size": provider_remaining_size,
+                    }
+                    row.payload_json = payload
+                    state_updates += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
+                        "provider_status": provider_status,
+                        "provider_remaining_size": provider_remaining_size,
+                        "next_status": "open",
+                        "note": "reopened_provider_exit_fill_not_wallet_flat",
+                    }
+                )
+                candidates.append(row)
+                candidate_ids.add(row_id)
+                continue
             if close_trigger in {"wallet_absent_close", "wallet_flat_override"}:
                 pending_exit = payload.get("pending_live_exit")
                 pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
@@ -4095,16 +4179,13 @@ async def reconcile_live_positions(
             _pending_exit_provider_clob_id(_pending_exit_tmp)
         )
         _has_working_provider_entry = _provider_entry_order_still_working(payload)
+        # A missing wallet row is not treated as close authority here.
+        # Live positions remain open until explicit exit evidence exists.
         # Guard: do not wallet-absent-close orders placed in the last 120
         # seconds.  Polymarket's data API can lag behind the CLOB — a just-
         # placed buy may not appear in get_wallet_positions() yet, causing a
         # false wallet_absent_close that records a phantom loss and triggers
         # an immediate re-buy of the same market.
-        _wab_order_age_anchor = row.executed_at or row.updated_at or row.created_at
-        _wab_min_age_ok = (
-            _wab_order_age_anchor is None
-            or (now - _wab_order_age_anchor).total_seconds() >= 120.0
-        )
         if (
             token_id
             and entry_fill_size > 0.0
@@ -4115,85 +4196,15 @@ async def reconcile_live_positions(
             and not isinstance(latest_wallet_sell_trade, dict)
             and not _has_active_provider_exit
             and not _has_working_provider_entry
-            and _wab_min_age_ok
         ):
-            close_price = pending_current_price
-            close_price_reference = str(pending_current_price_source or "")
-            if close_price is None or close_price <= 0.0:
-                close_price = pending_market_side_price
-                close_price_reference = "market_mark"
-            if close_price is None or close_price <= 0.0:
-                close_price = wallet_mark_price
-                close_price_reference = "wallet_mark"
-            if close_price is None or close_price <= 0.0:
-                close_price = entry_fill_price
-                close_price_reference = "entry_price"
-            if close_price is None or close_price < 0.0:
-                close_price = 0.0
-                close_price_reference = "none"
-
-            close_qty = entry_fill_size
-            cost_basis = entry_fill_notional
-            if cost_basis <= 0.0 and entry_fill_price is not None and entry_fill_price > 0.0:
-                cost_basis = close_qty * entry_fill_price
-            proceeds = close_qty * close_price if close_price > 0.0 and close_qty > 0.0 else 0.0
-            pnl = proceeds - cost_basis
-            next_status = _status_for_close(pnl=pnl, close_trigger="wallet_absent_close")
             details.append(
                 {
                     "order_id": row.id,
                     "market_id": row.market_id,
-                    "close_trigger": "wallet_absent_close",
-                    "close_price": close_price,
-                    "close_price_reference": close_price_reference,
-                    "realized_pnl": pnl,
-                    "next_status": next_status,
-                    "note": "wallet_absent_without_verified_close_evidence",
+                    "next_status": str(row.status or "").strip().lower(),
+                    "note": "wallet_absent_without_verified_close_evidence_held",
                 }
             )
-            would_close += 1
-            total_realized_pnl += pnl
-            by_status[next_status] = int(by_status.get(next_status, 0)) + 1
-            if not dry_run:
-                row.status = next_status
-                row.actual_profit = pnl
-                row.updated_at = now
-                payload["position_close"] = {
-                    "close_price": close_price,
-                    "price_source": "wallet_absent_best_available",
-                    "best_available_source": close_price_reference,
-                    "close_trigger": "wallet_absent_close",
-                    "realized_pnl": pnl,
-                    "cost_basis_usd": cost_basis,
-                    "settlement_proceeds_usd": proceeds,
-                    "filled_size": close_qty,
-                    "closed_at": _iso_utc(now),
-                    "reason": reason,
-                }
-                if pending_state_changed:
-                    payload["position_state"] = pending_next_state
-                row.payload_json = payload
-                _apply_position_close_verification(
-                    session,
-                    row=row,
-                    now=now,
-                    event_type="wallet_absent_close",
-                    payload_json=payload,
-                )
-                hot_state.record_order_resolved(
-                    trader_id=trader_id,
-                    mode=str(row.mode or ""),
-                    order_id=str(row.id or ""),
-                    market_id=str(row.market_id or ""),
-                    direction=str(row.direction or ""),
-                    source=str(row.source or ""),
-                    status=next_status,
-                    actual_profit=pnl,
-                    payload=payload,
-                    copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
-                )
-                closed += 1
-            continue
 
         pending_exit = payload.get("pending_live_exit")
         pending_exit_status = (
@@ -4233,7 +4244,8 @@ async def reconcile_live_positions(
         # For live exits we trust provider fill truth; a terminal local close
         # only happens once provider fill size reaches the required threshold.
         if isinstance(pending_exit, dict) and pending_exit_status in {"submitted", "pending"}:
-            if pending_winning_idx is not None and pending_outcome_idx is not None:
+            wallet_resolution_confirmed = wallet_settlement_price is not None
+            if pending_winning_idx is not None and pending_outcome_idx is not None and wallet_resolution_confirmed:
                 _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
                 _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
                 if _ep is None or _ep <= 0:
@@ -4394,13 +4406,15 @@ async def reconcile_live_positions(
             provider_status_unknown = snapshot_status in {"", "missing", "invalid", "unknown"}
             wallet_flat_confirmed = wallet_position_size <= _WALLET_SIZE_EPSILON and (
                 wallet_position_observed
-                or wallet_positions_loaded
                 or isinstance(latest_wallet_sell_trade, dict)
+                or isinstance(wallet_close_activity, dict)
+                or isinstance(closed_position, dict)
             )
             close_fill_threshold_met = (
                 required_exit_size > 0.0
                 and terminal_provider_status
                 and snapshot_filled_size >= (required_exit_size * threshold_ratio)
+                and wallet_flat_confirmed
             )
             close_fill_threshold_with_wallet_confirmation = (
                 required_exit_size > 0.0
@@ -4788,7 +4802,8 @@ async def reconcile_live_positions(
         # If a previous cycle recorded a pending_live_exit that failed,
         # retry submitting the sell order (with cooldown & max retries).
         if isinstance(pending_exit, dict) and pending_exit.get("status") == "failed":
-            if pending_winning_idx is not None and pending_outcome_idx is not None:
+            wallet_resolution_confirmed = wallet_settlement_price is not None
+            if pending_winning_idx is not None and pending_outcome_idx is not None and wallet_resolution_confirmed:
                 _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
                 _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
                 if _ep is None or _ep <= 0:
@@ -5131,7 +5146,8 @@ async def reconcile_live_positions(
             "blocked_min_notional",
             "blocked_retry_exhausted",
         }:
-            if pending_winning_idx is not None and pending_outcome_idx is not None:
+            pending_wallet_resolution_confirmed = wallet_settlement_price is not None
+            if pending_winning_idx is not None and pending_outcome_idx is not None and pending_wallet_resolution_confirmed:
                 _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
                 _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
                 if _ep is None or _ep <= 0:
@@ -5241,13 +5257,16 @@ async def reconcile_live_positions(
             pending_provider_status = str(pending_exit.get("provider_status") or "").strip().lower()
             provider_close_verified = _pending_exit_has_verified_terminal_fill(pending_exit)
             wallet_flat_by_snapshot = wallet_position_observed and wallet_position_size <= _WALLET_SIZE_EPSILON
-            wallet_flat_by_absence = bool(token_id) and wallet_positions_loaded and wallet_position is None
+            wallet_flat_by_trade = (
+                wallet_position_size <= _WALLET_SIZE_EPSILON
+                and wallet_trade_confirms_exit
+            )
             wallet_trade_confirms_exit = (
                 isinstance(latest_wallet_sell_trade, dict)
                 and _extract_wallet_trade_size(latest_wallet_sell_trade) > _WALLET_SIZE_EPSILON
             )
             wallet_flat_override = (
-                (wallet_flat_by_snapshot or wallet_flat_by_absence)
+                (wallet_flat_by_snapshot or wallet_flat_by_trade)
                 and (provider_close_verified or wallet_trade_confirms_exit)
             )
             if wallet_flat_override:
@@ -5605,7 +5624,8 @@ async def reconcile_live_positions(
             exit_eval_price = None
             exit_eval_price_source = None
 
-        if winning_idx is not None:
+        wallet_resolution_confirmed = wallet_settlement_price is not None
+        if winning_idx is not None and wallet_resolution_confirmed:
             close_price = 1.0 if winning_idx == outcome_idx else 0.0
             close_trigger = "resolution_inferred" if winning_idx_inferred else "resolution"
             price_source = "resolved_settlement"

@@ -81,6 +81,32 @@ def test_build_execution_latency_sample_uses_execution_armed_at_for_release_sla(
     assert sample["emit_to_submit_start_ms"] == 34000
 
 
+def test_build_execution_latency_sample_uses_latest_emit_time_when_requeued():
+    armed_at = datetime(2026, 4, 9, 12, 0, tzinfo=timezone.utc)
+    emitted_at = armed_at + timedelta(seconds=45)
+    signal = SimpleNamespace(
+        payload_json={
+            "execution_armed_at": armed_at.isoformat().replace("+00:00", "Z"),
+            "signal_emitted_at": emitted_at.isoformat().replace("+00:00", "Z"),
+            "ingested_at": emitted_at.isoformat().replace("+00:00", "Z"),
+        }
+    )
+
+    sample = trader_orchestrator_worker._build_execution_latency_sample(
+        signal,
+        wake_started_at=emitted_at + timedelta(seconds=1),
+        context_ready_at=emitted_at + timedelta(seconds=2),
+        decision_ready_at=emitted_at + timedelta(seconds=3),
+        submit_started_at=emitted_at + timedelta(seconds=4),
+        submit_completed_at=emitted_at + timedelta(seconds=5),
+    )
+
+    assert sample["armed_to_ws_release_ms"] == 45000
+    assert sample["emit_to_queue_wake_ms"] == 1000
+    assert sample["ws_release_to_submit_start_ms"] == 4000
+    assert sample["emit_to_submit_start_ms"] == 4000
+
+
 def test_maybe_log_execution_latency_sla_breach_does_not_repeat_same_signature(monkeypatch):
     warnings: list[dict[str, object]] = []
 
@@ -2482,12 +2508,16 @@ async def test_run_trader_once_skips_live_maintenance_on_scheduled_cycle(monkeyp
 
     trader_payload = dict(_base_trader_payload(allow_averaging=True))
     trader_payload["id"] = trader_id
+    trader_orchestrator_worker._trader_maintenance_last_run[trader_id] = datetime.now(timezone.utc)
 
-    decisions_written, orders_written, processed_signals = await trader_orchestrator_worker._run_trader_once(
-        trader_payload,
-        _base_control_payload(),
-        process_signals=False,
-    )
+    try:
+        decisions_written, orders_written, processed_signals = await trader_orchestrator_worker._run_trader_once(
+            trader_payload,
+            _base_control_payload(),
+            process_signals=False,
+        )
+    finally:
+        trader_orchestrator_worker._trader_maintenance_last_run.pop(trader_id, None)
 
     assert decisions_written == 0
     assert orders_written == 0
@@ -2986,6 +3016,88 @@ async def test_run_worker_loop_processes_scanner_signals_on_scheduled_general_la
 
     run_once_mock.assert_awaited_once()
     assert run_once_mock.await_args.kwargs["process_signals"] is True
+    assert run_once_mock.await_args.kwargs["trigger_signal_ids_by_source"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_worker_loop_skips_scheduled_signals_when_disabled(monkeypatch):
+    class _Session:
+        async def get(self, model, key):
+            if getattr(model, "__name__", "") == "SimulationAccount" and key == "paper-1":
+                return object()
+            return None
+
+        async def rollback(self):
+            return None
+
+    class _SessionContext:
+        async def __aenter__(self):
+            return _Session()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    run_once_mock = AsyncMock(return_value=(0, 0, 0))
+
+    async def _cancel_sleep(_interval: float):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(trader_orchestrator_worker, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_ensure_orchestrator_cycle_lock_owner", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker, "_release_orchestrator_cycle_lock_owner", AsyncMock(return_value=None)
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "ensure_all_strategies_seeded", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "refresh_strategy_runtime_if_needed", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "expire_stale_signals", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "_reconcile_orphan_open_orders", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_terminal_stale_order_watchdog", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "read_orchestrator_control",
+        AsyncMock(
+            return_value={
+                "is_enabled": True,
+                "is_paused": False,
+                "kill_switch": False,
+                "run_interval_seconds": 1,
+                "mode": "paper",
+                "settings": {"paper_account_id": "paper-1"},
+            }
+        ),
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "list_traders",
+        AsyncMock(
+            return_value=[
+                {
+                    "id": "scanner-1",
+                    "is_enabled": True,
+                    "is_paused": False,
+                    "mode": "paper",
+                    "metadata": {},
+                    "source_configs": [{"source_key": "scanner", "strategy_key": "custom_scanner_strategy"}],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once_with_timeout", run_once_mock)
+    monkeypatch.setattr(trader_orchestrator_worker, "_build_orchestrator_snapshot_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_write_orchestrator_snapshot_best_effort", AsyncMock(return_value=None))
+    monkeypatch.setattr(trader_orchestrator_worker, "update_orchestrator_control", AsyncMock(return_value={}))
+    monkeypatch.setattr(trader_orchestrator_worker, "_worker_sleep", _cancel_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await trader_orchestrator_worker.run_worker_loop(
+            process_runtime_triggers=False,
+            process_scheduled_signals=False,
+        )
+
+    run_once_mock.assert_awaited_once()
+    assert run_once_mock.await_args.kwargs["process_signals"] is False
     assert run_once_mock.await_args.kwargs["trigger_signal_ids_by_source"] is None
 
 
@@ -6571,6 +6683,8 @@ async def test_run_trader_once_live_runtime_trigger_processes_runtime_trigger_ba
     monkeypatch.setattr(trader_orchestrator_worker, "upsert_trader_signal_cursor", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "_emit_cycle_heartbeat_if_due", AsyncMock(return_value=None))
     monkeypatch.setattr(trader_orchestrator_worker, "_persist_trader_cycle_heartbeat", AsyncMock(return_value=None))
+    publish_signal_batch_mock = AsyncMock(return_value="batch-1")
+    monkeypatch.setattr(trader_orchestrator_worker, "publish_signal_batch", publish_signal_batch_mock)
 
     decisions_written, orders_written, processed_signals = await trader_orchestrator_worker._run_trader_once(
         trader_payload,
@@ -6579,9 +6693,16 @@ async def test_run_trader_once_live_runtime_trigger_processes_runtime_trigger_ba
         trigger_signal_snapshots_by_source={"scanner": {signal.id: {"id": signal.id} for signal in signals}},
     )
 
-    assert decisions_written == 4
+    assert decisions_written == 1
     assert orders_written == 0
-    assert processed_signals == 4
-    assert len(decisions) == 4
+    assert processed_signals == 1
+    assert len(decisions) == 1
+    publish_signal_batch_mock.assert_awaited_once()
+    assert publish_signal_batch_mock.await_args.kwargs["signal_ids"] == [
+        "signal-2",
+        "signal-3",
+        "signal-4",
+        "signal-5",
+    ]
 
 

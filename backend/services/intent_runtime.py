@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, text
 
 from config import settings
 from models.database import AsyncSessionLocal, TradeSignal
@@ -35,6 +35,9 @@ logger = get_logger(__name__)
 _SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 _SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 _STATUS_PROJECTION_BATCH_MAX = 64
+_PROJECTION_RETRY_MAX_ATTEMPTS = 3
+_PROJECTION_RETRY_BASE_DELAY_SECONDS = 0.25
+_PROJECTION_STATEMENT_TIMEOUT_MS = 5000
 _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
 _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
@@ -2018,6 +2021,12 @@ class IntentRuntime:
             return
         await self._projection_queue.put(payload)
 
+    async def _retry_projection_payload(self, payload: dict[str, Any]) -> None:
+        retry_count = int(payload.get("_projection_retry_count") or 0)
+        delay_seconds = _PROJECTION_RETRY_BASE_DELAY_SECONDS * (2 ** max(0, retry_count - 1))
+        await asyncio.sleep(delay_seconds)
+        await self._projection_queue.put(payload)
+
     async def _run_projection_loop(self) -> None:
         while True:
             payload = await self._projection_queue.get()
@@ -2045,7 +2054,19 @@ class IntentRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Intent runtime DB projection failed", exc_info=exc)
+                retry_count = int(payload.get("_projection_retry_count") or 0)
+                if retry_count < _PROJECTION_RETRY_MAX_ATTEMPTS:
+                    payload["_projection_retry_count"] = retry_count + 1
+                    self._start_task(
+                        self._retry_projection_payload(payload),
+                        name=f"intent-runtime-projection-retry-{retry_count + 1}",
+                    )
+                logger.warning(
+                    "Intent runtime DB projection failed",
+                    projection_kind=str(payload.get("kind") or "").strip().lower() or None,
+                    retry_count=retry_count,
+                    exc_info=exc,
+                )
 
     async def _dispatch_projection_payload(self, payload: dict[str, Any]) -> None:
         kind = str(payload.get("kind") or "").strip().lower()
@@ -2075,6 +2096,10 @@ class IntentRuntime:
             if not chunk:
                 break
             async with AsyncSessionLocal() as session:
+                try:
+                    await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
                 chunk_dedupe_keys = [
                     str(snapshot.get("dedupe_key") or "").strip()
                     for snapshot in chunk
@@ -2176,6 +2201,10 @@ class IntentRuntime:
         for chunk_start in range(0, len(items), _STATUS_CHUNK_SIZE):
             chunk = items[chunk_start:chunk_start + _STATUS_CHUNK_SIZE]
             async with AsyncSessionLocal() as session:
+                try:
+                    await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
                 changed_any = False
                 for item in chunk:
                     changed = await project_trade_signal_status(

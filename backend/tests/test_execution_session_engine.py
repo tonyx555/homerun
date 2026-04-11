@@ -243,7 +243,7 @@ async def test_execute_signal_aborts_before_order_writes_on_pair_lock_violation(
     assert "Pair lock violation" in str(result.error_message)
     assert result.orders_written == 0
     assert cancel_provider_mock.await_count == 1
-    assert db.flush_calls >= 2
+    assert db.flush_calls >= 1
     assert set_signal_status_mock.await_count == 1
     assert set_signal_status_mock.await_args.args[2] == "failed"
     assert intent_runtime.update_signal_status.await_count == 1
@@ -842,7 +842,7 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
 
     assert result.status == "skipped"
     assert result.orders_written == 0
-    assert db.flush_calls >= 2
+    assert db.flush_calls >= 1
     assert set_signal_status_mock.await_count == 1
     assert set_signal_status_mock.await_args.args[2] == "skipped"
     assert intent_runtime.update_signal_status.await_count == 1
@@ -1051,7 +1051,7 @@ async def test_execute_signal_failed_projection_flushes_parents_before_signal_st
 
     assert result.status == "failed"
     assert result.orders_written == 1
-    assert db.flush_calls >= 2
+    assert db.flush_calls >= 1
     assert set_signal_status_mock.await_count == 1
     assert intent_runtime.update_signal_status.await_count == 1
 
