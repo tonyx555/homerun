@@ -2546,6 +2546,7 @@ async def recover_missing_live_trader_orders(
                     tuple(
                         LIVE_ACTIVE_ORDER_STATUSES
                         | RESOLVED_ORDER_STATUSES
+                        | {"placing"}
                         | {"cancelled", "failed", "rejected", "error"}
                     )
                 ),
@@ -2587,6 +2588,26 @@ async def recover_missing_live_trader_orders(
         .scalars()
         .all()
     )
+    existing_order_ids = [str(row.id or "").strip() for row in existing_rows if str(row.id or "").strip()]
+    execution_order_rows: list[ExecutionSessionOrder] = []
+    if existing_order_ids:
+        execution_order_rows = list(
+            (
+                await session.execute(
+                    select(ExecutionSessionOrder)
+                    .where(ExecutionSessionOrder.trader_order_id.in_(existing_order_ids))
+                    .order_by(desc(ExecutionSessionOrder.created_at))
+                )
+            )
+            .scalars()
+            .all()
+        )
+    execution_order_by_trader_order: dict[str, ExecutionSessionOrder] = {}
+    for execution_order_row in execution_order_rows:
+        trader_order_id = str(execution_order_row.trader_order_id or "").strip()
+        if not trader_order_id or trader_order_id in execution_order_by_trader_order:
+            continue
+        execution_order_by_trader_order[trader_order_id] = execution_order_row
     existing_trader_ids = {str(row.trader_id or "").strip() for row in existing_rows if str(row.trader_id or "").strip()}
     trader_source_configs_by_id: dict[str, Any] = {}
     if existing_trader_ids:
@@ -2611,9 +2632,15 @@ async def recover_missing_live_trader_orders(
     recovered_sell_rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_by_authority_key: dict[str, list[TraderOrder]] = {}
     rows_without_authority: list[TraderOrder] = []
+    pre_submit_rows_by_token_key: dict[str, list[TraderOrder]] = {}
     existing_occupied_markets: set[tuple[str, str]] = set()
     recently_closed_recovery_guard_markets: set[tuple[str, str]] = set()
     affected_traders: set[str] = set()
+    updated_execution_order_rows: dict[str, ExecutionSessionOrder] = {}
+    updated_execution_leg_rows: dict[str, ExecutionSessionLeg] = {}
+    updated_execution_session_rows: dict[str, ExecutionSession] = {}
+    leg_state_updates: dict[str, dict[str, Any]] = {}
+    touched_session_ids: set[str] = set()
     for row in existing_rows:
         payload = dict(row.payload_json or {})
         authority_key = _live_order_authority_key_from_row(row)
@@ -2630,6 +2657,22 @@ async def recover_missing_live_trader_orders(
         if pending_exit_live_order_id:
             pending_exit_rows_by_live_order_id[pending_exit_live_order_id.lower()] = row
         row_status = str(row.status or "").strip().lower()
+        provider_order_id = str(
+            getattr(row, "provider_order_id", None)
+            or extract_trader_order_provider_order_id(payload)
+            or ""
+        ).strip()
+        submission_intent = payload.get("submission_intent")
+        if (
+            not authority_key
+            and not provider_order_id
+            and row_status == "placing"
+            and isinstance(submission_intent, dict)
+            and _normalize_status_key(submission_intent.get("state")) == "pre_submit_persisted"
+        ):
+            token_key = _wallet_position_token_key(_extract_order_token_id(row))
+            if token_key:
+                pre_submit_rows_by_token_key.setdefault(token_key, []).append(row)
         row_trader_id = str(row.trader_id or "").strip()
         row_market_id = str(row.market_id or "").strip()
         if row_trader_id and row_market_id and not is_recovered_sell_authority:
@@ -2729,6 +2772,14 @@ async def recover_missing_live_trader_orders(
             position_row=position_row,
             now=now,
         )
+        recovered_payload_json = dict(recovery_state["payload_json"] or {})
+        recovered_filled_notional_usd, recovered_filled_shares, recovered_fill_price = _extract_live_fill_metrics(
+            recovered_payload_json
+        )
+        recovered_entry_price = safe_float(recovery_state.get("entry_price"), recovered_fill_price)
+        recovered_notional = max(0.0, safe_float(recovery_state.get("order_notional_usd"), 0.0) or 0.0)
+        if recovered_notional <= 0.0:
+            recovered_notional = max(0.0, recovered_filled_notional_usd)
         if live_side == "SELL":
             pending_exit_parent = None
             if clob_order_id:
@@ -2769,16 +2820,62 @@ async def recover_missing_live_trader_orders(
             ambiguous_orders += 1
             continue
         existing_row = None
+        matched_pre_submit_placeholder = False
         if clob_order_id:
             existing_row = existing_provider_rows_by_clob_id.get(clob_order_id)
         if existing_row is None and live_order_id:
             existing_row = existing_rows_by_live_order_id.get(live_order_id)
+        if existing_row is None and token_key:
+            live_market_id = str(getattr(position_row, "market_id", None) or "").strip()
+            live_condition_id = _normalize_condition_id(live_market_id)
+            placeholder_candidates: list[tuple[float, float, TraderOrder]] = []
+            for placeholder_row in pre_submit_rows_by_token_key.get(token_key, []):
+                placeholder_payload = dict(placeholder_row.payload_json or {})
+                submission_intent = placeholder_payload.get("submission_intent")
+                if not isinstance(submission_intent, dict):
+                    continue
+                if _normalize_status_key(submission_intent.get("state")) != "pre_submit_persisted":
+                    continue
+                if _live_order_authority_key_from_row(placeholder_row):
+                    continue
+                placeholder_market_id = str(placeholder_row.market_id or placeholder_payload.get("market_id") or "").strip()
+                placeholder_condition_id = _normalize_condition_id(placeholder_market_id)
+                if live_market_id and placeholder_market_id and placeholder_market_id != live_market_id:
+                    if not live_condition_id or not placeholder_condition_id or placeholder_condition_id != live_condition_id:
+                        continue
+                placeholder_created_at = placeholder_row.created_at or placeholder_row.updated_at or now
+                if placeholder_created_at.tzinfo is None:
+                    placeholder_created_at = placeholder_created_at.replace(tzinfo=timezone.utc)
+                else:
+                    placeholder_created_at = placeholder_created_at.astimezone(timezone.utc)
+                placeholder_candidates.append(
+                    (
+                        abs((placeholder_created_at - created_at).total_seconds()),
+                        -placeholder_created_at.timestamp(),
+                        placeholder_row,
+                    )
+                )
+            if placeholder_candidates:
+                placeholder_candidates.sort(key=lambda item: (item[0], item[1], str(item[2].id or "")))
+                if len(placeholder_candidates) == 1 or placeholder_candidates[0][0] < placeholder_candidates[1][0]:
+                    existing_row = placeholder_candidates[0][2]
+                    matched_pre_submit_placeholder = True
         if existing_row is not None:
             existing_payload = dict(existing_row.payload_json or {})
             merged_payload, payload_changed = _merge_missing_mapping_values(
                 existing_payload,
-                dict(recovery_state["payload_json"] or {}),
+                recovered_payload_json,
             )
+            if matched_pre_submit_placeholder:
+                submission_intent = dict(merged_payload.get("submission_intent") or {})
+                submission_intent["state"] = "recovered_from_live_authority"
+                submission_intent["authority_recovered_at"] = to_iso(now)
+                if live_order_id:
+                    submission_intent["live_trading_order_id"] = live_order_id
+                if clob_order_id:
+                    submission_intent["provider_clob_order_id"] = clob_order_id
+                merged_payload["submission_intent"] = submission_intent
+                payload_changed = True
             recovery_strategy_payload = _live_order_authority_strategy_payload(
                 trader_source_configs=trader_source_configs_by_id.get(str(existing_row.trader_id or "").strip()),
                 source_key=str(existing_row.source or "").strip(),
@@ -2808,7 +2905,7 @@ async def recover_missing_live_trader_orders(
                 str(live_row.side or "").strip().upper() != "SELL"
                 and recovered_status in LIVE_ACTIVE_ORDER_STATUSES
                 and not existing_status_is_terminal
-                and existing_status in {"submitted", "executed", "open", "failed", "cancelled", "rejected", "error"}
+                and existing_status in {"placing", "submitted", "executed", "open", "failed", "cancelled", "rejected", "error"}
                 and existing_status != recovered_status
             ):
                 existing_row.status = recovered_status
@@ -2851,8 +2948,6 @@ async def recover_missing_live_trader_orders(
                 force=True,
             )
             field_changed = False
-            recovered_entry_price = safe_float(recovery_state.get("entry_price"))
-            recovered_notional = safe_float(recovery_state.get("order_notional_usd"))
             if recovered_entry_price is not None and recovered_entry_price > 0.0:
                 if safe_float(existing_row.entry_price, 0.0) <= 0.0:
                     existing_row.entry_price = float(recovered_entry_price)
@@ -2860,15 +2955,81 @@ async def recover_missing_live_trader_orders(
                 if safe_float(existing_row.effective_price, 0.0) <= 0.0:
                     existing_row.effective_price = float(recovered_entry_price)
                     field_changed = True
-            if recovered_notional is not None and recovered_notional > 0.0 and safe_float(existing_row.notional_usd, 0.0) <= 0.0:
+            if recovered_notional > 0.0 and safe_float(existing_row.notional_usd, 0.0) <= 0.0:
                 existing_row.notional_usd = float(recovered_notional)
                 field_changed = True
-            elif recovered_notional is not None and recovered_notional <= 0.0 and _normalize_status_key(existing_row.status) in {"cancelled", "failed", "rejected", "error"}:
+            elif recovered_notional <= 0.0 and _normalize_status_key(existing_row.status) in {"cancelled", "failed", "rejected", "error"}:
                 if safe_float(existing_row.notional_usd, 0.0) != 0.0:
                     existing_row.notional_usd = 0.0
                     field_changed = True
             if payload_changed:
                 existing_row.payload_json = merged_payload
+            execution_order = execution_order_by_trader_order.get(str(existing_row.id or "").strip())
+            if execution_order is not None:
+                execution_payload = dict(execution_order.payload_json or {})
+                execution_payload, execution_payload_changed = _merge_missing_mapping_values(
+                    execution_payload,
+                    recovered_payload_json,
+                )
+                if matched_pre_submit_placeholder:
+                    execution_submission_intent = dict(execution_payload.get("submission_intent") or {})
+                    execution_submission_intent["state"] = "recovered_from_live_authority"
+                    execution_submission_intent["authority_recovered_at"] = to_iso(now)
+                    if live_order_id:
+                        execution_submission_intent["live_trading_order_id"] = live_order_id
+                    if clob_order_id:
+                        execution_submission_intent["provider_clob_order_id"] = clob_order_id
+                    execution_payload["submission_intent"] = execution_submission_intent
+                    execution_payload_changed = True
+                execution_order_changed = False
+                if str(execution_order.status or "").strip().lower() != recovered_status:
+                    execution_order.status = recovered_status or str(execution_order.status or "")
+                    execution_order_changed = True
+                if recovered_entry_price is not None and recovered_entry_price > 0.0:
+                    existing_execution_price = safe_float(execution_order.price, None)
+                    if existing_execution_price is None or abs(existing_execution_price - recovered_entry_price) > 1e-9:
+                        execution_order.price = float(recovered_entry_price)
+                        execution_order_changed = True
+                if recovered_filled_shares > 0.0 and safe_float(execution_order.size, 0.0) != recovered_filled_shares:
+                    execution_order.size = float(recovered_filled_shares)
+                    execution_order_changed = True
+                if recovered_notional > 0.0 and safe_float(execution_order.notional_usd, 0.0) != recovered_notional:
+                    execution_order.notional_usd = float(recovered_notional)
+                    execution_order_changed = True
+                elif recovered_notional <= 0.0 and recovered_status in {"cancelled", "failed", "rejected", "error"}:
+                    if safe_float(execution_order.notional_usd, 0.0) != 0.0:
+                        execution_order.notional_usd = 0.0
+                        execution_order_changed = True
+                if existing_row.provider_order_id and str(execution_order.provider_order_id or "") != str(existing_row.provider_order_id):
+                    execution_order.provider_order_id = str(existing_row.provider_order_id)
+                    execution_order_changed = True
+                if existing_row.provider_clob_order_id and str(execution_order.provider_clob_order_id or "") != str(existing_row.provider_clob_order_id):
+                    execution_order.provider_clob_order_id = str(existing_row.provider_clob_order_id)
+                    execution_order_changed = True
+                next_execution_error = None if recovered_status in LIVE_ACTIVE_ORDER_STATUSES else str(live_row.error_message or "").strip() or execution_order.error_message
+                if execution_order.error_message != next_execution_error:
+                    execution_order.error_message = next_execution_error
+                    execution_order_changed = True
+                if execution_payload_changed:
+                    execution_order.payload_json = execution_payload
+                    execution_order_changed = True
+                if execution_order_changed:
+                    execution_order.updated_at = now
+                    updated_execution_order_rows[str(execution_order.id)] = execution_order
+                leg_id = str(execution_order.leg_id or "").strip()
+                if leg_id:
+                    leg_state_updates[leg_id] = {
+                        "status": recovered_status,
+                        "filled_notional_usd": float(recovered_notional),
+                        "filled_shares": float(max(0.0, recovered_filled_shares)),
+                        "avg_fill_price": float(recovered_entry_price) if recovered_entry_price is not None and recovered_entry_price > 0.0 else None,
+                        "provider_order_id": existing_row.provider_order_id,
+                        "provider_clob_order_id": existing_row.provider_clob_order_id,
+                        "snapshot_status": _normalize_status_key(live_row.status),
+                    }
+                session_id = str(execution_order.session_id or "").strip()
+                if session_id:
+                    touched_session_ids.add(session_id)
             if payload_changed or status_changed or verification_changed or field_changed:
                 existing_row.updated_at = now
                 append_trader_order_verification_event(
@@ -2891,6 +3052,12 @@ async def recover_missing_live_trader_orders(
                 )
                 adopted_existing_orders += 1
                 hot_state_sync_rows[str(existing_row.id or "")] = existing_row
+            if matched_pre_submit_placeholder and token_key:
+                pre_submit_rows_by_token_key[token_key] = [
+                    row for row in pre_submit_rows_by_token_key.get(token_key, []) if str(row.id or "") != str(existing_row.id or "")
+                ]
+                if not pre_submit_rows_by_token_key[token_key]:
+                    pre_submit_rows_by_token_key.pop(token_key, None)
             if clob_order_id:
                 existing_provider_rows_by_clob_id[clob_order_id] = existing_row
             if live_order_id:
@@ -2898,7 +3065,6 @@ async def recover_missing_live_trader_orders(
             continue
 
         live_wallet_size = max(0.0, safe_float(getattr(position_row, "size", None), 0.0) or 0.0)
-        recovered_notional = max(0.0, safe_float(recovery_state.get("order_notional_usd"), 0.0) or 0.0)
         recovered_status = _normalize_status_key(recovery_state.get("trader_status"))
         if (
             live_side != "SELL"
@@ -2973,9 +3139,9 @@ async def recover_missing_live_trader_orders(
             trace_id=None,
             mode="live",
             status=str(recovery_state["trader_status"]),
-            notional_usd=float(recovery_state["order_notional_usd"]) if float(recovery_state["order_notional_usd"] or 0.0) > 0.0 else None,
-            entry_price=float(recovery_state["entry_price"]) if recovery_state["entry_price"] is not None and float(recovery_state["entry_price"]) > 0.0 else None,
-            effective_price=float(recovery_state["entry_price"]) if recovery_state["entry_price"] is not None and float(recovery_state["entry_price"]) > 0.0 else None,
+            notional_usd=float(recovered_notional) if recovered_notional > 0.0 else None,
+            entry_price=float(recovered_entry_price) if recovered_entry_price is not None and recovered_entry_price > 0.0 else None,
+            effective_price=float(recovered_entry_price) if recovered_entry_price is not None and recovered_entry_price > 0.0 else None,
             execution_wallet_address=recovered_verification.get("execution_wallet_address"),
             provider_order_id=recovered_verification.get("provider_order_id"),
             provider_clob_order_id=recovered_verification.get("provider_clob_order_id"),
@@ -2993,7 +3159,7 @@ async def recover_missing_live_trader_orders(
             created_at=created_at,
             executed_at=(
                 live_row.updated_at or live_row.created_at or now
-                if max(0.0, safe_float(recovery_state.get("order_notional_usd"), 0.0) or 0.0) > 0.0
+                if recovered_notional > 0.0
                 or str(recovery_state["trader_status"]) == "executed"
                 else None
             ),
@@ -3030,7 +3196,83 @@ async def recover_missing_live_trader_orders(
         if live_order_id:
             existing_rows_by_live_order_id[live_order_id] = recovered_row
 
-    if not recovered_rows and collapsed_duplicates <= 0 and adopted_existing_orders <= 0:
+    if leg_state_updates:
+        leg_rows = list(
+            (
+                await session.execute(
+                    select(ExecutionSessionLeg).where(ExecutionSessionLeg.id.in_(list(leg_state_updates.keys())))
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for leg_row in leg_rows:
+            leg_update = leg_state_updates.get(str(leg_row.id))
+            if leg_update is None:
+                continue
+            mapped_status = str(leg_update["status"] or "").strip().lower()
+            leg_row.status = _map_live_order_status_to_leg_status(mapped_status)
+            leg_row.filled_notional_usd = float(max(0.0, safe_float(leg_update.get("filled_notional_usd"), 0.0) or 0.0))
+            leg_row.filled_shares = float(max(0.0, safe_float(leg_update.get("filled_shares"), 0.0) or 0.0))
+            avg_fill_price = safe_float(leg_update.get("avg_fill_price"))
+            if avg_fill_price is not None and avg_fill_price > 0:
+                leg_row.avg_fill_price = float(avg_fill_price)
+            if mapped_status in {"failed", "cancelled"}:
+                leg_row.last_error = f"authority_recovery:{mapped_status}"
+            else:
+                leg_row.last_error = None
+            metadata_json = dict(leg_row.metadata_json or {})
+            metadata_json["provider_recovery"] = {
+                "recovered_at": to_iso(now),
+                "provider_order_id": leg_update.get("provider_order_id"),
+                "provider_clob_order_id": leg_update.get("provider_clob_order_id"),
+                "snapshot_status": leg_update.get("snapshot_status"),
+                "mapped_status": mapped_status,
+            }
+            leg_row.metadata_json = metadata_json
+            leg_row.updated_at = now
+            updated_execution_leg_rows[str(leg_row.id)] = leg_row
+            touched_session_ids.add(str(leg_row.session_id))
+
+    if touched_session_ids:
+        await session.flush()
+    for session_id in touched_session_ids:
+        session_row = await _refresh_execution_session_rollups(session, session_id=session_id)
+        if session_row is None:
+            continue
+        previous_session_status = _normalize_status_key(session_row.status)
+        next_session_status = previous_session_status
+        legs_open = int(session_row.legs_open or 0)
+        legs_completed = int(session_row.legs_completed or 0)
+        legs_failed = int(session_row.legs_failed or 0)
+        if legs_open <= 0:
+            if legs_completed > 0 and legs_failed == 0:
+                next_session_status = "completed"
+                session_row.error_message = None
+            elif legs_completed == 0 and legs_failed > 0:
+                next_session_status = "failed"
+                if not session_row.error_message:
+                    session_row.error_message = "All execution legs failed during live authority recovery."
+            elif legs_completed > 0 and legs_failed > 0:
+                next_session_status = "failed"
+                if not session_row.error_message:
+                    session_row.error_message = "Execution session closed with partial fills and failed legs during live authority recovery."
+        elif previous_session_status in {"pending", "placing", "partial", "hedging"}:
+            next_session_status = "working"
+        if next_session_status in TERMINAL_EXECUTION_SESSION_STATUSES and session_row.completed_at is None:
+            session_row.completed_at = now
+        session_row.status = next_session_status
+        session_row.updated_at = now
+        updated_execution_session_rows[str(session_row.id)] = session_row
+
+    if (
+        not recovered_rows
+        and collapsed_duplicates <= 0
+        and adopted_existing_orders <= 0
+        and not updated_execution_order_rows
+        and not updated_execution_leg_rows
+        and not updated_execution_session_rows
+    ):
         if commit and session.in_transaction():
             await session.rollback()
         return {
@@ -3077,9 +3319,34 @@ async def recover_missing_live_trader_orders(
         pass
 
     if broadcast:
+        published_order_ids: set[str] = set()
         for row in recovered_rows:
             try:
                 await event_bus.publish("trader_order", _serialize_order(row))
+                published_order_ids.add(str(row.id or ""))
+            except Exception:
+                continue
+        for row in hot_state_sync_rows.values():
+            row_id = str(row.id or "")
+            if not row_id or row_id in published_order_ids:
+                continue
+            try:
+                await event_bus.publish("trader_order", _serialize_order(row))
+            except Exception:
+                continue
+        for row in updated_execution_order_rows.values():
+            try:
+                await event_bus.publish("execution_order", _serialize_execution_order(row))
+            except Exception:
+                continue
+        for row in updated_execution_leg_rows.values():
+            try:
+                await event_bus.publish("execution_leg", _serialize_execution_leg(row))
+            except Exception:
+                continue
+        for row in updated_execution_session_rows.values():
+            try:
+                await event_bus.publish("execution_session", _serialize_execution_session(row))
             except Exception:
                 continue
 

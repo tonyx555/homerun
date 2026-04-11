@@ -11,7 +11,19 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import Base, LiveTradingOrder, LiveTradingPosition, TradeSignal, Trader, TraderDecision, TraderOrder, TraderPosition
+from models.database import (
+    Base,
+    ExecutionSession,
+    ExecutionSessionLeg,
+    ExecutionSessionOrder,
+    LiveTradingOrder,
+    LiveTradingPosition,
+    TradeSignal,
+    Trader,
+    TraderDecision,
+    TraderOrder,
+    TraderPosition,
+)
 from services import trader_hot_state, trader_orchestrator_state
 from workers import trader_reconciliation_worker
 from services.trader_orchestrator_state import (
@@ -574,6 +586,230 @@ async def test_recover_missing_live_trader_orders_adopts_existing_provider_autho
             assert payload["strategy_exit_config"]["stop_loss_pct"] == 12
             assert rows[0].reason == "Tail carry signal selected"
             assert rows[0].status == "resolved_win"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_adopts_pre_submit_placeholder_without_creating_recovered_row(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-adopt-pre-submit-placeholder"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-pre-submit-placeholder",
+                signal_id="signal-pre-submit-placeholder",
+                market_id="market-pre-submit-placeholder",
+                market_question="Will Placeholder Market settle YES?",
+                direction="buy_yes",
+                strategy_key="generic_strategy",
+            )
+            now = utcnow()
+            recovered_at = now + timedelta(seconds=4)
+            submission_intent = {
+                "state": "pre_submit_persisted",
+                "persisted_at": now.isoformat(),
+                "requested_notional_usd": 5.0,
+                "requested_shares": 10.0,
+                "time_in_force": "IOC",
+                "post_only": False,
+                "price_policy": "taker_limit",
+            }
+            session.add_all(
+                [
+                    ExecutionSession(
+                        id="execution-session-placeholder",
+                        trader_id=trader_id,
+                        signal_id="signal-pre-submit-placeholder",
+                        decision_id="decision-pre-submit-placeholder",
+                        source="scanner",
+                        strategy_key="generic_strategy",
+                        strategy_version=1,
+                        mode="live",
+                        status="placing",
+                        policy="SINGLE_LEG",
+                        plan_id="plan-pre-submit-placeholder",
+                        market_ids_json=["market-pre-submit-placeholder"],
+                        legs_total=1,
+                        legs_completed=0,
+                        legs_failed=0,
+                        legs_open=1,
+                        requested_notional_usd=5.0,
+                        executed_notional_usd=0.0,
+                        max_unhedged_notional_usd=0.0,
+                        unhedged_notional_usd=0.0,
+                        trace_id="trace-pre-submit-placeholder",
+                        started_at=now,
+                        payload_json={},
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    ExecutionSessionLeg(
+                        id="execution-leg-placeholder",
+                        session_id="execution-session-placeholder",
+                        leg_index=0,
+                        leg_id="leg-pre-submit-placeholder",
+                        market_id="market-pre-submit-placeholder",
+                        market_question="Will Placeholder Market settle YES?",
+                        token_id="token-pre-submit-placeholder",
+                        side="buy",
+                        outcome="yes",
+                        price_policy="taker_limit",
+                        time_in_force="IOC",
+                        post_only=False,
+                        target_price=0.5,
+                        requested_notional_usd=5.0,
+                        requested_shares=10.0,
+                        filled_notional_usd=0.0,
+                        filled_shares=0.0,
+                        status="placing",
+                        metadata_json={},
+                        created_at=now,
+                        updated_at=now,
+                    ),
+                    TraderOrder(
+                        id="pre-submit-placeholder-order",
+                        trader_id=trader_id,
+                        signal_id="signal-pre-submit-placeholder",
+                        decision_id="decision-pre-submit-placeholder",
+                        source="scanner",
+                        strategy_key="generic_strategy",
+                        market_id="market-pre-submit-placeholder",
+                        market_question="Will Placeholder Market settle YES?",
+                        direction="buy_yes",
+                        mode="live",
+                        status="placing",
+                        notional_usd=None,
+                        entry_price=0.5,
+                        effective_price=None,
+                        reason="Signal selected",
+                        payload_json={
+                            "token_id": "token-pre-submit-placeholder",
+                            "market_id": "market-pre-submit-placeholder",
+                            "direction": "buy_yes",
+                            "submission_intent": dict(submission_intent),
+                            "execution_session": {
+                                "session_id": "execution-session-placeholder",
+                                "leg_id": "execution-leg-placeholder",
+                                "leg_ref": "leg-pre-submit-placeholder",
+                                "policy": "SINGLE_LEG",
+                            },
+                        },
+                        created_at=now,
+                        updated_at=now,
+                        verification_status="local",
+                    ),
+                    LiveTradingOrder(
+                        id="venue-order-pre-submit-placeholder",
+                        wallet_address="0xwallet",
+                        market_id="market-pre-submit-placeholder",
+                        clob_order_id="clob-pre-submit-placeholder",
+                        token_id="token-pre-submit-placeholder",
+                        side="BUY",
+                        price=0.5,
+                        size=10.0,
+                        order_type="IOC",
+                        status="filled",
+                        filled_size=10.0,
+                        average_fill_price=0.5,
+                        market_question="Will Placeholder Market settle YES?",
+                        created_at=recovered_at,
+                        updated_at=recovered_at,
+                    ),
+                    LiveTradingPosition(
+                        id="0xwallet:token-pre-submit-placeholder",
+                        wallet_address="0xwallet",
+                        token_id="token-pre-submit-placeholder",
+                        market_id="market-pre-submit-placeholder",
+                        market_question="Will Placeholder Market settle YES?",
+                        outcome="Yes",
+                        size=10.0,
+                        average_cost=0.5,
+                        current_price=0.5,
+                        unrealized_pnl=0.0,
+                        redeemable=False,
+                        counts_as_open=True,
+                        end_date=None,
+                        created_at=recovered_at,
+                        updated_at=recovered_at,
+                    ),
+                ]
+            )
+            await session.flush()
+            session.add(
+                ExecutionSessionOrder(
+                    id="execution-order-placeholder",
+                    session_id="execution-session-placeholder",
+                    leg_id="execution-leg-placeholder",
+                    trader_order_id="pre-submit-placeholder-order",
+                    provider_order_id=None,
+                    provider_clob_order_id=None,
+                    action="submit",
+                    side="buy",
+                    price=0.5,
+                    size=10.0,
+                    notional_usd=5.0,
+                    status="placing",
+                    reason="Signal selected",
+                    payload_json={"submission_intent": dict(submission_intent)},
+                    error_message=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            trader_rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.created_at.asc(), TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert [row.id for row in trader_rows] == ["pre-submit-placeholder-order"]
+            placeholder_order = trader_rows[0]
+            assert placeholder_order.status == "executed"
+            assert placeholder_order.reason == "Signal selected"
+            assert placeholder_order.provider_clob_order_id == "clob-pre-submit-placeholder"
+            assert placeholder_order.notional_usd == pytest.approx(5.0)
+            placeholder_payload = dict(placeholder_order.payload_json or {})
+            assert placeholder_payload["submission_intent"]["state"] == "recovered_from_live_authority"
+            assert placeholder_payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-pre-submit-placeholder"
+
+            execution_order = await session.get(ExecutionSessionOrder, "execution-order-placeholder")
+            assert execution_order is not None
+            assert execution_order.status == "executed"
+            assert execution_order.provider_clob_order_id == "clob-pre-submit-placeholder"
+            assert dict(execution_order.payload_json or {})["submission_intent"]["state"] == "recovered_from_live_authority"
+
+            execution_leg = await session.get(ExecutionSessionLeg, "execution-leg-placeholder")
+            assert execution_leg is not None
+            assert execution_leg.status == "completed"
+            assert execution_leg.filled_notional_usd == pytest.approx(5.0)
+            assert execution_leg.filled_shares == pytest.approx(10.0)
+            assert execution_leg.avg_fill_price == pytest.approx(0.5)
+
+            execution_session = await session.get(ExecutionSession, "execution-session-placeholder")
+            assert execution_session is not None
+            assert execution_session.status == "completed"
+            assert execution_session.legs_completed == 1
+            assert execution_session.legs_failed == 0
+            assert execution_session.legs_open == 0
+            assert execution_session.executed_notional_usd == pytest.approx(5.0)
+            assert execution_session.completed_at is not None
     finally:
         await engine.dispose()
 

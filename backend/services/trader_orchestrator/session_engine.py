@@ -14,6 +14,7 @@ from services.live_execution_service import live_execution_service
 from services.signal_bus import set_trade_signal_status
 from services.strategy_sdk import StrategySDK
 from services.strategy_loader import strategy_loader
+from services.trader_order_verification import apply_trader_order_verification, derive_trader_order_verification
 from services.trader_orchestrator.execution_policies import (
     allocate_leg_notionals,
     execution_waves,
@@ -55,6 +56,7 @@ import services.trader_hot_state as hot_state
 
 
 _MIN_BUNDLE_EXECUTION_SHARES = 5.0
+_PRE_SUBMIT_ORDER_STATUS = "placing"
 
 
 def _iso_utc(value: datetime) -> str:
@@ -783,6 +785,7 @@ class ExecutionSessionEngine:
         completed_legs = 0
         skip_reasons: list[str] = []
         bundle_recovery_outcome: dict[str, Any] | None = None
+        entry_submit_placeholders: dict[str, tuple[TraderOrder, ExecutionSessionOrder]] = {}
 
         def _append_event(
             *,
@@ -849,6 +852,254 @@ class ExecutionSessionEngine:
                 leg_row.metadata_json = merged_metadata
             leg_row.updated_at = utcnow()
             _apply_execution_session_rollups_from_rows(session_row, list(leg_rows.values()))
+
+        def _build_entry_order_seed(
+            *,
+            leg_id: str,
+            leg_row_id: str,
+            leg_payload: dict[str, Any],
+            result_payload: dict[str, Any] | None = None,
+            fill_price: float | None = None,
+        ) -> dict[str, Any]:
+            order_payload = dict(result_payload or {})
+            order_payload["execution_session"] = {
+                "session_id": session_row.id,
+                "leg_id": leg_row_id,
+                "leg_ref": leg_id,
+                "policy": plan["policy"],
+            }
+            order_payload["strategy_type"] = str(getattr(signal, "strategy_type", "") or "").strip().lower()
+            order_payload["strategy_context"] = (
+                getattr(signal, "strategy_context_json", None) or getattr(signal, "strategy_context", None) or {}
+            )
+
+            runtime_params = dict(strategy_params or {})
+            explicit_params = dict(explicit_strategy_params or {})
+            order_payload["strategy_params"] = dict(runtime_params)
+            exit_config: dict[str, Any] = {}
+            for param_key, param_value in explicit_params.items():
+                key_text = str(param_key or "").strip()
+                if not key_text:
+                    continue
+                exit_config[key_text] = param_value
+                if key_text.startswith("live_") and len(key_text) > 5:
+                    canonical_key = key_text[5:]
+                    if canonical_key and canonical_key not in exit_config:
+                        exit_config[canonical_key] = param_value
+            exit_key_aliases = {
+                "rapid_take_profit_pct": ("live_rapid_take_profit_pct", "rapid_take_profit_pct"),
+                "rapid_exit_window_minutes": ("live_rapid_exit_window_minutes", "rapid_exit_window_minutes"),
+                "rapid_exit_min_increase_pct": (
+                    "live_rapid_exit_min_increase_pct",
+                    "rapid_exit_min_increase_pct",
+                ),
+                "rapid_exit_breakeven_buffer_pct": (
+                    "live_rapid_exit_breakeven_buffer_pct",
+                    "rapid_exit_breakeven_buffer_pct",
+                ),
+                "take_profit_pct": ("live_take_profit_pct", "take_profit_pct"),
+                "stop_loss_pct": ("live_stop_loss_pct", "stop_loss_pct"),
+                "stop_loss_policy": ("live_stop_loss_policy", "stop_loss_policy", "stop_loss_mode"),
+                "stop_loss_activation_seconds": (
+                    "live_stop_loss_activation_seconds",
+                    "stop_loss_activation_seconds",
+                    "live_stop_loss_near_close_seconds",
+                    "stop_loss_near_close_seconds",
+                ),
+                "trailing_stop_pct": ("live_trailing_stop_pct", "trailing_stop_pct"),
+                "trailing_stop_activation_profit_pct": (
+                    "live_trailing_stop_activation_profit_pct",
+                    "trailing_stop_activation_profit_pct",
+                ),
+                "max_hold_minutes": ("live_max_hold_minutes", "max_hold_minutes"),
+                "min_hold_minutes": ("live_min_hold_minutes", "min_hold_minutes"),
+                "resolve_only": ("live_resolve_only", "resolve_only"),
+                "close_on_inactive_market": ("live_close_on_inactive_market", "close_on_inactive_market"),
+            }
+            for base_key in (
+                "rapid_take_profit_pct",
+                "rapid_exit_window_minutes",
+                "take_profit_pct",
+                "stop_loss_pct",
+                "stop_loss_policy",
+                "stop_loss_activation_seconds",
+                "trailing_stop_pct",
+                "trailing_stop_activation_profit_pct",
+                "max_hold_minutes",
+                "min_hold_minutes",
+            ):
+                for suffix in ("5m", "15m", "1h", "4h"):
+                    scoped_key = f"{base_key}_{suffix}"
+                    exit_key_aliases[scoped_key] = (f"live_{scoped_key}", scoped_key)
+            for target_key, aliases in exit_key_aliases.items():
+                selected_value = None
+                for alias_key in aliases:
+                    if alias_key in explicit_params:
+                        selected_value = explicit_params.get(alias_key)
+                        break
+                if selected_value is not None:
+                    exit_config[target_key] = selected_value
+
+            resolved_signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
+            leg_market_id = str(leg_payload.get("market_id") or getattr(signal, "market_id", "") or "").strip()
+            leg_market_question = _resolve_leg_market_question(
+                resolved_signal_payload,
+                leg_payload,
+                str(getattr(signal, "market_question", "") or "").strip(),
+            )
+            leg_direction = _resolve_leg_direction(leg_payload, str(getattr(signal, "direction", "") or ""))
+            leg_entry_price = safe_float(leg_payload.get("limit_price"), safe_float(fill_price, None))
+            if leg_market_id:
+                order_payload["market_id"] = leg_market_id
+            if leg_market_question:
+                order_payload["market_question"] = leg_market_question
+            if leg_direction:
+                order_payload["direction"] = leg_direction
+            if leg_entry_price is not None and leg_entry_price > 0.0:
+                order_payload["entry_price"] = float(leg_entry_price)
+
+            if isinstance(signal_payload, dict):
+                live_market_payload = signal_payload.get("live_market")
+                if isinstance(live_market_payload, dict):
+                    signal_selected_token_id = str(live_market_payload.get("selected_token_id") or "").strip()
+                    signal_market_key = str(
+                        live_market_payload.get("market_id") or live_market_payload.get("condition_id") or ""
+                    ).strip().lower()
+                    leg_token_id = str(leg_payload.get("token_id") or "").strip()
+                    leg_market_key = leg_market_id.strip().lower() if leg_market_id else ""
+                    if (
+                        signal_selected_token_id
+                        and leg_token_id
+                        and signal_selected_token_id == leg_token_id
+                    ) or (
+                        signal_market_key
+                        and leg_market_key
+                        and signal_market_key == leg_market_key
+                    ):
+                        order_payload["live_market"] = dict(live_market_payload)
+
+            live_market_payload = order_payload.get("live_market")
+            live_market = dict(live_market_payload) if isinstance(live_market_payload, dict) else {}
+            if leg_market_id:
+                live_market["market_id"] = leg_market_id
+            if leg_market_question:
+                live_market["market_question"] = leg_market_question
+            selected_token_id = str(order_payload.get("token_id") or leg_payload.get("token_id") or "").strip()
+            if selected_token_id:
+                order_payload["token_id"] = selected_token_id
+                live_market["selected_token_id"] = selected_token_id
+            selected_outcome = str(leg_payload.get("outcome") or "").strip().lower()
+            if selected_outcome:
+                live_market["selected_outcome"] = selected_outcome
+            live_selected_price = safe_float(fill_price, leg_entry_price)
+            if live_selected_price is not None and live_selected_price > 0.0:
+                live_market["live_selected_price"] = float(live_selected_price)
+            if live_market:
+                order_payload["live_market"] = live_market
+            order_payload["strategy_exit_config"] = exit_config
+            return {
+                "order_payload": order_payload,
+                "exit_config": exit_config,
+                "market_id": leg_market_id,
+                "market_question": leg_market_question,
+                "direction": leg_direction,
+                "entry_price": leg_entry_price,
+            }
+
+        async def _commit_pre_submit_projection() -> None:
+            self.db.add(session_row)
+            for leg_row in leg_rows.values():
+                self.db.add(leg_row)
+            for trader_order in trader_orders:
+                self.db.add(trader_order)
+            await self.db.flush()
+            for execution_order in execution_orders:
+                self.db.add(execution_order)
+            if execution_orders:
+                await self.db.flush()
+            for execution_event in execution_events:
+                self.db.add(execution_event)
+            if execution_events:
+                await self.db.flush()
+            await self.db.commit()
+
+        def _create_entry_submit_placeholder(
+            *,
+            leg_id: str,
+            leg_payload: dict[str, Any],
+        ) -> tuple[TraderOrder, ExecutionSessionOrder] | None:
+            leg_row = leg_rows.get(leg_id)
+            if leg_row is None:
+                return None
+            now = utcnow()
+            order_seed = _build_entry_order_seed(
+                leg_id=leg_id,
+                leg_row_id=leg_row.id,
+                leg_payload=leg_payload,
+                result_payload={},
+                fill_price=None,
+            )
+            requested_notional = safe_float(leg_payload.get("requested_notional_usd"), None)
+            requested_shares = safe_float(leg_payload.get("requested_shares"), None)
+            submission_intent = {
+                "state": "pre_submit_persisted",
+                "persisted_at": _iso_utc(now),
+                "requested_notional_usd": float(requested_notional) if requested_notional is not None and requested_notional > 0.0 else None,
+                "requested_shares": float(requested_shares) if requested_shares is not None and requested_shares > 0.0 else None,
+                "time_in_force": str(leg_payload.get("time_in_force") or "").strip().upper() or None,
+                "post_only": bool(leg_payload.get("post_only", False)),
+                "price_policy": str(leg_payload.get("price_policy") or "").strip().lower() or None,
+            }
+            placeholder_payload = dict(order_seed["order_payload"])
+            placeholder_payload["submission_intent"] = submission_intent
+            placeholder_payload = _sync_order_runtime_payload(
+                payload=placeholder_payload,
+                status=_PRE_SUBMIT_ORDER_STATUS,
+                now=now,
+                provider_snapshot_status="placing",
+                mapped_status="placing",
+            )
+            trader_order = build_trader_order_row(
+                trader_id=trader_id,
+                signal=signal,
+                decision_id=decision_id,
+                strategy_key=strategy_key,
+                strategy_version=strategy_version,
+                mode=mode,
+                status=_PRE_SUBMIT_ORDER_STATUS,
+                notional_usd=None,
+                effective_price=None,
+                reason=reason,
+                payload=placeholder_payload,
+                error_message=None,
+                market_id=order_seed["market_id"],
+                market_question=order_seed["market_question"],
+                direction=order_seed["direction"],
+                entry_price=order_seed["entry_price"],
+                created_at=now,
+            )
+            session_order = ExecutionSessionOrder(
+                id=_new_id(),
+                session_id=session_row.id,
+                leg_id=leg_row.id,
+                trader_order_id=trader_order.id,
+                provider_order_id=None,
+                provider_clob_order_id=None,
+                action="submit",
+                side=str(leg_payload.get("side") or "buy"),
+                price=order_seed["entry_price"],
+                size=float(requested_shares) if requested_shares is not None and requested_shares > 0.0 else None,
+                notional_usd=float(requested_notional) if requested_notional is not None and requested_notional > 0.0 else None,
+                status="placing",
+                reason=reason,
+                payload_json={"submission_intent": dict(submission_intent)},
+                error_message=None,
+                created_at=now,
+                updated_at=now,
+            )
+            trader_orders.append(trader_order)
+            execution_orders.append(session_order)
+            return trader_order, session_order
 
         async def _persist_execution_projection(
             *,
@@ -1013,6 +1264,22 @@ class ExecutionSessionEngine:
 
         for wave_index, wave in enumerate(waves):
             wave_with_notionals = [(leg, safe_float(leg.get("requested_notional_usd"), 0.0)) for leg in wave]
+            if mode == "live":
+                created_pre_submit_placeholders = False
+                for leg_payload, _leg_notional in wave_with_notionals:
+                    leg_id = str(leg_payload.get("leg_id") or "").strip()
+                    if not leg_id or leg_id in entry_submit_placeholders:
+                        continue
+                    placeholder_pair = _create_entry_submit_placeholder(
+                        leg_id=leg_id,
+                        leg_payload=dict(leg_payload),
+                    )
+                    if placeholder_pair is None:
+                        continue
+                    entry_submit_placeholders[leg_id] = placeholder_pair
+                    created_pre_submit_placeholders = True
+                if created_pre_submit_placeholders:
+                    await _commit_pre_submit_projection()
             async with release_conn(self.db):
                 wave_results = await submit_execution_wave(
                     mode=mode,
@@ -1254,7 +1521,8 @@ class ExecutionSessionEngine:
                 if live_market:
                     order_payload["live_market"] = live_market
                 order_payload["strategy_exit_config"] = exit_config
-                if normalized_status != "skipped":
+                placeholder_pair = entry_submit_placeholders.get(leg_id)
+                if normalized_status != "skipped" or placeholder_pair is not None:
                     order_write_inputs.append(
                         {
                             "leg_id": leg_id,
@@ -1272,6 +1540,8 @@ class ExecutionSessionEngine:
                             "actual_filled_shares": actual_filled_shares,
                             "actual_filled_notional_usd": actual_filled_notional,
                             "actual_fill_price": actual_fill_price,
+                            "existing_trader_order": placeholder_pair[0] if placeholder_pair is not None else None,
+                            "existing_execution_order": placeholder_pair[1] if placeholder_pair is not None else None,
                         }
                     )
 
@@ -1889,62 +2159,198 @@ class ExecutionSessionEngine:
             explicit_persisted_status = str(item.get("persisted_order_status") or "").strip().lower()
             if explicit_persisted_status:
                 persisted_order_status = explicit_persisted_status
-            trader_order = build_trader_order_row(
-                trader_id=trader_id,
-                signal=signal,
-                decision_id=decision_id,
-                strategy_key=strategy_key,
-                strategy_version=strategy_version,
-                mode=mode,
-                status=persisted_order_status,
-                notional_usd=actual_filled_notional,
-                effective_price=actual_fill_price,
-                reason=reason,
-                payload=order_payload,
-                error_message=result.error_message,
-                market_id=leg_market_id,
-                market_question=leg_market_question,
-                direction=leg_direction,
-                entry_price=leg_entry_price,
-            )
-            trader_orders.append(trader_order)
-            orders_written += 1
-            created_order_records.append(
-                {
-                    "order_id": trader_order.id,
-                    "market_id": str(trader_order.market_id or ""),
-                    "direction": str(trader_order.direction or ""),
-                    "source": str(getattr(signal, "source", "") or ""),
-                    "notional_usd": actual_filled_notional,
-                    "entry_price": safe_float(trader_order.entry_price, actual_fill_price),
-                    "token_id": str(leg_payload.get("token_id") or ""),
-                    "filled_shares": actual_filled_shares,
-                    "status": persisted_order_status,
-                    "payload": order_payload,
-                }
-            )
-
-            execution_orders.append(
-                ExecutionSessionOrder(
-                    id=_new_id(),
-                    session_id=session_row.id,
-                    leg_id=leg_row_id,
-                    trader_order_id=trader_order.id,
-                    provider_order_id=result.provider_order_id,
-                    provider_clob_order_id=result.provider_clob_order_id,
-                    action=str(item.get("session_order_action") or "submit"),
-                    side=str(leg_payload.get("side") or "buy"),
-                    price=actual_fill_price,
-                    size=actual_filled_shares if actual_filled_shares > 0.0 else None,
-                    notional_usd=actual_filled_notional if actual_filled_notional > 0.0 else None,
-                    status=normalized_status,
-                    reason=reason,
-                    payload_json=dict(result.payload or {}),
-                    error_message=result.error_message,
-                    created_at=utcnow(),
-                    updated_at=utcnow(),
+            persisted_at = utcnow()
+            existing_trader_order = item.get("existing_trader_order")
+            existing_execution_order = item.get("existing_execution_order")
+            if isinstance(existing_trader_order, TraderOrder) and isinstance(existing_execution_order, ExecutionSessionOrder):
+                persisted_payload = dict(existing_trader_order.payload_json or {})
+                persisted_payload.update(order_payload)
+                submission_intent = dict(persisted_payload.get("submission_intent") or {})
+                if submission_intent:
+                    if normalized_status in {"executed", "open", "submitted"}:
+                        submission_intent["state"] = "provider_acknowledged"
+                    elif normalized_status == "skipped":
+                        submission_intent["state"] = "submit_skipped"
+                    else:
+                        submission_intent["state"] = "submit_failed"
+                    submission_intent["last_submit_result_at"] = _iso_utc(persisted_at)
+                    submission_intent["submit_status"] = normalized_status or None
+                    if result.provider_order_id:
+                        submission_intent["provider_order_id"] = str(result.provider_order_id)
+                    if result.provider_clob_order_id:
+                        submission_intent["provider_clob_order_id"] = str(result.provider_clob_order_id)
+                    if actual_filled_shares > 0.0:
+                        submission_intent["filled_shares"] = float(actual_filled_shares)
+                    if actual_filled_notional > 0.0:
+                        submission_intent["filled_notional_usd"] = float(actual_filled_notional)
+                    if actual_fill_price is not None and actual_fill_price > 0.0:
+                        submission_intent["effective_price"] = float(actual_fill_price)
+                    if result.error_message:
+                        submission_intent["error_message"] = str(result.error_message)
+                    else:
+                        submission_intent.pop("error_message", None)
+                    persisted_payload["submission_intent"] = submission_intent
+                if result.provider_order_id:
+                    persisted_payload["provider_order_id"] = str(result.provider_order_id)
+                if result.provider_clob_order_id:
+                    persisted_payload["provider_clob_order_id"] = str(result.provider_clob_order_id)
+                execution_session_payload = dict(persisted_payload.get("execution_session") or {})
+                if result.provider_order_id:
+                    execution_session_payload["provider_order_id"] = str(result.provider_order_id)
+                if result.provider_clob_order_id:
+                    execution_session_payload["provider_clob_order_id"] = str(result.provider_clob_order_id)
+                if execution_session_payload:
+                    persisted_payload["execution_session"] = execution_session_payload
+                persisted_payload = _sync_order_runtime_payload(
+                    payload=persisted_payload,
+                    status=persisted_order_status,
+                    now=persisted_at,
+                    provider_snapshot_status=normalized_status or None,
+                    mapped_status=normalized_status or persisted_order_status,
                 )
-            )
+                existing_trader_order.status = persisted_order_status
+                existing_trader_order.notional_usd = (
+                    float(actual_filled_notional)
+                    if actual_filled_notional > 0.0
+                    else (0.0 if persisted_order_status in {"failed", "cancelled", "rejected", "error", "skipped"} else None)
+                )
+                if actual_fill_price is not None and actual_fill_price > 0.0:
+                    existing_trader_order.effective_price = float(actual_fill_price)
+                existing_trader_order.reason = reason
+                existing_trader_order.payload_json = persisted_payload
+                existing_trader_order.error_message = result.error_message
+                if leg_market_id:
+                    existing_trader_order.market_id = leg_market_id
+                if leg_market_question:
+                    existing_trader_order.market_question = leg_market_question
+                if leg_direction:
+                    existing_trader_order.direction = leg_direction
+                if leg_entry_price is not None and leg_entry_price > 0.0 and safe_float(existing_trader_order.entry_price, 0.0) <= 0.0:
+                    existing_trader_order.entry_price = float(leg_entry_price)
+                if actual_filled_notional > 0.0 and existing_trader_order.executed_at is None:
+                    existing_trader_order.executed_at = persisted_at
+                verification_fields = derive_trader_order_verification(
+                    mode=mode,
+                    status=persisted_order_status,
+                    reason=reason,
+                    payload=persisted_payload,
+                )
+                apply_trader_order_verification(
+                    existing_trader_order,
+                    verification_status=str(verification_fields.get("verification_status") or ""),
+                    verification_source=str(verification_fields.get("verification_source") or "").strip() or None,
+                    verification_reason=str(verification_fields.get("verification_reason") or "").strip() or None,
+                    provider_order_id=str(verification_fields.get("provider_order_id") or "").strip() or None,
+                    provider_clob_order_id=str(verification_fields.get("provider_clob_order_id") or "").strip() or None,
+                    execution_wallet_address=str(verification_fields.get("execution_wallet_address") or "").strip() or None,
+                    verification_tx_hash=str(verification_fields.get("verification_tx_hash") or "").strip() or None,
+                    verified_at=persisted_at,
+                    force=True,
+                )
+                existing_trader_order.updated_at = persisted_at
+                trader_order = existing_trader_order
+                if normalized_status != "skipped":
+                    orders_written += 1
+                    created_order_records.append(
+                        {
+                            "order_id": trader_order.id,
+                            "market_id": str(trader_order.market_id or ""),
+                            "direction": str(trader_order.direction or ""),
+                            "source": str(getattr(signal, "source", "") or ""),
+                            "notional_usd": actual_filled_notional,
+                            "entry_price": safe_float(trader_order.entry_price, actual_fill_price),
+                            "token_id": str(leg_payload.get("token_id") or ""),
+                            "filled_shares": actual_filled_shares,
+                            "status": persisted_order_status,
+                            "payload": persisted_payload,
+                        }
+                    )
+                execution_payload = dict(existing_execution_order.payload_json or {})
+                execution_payload.update(dict(result.payload or {}))
+                if submission_intent:
+                    execution_payload["submission_intent"] = dict(submission_intent)
+                existing_execution_order.provider_order_id = (
+                    str(result.provider_order_id or "").strip() or existing_execution_order.provider_order_id
+                )
+                existing_execution_order.provider_clob_order_id = (
+                    str(result.provider_clob_order_id or "").strip() or existing_execution_order.provider_clob_order_id
+                )
+                existing_execution_order.action = str(item.get("session_order_action") or existing_execution_order.action or "submit")
+                existing_execution_order.side = str(leg_payload.get("side") or existing_execution_order.side or "buy")
+                if actual_fill_price is not None and actual_fill_price > 0.0:
+                    existing_execution_order.price = float(actual_fill_price)
+                elif (
+                    leg_entry_price is not None
+                    and leg_entry_price > 0.0
+                    and safe_float(existing_execution_order.price, 0.0) <= 0.0
+                ):
+                    existing_execution_order.price = float(leg_entry_price)
+                existing_execution_order.size = float(actual_filled_shares) if actual_filled_shares > 0.0 else None
+                existing_execution_order.notional_usd = (
+                    float(actual_filled_notional) if actual_filled_notional > 0.0 else None
+                )
+                existing_execution_order.status = normalized_status
+                existing_execution_order.reason = reason
+                existing_execution_order.payload_json = execution_payload
+                existing_execution_order.error_message = result.error_message
+                existing_execution_order.updated_at = persisted_at
+            else:
+                trader_order = build_trader_order_row(
+                    trader_id=trader_id,
+                    signal=signal,
+                    decision_id=decision_id,
+                    strategy_key=strategy_key,
+                    strategy_version=strategy_version,
+                    mode=mode,
+                    status=persisted_order_status,
+                    notional_usd=actual_filled_notional,
+                    effective_price=actual_fill_price,
+                    reason=reason,
+                    payload=order_payload,
+                    error_message=result.error_message,
+                    market_id=leg_market_id,
+                    market_question=leg_market_question,
+                    direction=leg_direction,
+                    entry_price=leg_entry_price,
+                )
+                trader_orders.append(trader_order)
+                orders_written += 1
+                created_order_records.append(
+                    {
+                        "order_id": trader_order.id,
+                        "market_id": str(trader_order.market_id or ""),
+                        "direction": str(trader_order.direction or ""),
+                        "source": str(getattr(signal, "source", "") or ""),
+                        "notional_usd": actual_filled_notional,
+                        "entry_price": safe_float(trader_order.entry_price, actual_fill_price),
+                        "token_id": str(leg_payload.get("token_id") or ""),
+                        "filled_shares": actual_filled_shares,
+                        "status": persisted_order_status,
+                        "payload": order_payload,
+                    }
+                )
+
+                execution_orders.append(
+                    ExecutionSessionOrder(
+                        id=_new_id(),
+                        session_id=session_row.id,
+                        leg_id=leg_row_id,
+                        trader_order_id=trader_order.id,
+                        provider_order_id=result.provider_order_id,
+                        provider_clob_order_id=result.provider_clob_order_id,
+                        action=str(item.get("session_order_action") or "submit"),
+                        side=str(leg_payload.get("side") or "buy"),
+                        price=actual_fill_price,
+                        size=actual_filled_shares if actual_filled_shares > 0.0 else None,
+                        notional_usd=actual_filled_notional if actual_filled_notional > 0.0 else None,
+                        status=normalized_status,
+                        reason=reason,
+                        payload_json=dict(result.payload or {}),
+                        error_message=result.error_message,
+                        created_at=persisted_at,
+                        updated_at=persisted_at,
+                    )
+                )
 
         final_status = "completed"
         signal_status = "executed"

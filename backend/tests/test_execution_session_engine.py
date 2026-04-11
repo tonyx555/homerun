@@ -52,6 +52,7 @@ class _FailureProjectionDb:
         self.persisted_trader_order_ids: set[str] = set()
         self.persisted_rows_by_type: dict[str, list[object]] = {}
         self.flush_calls = 0
+        self.commit_calls = 0
 
     def add(self, row: object) -> None:
         self.pending.append(row)
@@ -60,7 +61,19 @@ class _FailureProjectionDb:
         self.flush_calls += 1
         for row in self.pending:
             row_type = row.__class__.__name__
-            self.persisted_rows_by_type.setdefault(row_type, []).append(row)
+            persisted_rows = self.persisted_rows_by_type.setdefault(row_type, [])
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if row_id:
+                replaced = False
+                for index, existing_row in enumerate(persisted_rows):
+                    if str(getattr(existing_row, "id", "") or "").strip() == row_id:
+                        persisted_rows[index] = row
+                        replaced = True
+                        break
+                if not replaced:
+                    persisted_rows.append(row)
+            else:
+                persisted_rows.append(row)
             if row_type == "ExecutionSession":
                 self.persisted_session_ids.add(str(getattr(row, "id", "") or ""))
             elif row_type == "ExecutionSessionLeg":
@@ -76,6 +89,9 @@ class _FailureProjectionDb:
             if trader_order_id:
                 assert trader_order_id in self.persisted_trader_order_ids
         self.pending.clear()
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
 
 
 def test_build_execution_session_rows_carries_market_roster_into_session_payload():
@@ -334,6 +350,117 @@ async def test_execute_signal_sets_hedging_timeout_payload(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_execute_signal_persists_live_submit_placeholder_before_provider_call(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "SINGLE_LEG", "plan_id": "plan-live-placeholder"}
+    legs = [
+        {
+            "leg_id": "leg-live-1",
+            "market_id": "market-live-1",
+            "market_question": "Will Example close above 50?",
+            "token_id": "token-live-1",
+            "side": "buy",
+            "outcome": "yes",
+            "requested_notional_usd": 10.0,
+            "requested_shares": 25.0,
+            "limit_price": 0.4,
+            "price_policy": "taker_limit",
+            "time_in_force": "IOC",
+            "post_only": False,
+        }
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", AsyncMock(return_value=None))
+
+    pre_submit_observed: dict[str, list[str]] = {}
+
+    async def _submit_wave(**kwargs):
+        trader_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+        execution_rows = db.persisted_rows_by_type.get("ExecutionSessionOrder") or []
+        pre_submit_observed["trader_statuses"] = [str(row.status or "") for row in trader_rows]
+        pre_submit_observed["submission_states"] = [
+            str(dict(getattr(row, "payload_json", {}) or {}).get("submission_intent", {}).get("state") or "")
+            for row in trader_rows
+        ]
+        pre_submit_observed["execution_statuses"] = [str(row.status or "") for row in execution_rows]
+        assert any(str(row.status or "") == "placing" for row in trader_rows)
+        assert any(str(row.status or "") == "placing" for row in execution_rows)
+        return [
+            _leg_result(
+                leg_id="leg-live-1",
+                status="executed",
+                notional_usd=10.0,
+                shares=25.0,
+                provider_order_id="provider-live-1",
+                provider_clob_order_id="clob-live-1",
+                effective_price=0.4,
+                payload={
+                    "provider": "test",
+                    "token_id": "token-live-1",
+                    "filled_size": 25.0,
+                    "average_fill_price": 0.4,
+                    "filled_notional_usd": 10.0,
+                },
+            )
+        ]
+
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", AsyncMock(side_effect=_submit_wave))
+
+    signal = SimpleNamespace(
+        id="signal-live-placeholder",
+        source="scanner",
+        trace_id="trace-live-placeholder",
+        strategy_type="tail_end_carry",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-live-1",
+        market_question="Will Example close above 50?",
+        direction="buy_yes",
+        entry_price=0.4,
+        edge_percent=4.0,
+        confidence=0.7,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-live-placeholder",
+        signal=signal,
+        decision_id="decision-live-placeholder",
+        strategy_key="tail_end_carry",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=10.0,
+        reason="Tail carry signal selected",
+    )
+
+    assert result.status == "completed"
+    assert db.commit_calls >= 1
+    assert pre_submit_observed["trader_statuses"] == ["placing"]
+    assert pre_submit_observed["submission_states"] == ["pre_submit_persisted"]
+    assert pre_submit_observed["execution_statuses"] == ["placing"]
+    trader_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    execution_rows = db.persisted_rows_by_type.get("ExecutionSessionOrder") or []
+    assert len({str(row.id or "") for row in trader_rows}) == 1
+    assert len({str(row.id or "") for row in execution_rows}) == 1
+    final_order = trader_rows[-1]
+    final_execution_order = execution_rows[-1]
+    assert str(final_order.status or "") == "open"
+    assert str(final_order.provider_clob_order_id or "") == "clob-live-1"
+    assert dict(final_order.payload_json or {}).get("submission_intent", {}).get("state") == "provider_acknowledged"
+    assert str(final_execution_order.status or "") == "executed"
+    assert str(final_execution_order.provider_clob_order_id or "") == "clob-live-1"
+
+
+@pytest.mark.asyncio
 async def test_execute_signal_does_not_preplace_take_profit_exit_from_runtime_defaults(monkeypatch):
     db = _FailureProjectionDb()
     engine = session_engine_module.ExecutionSessionEngine(db)
@@ -588,6 +715,7 @@ async def test_execute_signal_skips_position_cap_failures_without_order_writes(m
     )
     set_signal_status_mock = AsyncMock()
     monkeypatch.setattr(session_engine_module, "set_trade_signal_status", set_signal_status_mock)
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
     intent_runtime = SimpleNamespace(update_signal_status=AsyncMock())
     monkeypatch.setattr(intent_runtime_module, "get_intent_runtime", lambda: intent_runtime)
 
