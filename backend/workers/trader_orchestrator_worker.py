@@ -7278,44 +7278,20 @@ async def _run_trader_once_with_timeout(
             existing_process_signals = bool(_inflight_trader_cycle_process_signals.get(trader_id, False))
             should_preempt_existing = bool(process_signals and has_runtime_trigger and not existing_process_signals)
             if should_preempt_existing:
-                existing.cancel()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(existing),
-                        timeout=min(1.0, _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS),
-                    )
-                except asyncio.TimeoutError:
-                    _abandoned_trader_cycle_tasks.add(existing)
-                    existing.add_done_callback(_discard_abandoned_trader_cycle)
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                    logger.warning(
-                        "Preempted maintenance-only trader cycle after cancel-grace expiry trader=%s",
-                        trader_id,
-                    )
-                except asyncio.CancelledError:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                except Exception as exc:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                    logger.warning(
-                        "Maintenance-only trader cycle raised during runtime-trigger preemption trader=%s",
-                        trader_id=trader_id,
-                        exc_info=exc,
-                    )
-                else:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
-                if existing is None or existing.done():
-                    pass
-                else:
-                    _queue_pending_runtime_cycle(
-                        trader=trader,
-                        control=control,
-                        process_signals=process_signals,
-                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                        trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                        timeout_seconds=requested_timeout,
-                    )
-                    return 0, 0, 0
+                _queue_pending_runtime_cycle(
+                    trader=trader,
+                    control=control,
+                    process_signals=process_signals,
+                    trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                    trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                    timeout_seconds=requested_timeout,
+                )
+                logger.warning(
+                    "Queued runtime trigger; maintenance-only trader cycle still running trader=%s stuck=%.0fs",
+                    trader_id,
+                    stuck_seconds,
+                )
+                return 0, 0, 0
             else:
             # Rate-limit the "still finishing" warnings to once per minute per trader
                 now_mono = time.monotonic()
@@ -7433,21 +7409,14 @@ async def _run_trader_once_with_timeout(
                     process_signals=process_signals,
                     exc_info=exc,
                 )
-        else:
-            _abandoned_trader_cycle_tasks.add(task)
-            task.add_done_callback(_discard_abandoned_trader_cycle)
-            # Clear the inflight entry so the next cycle is not blocked
-            # indefinitely.  The abandoned task will finish eventually
-            # (its done-callback cleans up _abandoned_trader_cycle_tasks)
-            # but we must not let it prevent new cycles from starting.
-            _clear_inflight_trader_cycle_task(trader_id, task)
-            logger.warning(
-                "Trader cycle did not finish within %ss cancel-grace; abandoned and cleared inflight lock trader=%s process_signals=%s",
-                _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS,
-                trader_id,
-                process_signals,
-            )
-        raise asyncio.TimeoutError()
+            raise asyncio.TimeoutError()
+        logger.warning(
+            "Trader cycle did not finish within %ss cancel-grace; leaving inflight task running trader=%s process_signals=%s",
+            _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS,
+            trader_id,
+            process_signals,
+        )
+        return 0, 0, 0
     except asyncio.TimeoutError:
         logger.warning(
             "Trader cycle timed out for trader=%s process_signals=%s timeout=%.1fs",
@@ -8069,6 +8038,8 @@ async def run_worker_loop(
                 if all_trader_tasks:
                     results = await asyncio.gather(*all_trader_tasks, return_exceptions=True)
                     for idx, result in enumerate(results):
+                        if isinstance(result, asyncio.CancelledError):
+                            continue
                         if isinstance(result, BaseException):
                             spec = (crypto_trader_specs + non_crypto_trader_specs)[idx]
                             failed_trader_id = str(spec["trader"].get("id") or "")
