@@ -5257,13 +5257,13 @@ async def reconcile_live_positions(
             pending_provider_status = str(pending_exit.get("provider_status") or "").strip().lower()
             provider_close_verified = _pending_exit_has_verified_terminal_fill(pending_exit)
             wallet_flat_by_snapshot = wallet_position_observed and wallet_position_size <= _WALLET_SIZE_EPSILON
-            wallet_flat_by_trade = (
-                wallet_position_size <= _WALLET_SIZE_EPSILON
-                and wallet_trade_confirms_exit
-            )
             wallet_trade_confirms_exit = (
                 isinstance(latest_wallet_sell_trade, dict)
                 and _extract_wallet_trade_size(latest_wallet_sell_trade) > _WALLET_SIZE_EPSILON
+            )
+            wallet_flat_by_trade = (
+                wallet_position_size <= _WALLET_SIZE_EPSILON
+                and wallet_trade_confirms_exit
             )
             wallet_flat_override = (
                 (wallet_flat_by_snapshot or wallet_flat_by_trade)
