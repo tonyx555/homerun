@@ -55,6 +55,7 @@ CATEGORY_POLITICAL = "political"
 CATEGORY_OTHER = "other"
 
 _SPORTS_KEYWORDS = [
+    "exact score", "correct score",
     "vs.", "vs ", " fc ", "hotspur", "united", "rovers", "city fc", "atletico",
     "juventus", "barcelona", "bayern", "borussia", "schalke", "heracles",
     "almelo", "napoli", "lazio", "inter ", "milan", "fiorentina", "roma ",
@@ -173,18 +174,19 @@ class TailEndCarryStrategy(BaseStrategy):
 
     default_config = {
         "min_probability": 0.85,
-        "max_probability": 0.999,
-        "min_upside_percent": 5.0,
+        "max_probability": 0.905,
+        "min_upside_percent": 10.0,
         # Sports-specific entry overrides
         "sports_min_probability": 0.90,
         "sports_max_days_to_resolution": 0.25,
         "min_days_to_resolution": 0.0,
         "max_days_to_resolution": 1.0,
-        "min_liquidity": 1000.0,
+        "min_liquidity": 1500.0,
         "max_spread": 0.05,
         "min_repricing_buffer": 0.015,
         "repricing_weight": 0.45,
         "exclude_market_keywords": [
+            "exact score", "correct score",
             "lol:", "counter-strike",
             "tweets", "league of legends", "esports", "rift legends",
             "dota", "valorant", "cs2", "cs:", "esl pro",
@@ -983,6 +985,9 @@ class TailEndCarryStrategy(BaseStrategy):
         payload["_is_live_game"] = is_live
 
         blocked_keyword = str(strategy_context.get("blocked_keyword") or payload.get("blocked_keyword") or "").strip() or None
+        if blocked_keyword is None:
+            excluded_keywords = self._normalize_excluded_keywords(params.get("exclude_market_keywords"))
+            blocked_keyword = self._first_blocked_keyword(signal_text, excluded_keywords) if excluded_keywords else None
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
         observed_spread = max(
             0.0,

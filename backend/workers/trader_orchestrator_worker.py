@@ -698,12 +698,12 @@ _lane_snapshot_metrics: dict[str, dict[str, Any]] = {}
 _lane_snapshot_seeded = False
 
 # ── Per-market execution no-fill cooldown ─────────────────────────
-# After a FAK/IOC no-fill, cool down this specific market for a trader
-# so we don't hammer the same illiquid book 600+ times.  The market may
-# have liquidity later — this just spaces out retries.
+# After a failed/cancelled live entry, cool down this specific market for a
+# trader so we do not hammer the same bad venue state or illiquid book.
 _NOFILL_COOLDOWN_SECONDS = 300.0  # 5 minutes between retries
 _NOFILL_MAX_CONSECUTIVE = 3       # after 3 consecutive no-fills, extend cooldown
 _NOFILL_EXTENDED_COOLDOWN_SECONDS = 900.0  # 15 minutes after 3 fails
+_NOFILL_CANCELLED_COOLDOWN_SECONDS = 1800.0  # 30 minutes after venue-cancelled/expired entries
 _nofill_cooldowns: dict[tuple[str, str], float] = {}  # (trader_id, market_id) -> monotonic expiry
 _nofill_counts: dict[tuple[str, str], int] = {}        # consecutive no-fill count
 
@@ -6162,7 +6162,10 @@ async def _run_trader_once(
                     if _pre_gate_blocked and _nofill_blocked:
                         gate_result = {
                             "final_decision": "blocked",
-                            "final_reason": f"No-fill cooldown: market in {int(_nofill_expiry - _time_mod.monotonic())}s cooldown after FAK no-fill",
+                            "final_reason": (
+                                f"Failed-entry cooldown: market in "
+                                f"{int(_nofill_expiry - _time_mod.monotonic())}s cooldown after recent failed/cancelled entry"
+                            ),
                             "score": getattr(decision_obj, "score", None),
                             "size_usd": getattr(decision_obj, "size_usd", None),
                             "checks_payload": checks_payload,
@@ -6173,7 +6176,7 @@ async def _run_trader_once(
                                 {
                                     "gate": "nofill_cooldown",
                                     "passed": False,
-                                    "reason": "Market in no-fill cooldown",
+                                    "reason": "Market in failed-entry cooldown",
                                 }
                             ],
                         }
@@ -6768,23 +6771,29 @@ async def _run_trader_once(
                                     commit=False,
                                 )
 
-                            # Record per-market no-fill cooldown after execution
-                            # failure so we don't hammer the same illiquid book.
-                            # The signal stays pending — the market may have
-                            # liquidity after the cooldown expires.
+                            # Record per-market failed-entry cooldown after
+                            # execution failure so we don't hammer the same
+                            # market after venue cancels / no-fills.
                             if final_decision == "failed" and _pre_gate_market_id:
                                 _nf_key = (trader_id, _pre_gate_market_id)
                                 _nf_count = _nofill_counts.get(_nf_key, 0) + 1
                                 _nofill_counts[_nf_key] = _nf_count
-                                _cd = (
-                                    _NOFILL_EXTENDED_COOLDOWN_SECONDS
-                                    if _nf_count >= _NOFILL_MAX_CONSECUTIVE
-                                    else _NOFILL_COOLDOWN_SECONDS
-                                )
+                                if normalized_order_status in {"cancelled", "expired"}:
+                                    _cd = _NOFILL_CANCELLED_COOLDOWN_SECONDS
+                                else:
+                                    _cd = (
+                                        _NOFILL_EXTENDED_COOLDOWN_SECONDS
+                                        if _nf_count >= _NOFILL_MAX_CONSECUTIVE
+                                        else _NOFILL_COOLDOWN_SECONDS
+                                    )
                                 _nofill_cooldowns[_nf_key] = _time_mod.monotonic() + _cd
                                 logger.info(
-                                    "No-fill cooldown set for trader=%s market=%s count=%d cooldown=%ds",
-                                    trader_id, _pre_gate_market_id, _nf_count, int(_cd),
+                                    "Failed-entry cooldown set for trader=%s market=%s status=%s count=%d cooldown=%ds",
+                                    trader_id,
+                                    _pre_gate_market_id,
+                                    normalized_order_status,
+                                    _nf_count,
+                                    int(_cd),
                                 )
 
                             if normalized_order_status in {
