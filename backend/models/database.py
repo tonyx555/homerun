@@ -3067,6 +3067,12 @@ class TraderOrderVerificationEvent(Base):
     provider_clob_order_id = Column(String, nullable=True, index=True)
     execution_wallet_address = Column(String, nullable=True, index=True)
     tx_hash = Column(String, nullable=True, index=True)
+    token_id = Column(String, nullable=True, index=True)
+    side = Column(String, nullable=True)
+    price = Column(Float, nullable=True)
+    size = Column(Float, nullable=True)
+    trade_timestamp = Column(DateTime, nullable=True, index=True)
+    trade_id = Column(String, nullable=True, index=True)
     payload_json = Column(JSON, default=dict)
     created_at = Column(DateTime, default=_utcnow, nullable=False, index=True)
 

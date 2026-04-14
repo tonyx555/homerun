@@ -839,7 +839,8 @@ function App() {
       sort_by: sortBy,
       sort_dir: sortDir,
       limit: ITEMS_PER_PAGE,
-      offset: currentPage * ITEMS_PER_PAGE
+      offset: currentPage * ITEMS_PER_PAGE,
+      include_price_history: true,
     }),
     enabled: usesSharedScannerOpportunitiesQuery,
     refetchInterval: isConnected ? false : 10000,

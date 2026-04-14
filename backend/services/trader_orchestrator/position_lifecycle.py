@@ -3842,7 +3842,11 @@ async def reconcile_live_positions(
                             "price_source": "wallet_activity",
                             "close_trigger": close_trigger,
                             "realized_pnl": realized_pnl,
-                            "filled_size": entry_fill_size if entry_fill_size > 0.0 else _extract_wallet_activity_size(wallet_close_activity),
+                            "filled_size": (
+                                _extract_wallet_activity_size(wallet_close_activity)
+                                if _extract_wallet_activity_size(wallet_close_activity) > 0.0
+                                else entry_fill_size
+                            ),
                             "closed_at": _iso_utc(now),
                             "reason": reason,
                             "wallet_activity_type": activity_type,
@@ -3853,6 +3857,7 @@ async def reconcile_live_positions(
                             ),
                             "wallet_activity_transaction_hash": _extract_wallet_activity_tx_hash(wallet_close_activity) or None,
                             "wallet_activity_id": str(wallet_close_activity.get("id") or "").strip() or None,
+                            "wallet_activity_size": _extract_wallet_activity_size(wallet_close_activity),
                             "wallet_trade_id": (
                                 str(wallet_close_activity.get("tradeID") or wallet_close_activity.get("trade_id") or "").strip()
                                 or None
@@ -4116,6 +4121,7 @@ async def reconcile_live_positions(
                             "closed_at": _iso_utc(now),
                             "reason": reason,
                             "wallet_trade_id": str(latest_wallet_sell_trade.get("trade_id") or ""),
+                            "wallet_trade_size": close_qty,
                             "wallet_trade_timestamp": (
                                 _iso_utc(latest_wallet_sell_trade.get("timestamp"))
                                 if isinstance(latest_wallet_sell_trade.get("timestamp"), datetime)
@@ -5320,6 +5326,11 @@ async def reconcile_live_positions(
                                 str(latest_wallet_sell_trade.get("trade_id") or "")
                                 if isinstance(latest_wallet_sell_trade, dict)
                                 else ""
+                            ),
+                            "wallet_trade_size": (
+                                _extract_wallet_trade_size(latest_wallet_sell_trade)
+                                if isinstance(latest_wallet_sell_trade, dict)
+                                else None
                             ),
                             "wallet_trade_timestamp": (
                                 _iso_utc(latest_wallet_sell_trade.get("timestamp"))

@@ -3032,6 +3032,14 @@ async def recover_missing_live_trader_orders(
                     touched_session_ids.add(session_id)
             if payload_changed or status_changed or verification_changed or field_changed:
                 existing_row.updated_at = now
+                event_payload = dict(existing_row.payload_json or {})
+                event_payload.update(
+                    {
+                        "live_trading_order_id": live_order_id or None,
+                        "live_trading_status": str(live_row.status or ""),
+                        "adopted_status": str(existing_row.status or ""),
+                    }
+                )
                 append_trader_order_verification_event(
                     session,
                     trader_order_id=str(existing_row.id),
@@ -3043,11 +3051,7 @@ async def recover_missing_live_trader_orders(
                     provider_clob_order_id=existing_row.provider_clob_order_id,
                     execution_wallet_address=existing_row.execution_wallet_address,
                     tx_hash=existing_row.verification_tx_hash,
-                    payload_json={
-                        "live_trading_order_id": live_order_id or None,
-                        "live_trading_status": str(live_row.status or ""),
-                        "adopted_status": str(existing_row.status or ""),
-                    },
+                    payload_json=event_payload,
                     created_at=now,
                 )
                 adopted_existing_orders += 1
@@ -3166,6 +3170,14 @@ async def recover_missing_live_trader_orders(
             updated_at=live_row.updated_at or now,
         )
         session.add(recovered_row)
+        event_payload = dict(recovered_row.payload_json or {})
+        event_payload.update(
+            {
+                "market_question": market_question,
+                "candidate_signal_id": candidate.get("signal_id"),
+                "candidate_decision_id": candidate.get("decision_id"),
+            }
+        )
         append_trader_order_verification_event(
             session,
             trader_order_id=str(recovered_row.id),
@@ -3177,11 +3189,7 @@ async def recover_missing_live_trader_orders(
             provider_clob_order_id=recovered_row.provider_clob_order_id,
             execution_wallet_address=recovered_row.execution_wallet_address,
             tx_hash=recovered_row.verification_tx_hash,
-            payload_json={
-                "market_question": market_question,
-                "candidate_signal_id": candidate.get("signal_id"),
-                "candidate_decision_id": candidate.get("decision_id"),
-            },
+            payload_json=event_payload,
             created_at=now,
         )
         recovered_rows.append(recovered_row)
@@ -5352,6 +5360,8 @@ async def create_trader_order(
         created_at=now,
     )
     session.add(row)
+    event_payload = dict(row.payload_json or {})
+    event_payload.update({"status": str(row.status or ""), "mode": str(row.mode or "")})
     append_trader_order_verification_event(
         session,
         trader_order_id=str(row.id),
@@ -5363,7 +5373,7 @@ async def create_trader_order(
         provider_clob_order_id=row.provider_clob_order_id,
         execution_wallet_address=row.execution_wallet_address,
         tx_hash=row.verification_tx_hash,
-        payload_json={"status": str(row.status or ""), "mode": str(row.mode or "")},
+        payload_json=event_payload,
         created_at=now,
     )
     serialized_row = _serialize_order(row)
@@ -6723,6 +6733,15 @@ async def reconcile_live_provider_orders(
             or previous_verification_tx_hash != str(order.verification_tx_hash or "")
             or previous_execution_wallet != str(order.execution_wallet_address or "")
         ):
+            event_payload = dict(order.payload_json or {})
+            event_payload.update(
+                {
+                    "snapshot_status": snapshot_status,
+                    "mapped_status": mapped_status,
+                    "filled_size": filled_size,
+                    "filled_notional_usd": filled_notional_usd,
+                }
+            )
             append_trader_order_verification_event(
                 session,
                 trader_order_id=str(order.id),
@@ -6734,12 +6753,7 @@ async def reconcile_live_provider_orders(
                 provider_clob_order_id=order.provider_clob_order_id,
                 execution_wallet_address=order.execution_wallet_address,
                 tx_hash=order.verification_tx_hash,
-                payload_json={
-                    "snapshot_status": snapshot_status,
-                    "mapped_status": mapped_status,
-                    "filled_size": filled_size,
-                    "filled_notional_usd": filled_notional_usd,
-                },
+                payload_json=event_payload,
                 created_at=now,
             )
         if _is_active_order_status(str(order.mode or ""), order_status_to_persist):
@@ -7295,6 +7309,14 @@ async def adopt_live_wallet_position(
         updated_at=now,
     )
     session.add(order_row)
+    event_payload = dict(order_row.payload_json or {})
+    event_payload.update(
+        {
+            "token_id": resolved_token_id,
+            "market_id": market_id,
+            "size": float(size),
+        }
+    )
     append_trader_order_verification_event(
         session,
         trader_order_id=str(order_row.id),
@@ -7306,11 +7328,7 @@ async def adopt_live_wallet_position(
         provider_clob_order_id=order_row.provider_clob_order_id,
         execution_wallet_address=order_row.execution_wallet_address,
         tx_hash=order_row.verification_tx_hash,
-        payload_json={
-            "token_id": resolved_token_id,
-            "market_id": market_id,
-            "size": float(size),
-        },
+        payload_json=event_payload,
         created_at=now,
     )
     await _commit_with_retry(session)

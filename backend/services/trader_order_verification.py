@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -23,6 +23,31 @@ TRADER_ORDER_HIDDEN_VERIFICATION_STATUSES = {
     TRADER_ORDER_VERIFICATION_SUMMARY_ONLY,
     TRADER_ORDER_VERIFICATION_DISPUTED,
 }
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        if value is None:
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(value, tz=timezone.utc)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 def normalize_trader_order_verification_status(value: Any) -> str:
@@ -143,6 +168,54 @@ def extract_trader_order_verification_tx_hash(payload: dict[str, Any] | None) ->
         if text:
             return text
     return None
+
+
+def extract_trader_order_trade_fields(payload: dict[str, Any] | None) -> dict[str, Any]:
+    source = payload if isinstance(payload, dict) else {}
+    position_close = source.get("position_close")
+    position_close = position_close if isinstance(position_close, dict) else {}
+
+    token_id = str(source.get("token_id") or source.get("asset") or "").strip() or None
+
+    side = str(source.get("side") or "").strip().upper() or None
+    if position_close:
+        side = "SELL"
+
+    close_price = _safe_float(position_close.get("close_price"))
+    entry_price = _safe_float(source.get("effective_price")) or _safe_float(source.get("entry_price"))
+    price = close_price if close_price is not None else entry_price
+
+    size = _safe_float(position_close.get("wallet_activity_size"))
+    if size is None:
+        size = _safe_float(position_close.get("wallet_trade_size"))
+    if size is None:
+        size = _safe_float(position_close.get("filled_size"))
+    if size is None:
+        requested_size = _safe_float(source.get("requested_size"))
+        if requested_size is not None:
+            size = requested_size
+    if size is None:
+        notional = _safe_float(source.get("notional_usd"))
+        if notional is not None and price and price > 0:
+            size = notional / price
+
+    trade_timestamp = (
+        position_close.get("wallet_activity_timestamp")
+        or position_close.get("wallet_trade_timestamp")
+        or position_close.get("closed_at")
+    )
+    trade_id = (
+        str(position_close.get("wallet_trade_id") or position_close.get("wallet_activity_id") or "").strip() or None
+    )
+
+    return {
+        "token_id": token_id,
+        "side": side,
+        "price": price,
+        "size": size,
+        "trade_timestamp": trade_timestamp,
+        "trade_id": trade_id,
+    }
 
 
 def _derive_live_trader_order_lineage(
@@ -406,9 +479,23 @@ def append_trader_order_verification_event(
     provider_clob_order_id: str | None = None,
     execution_wallet_address: str | None = None,
     tx_hash: str | None = None,
+    token_id: str | None = None,
+    side: str | None = None,
+    price: float | None = None,
+    size: float | None = None,
+    trade_timestamp: datetime | None = None,
+    trade_id: str | None = None,
     payload_json: dict[str, Any] | None = None,
     created_at: datetime | None = None,
 ) -> TraderOrderVerificationEvent:
+    derived_trade = extract_trader_order_trade_fields(payload_json)
+    resolved_token_id = token_id or derived_trade.get("token_id")
+    resolved_side = side or derived_trade.get("side")
+    resolved_price = price if price is not None else derived_trade.get("price")
+    resolved_size = size if size is not None else derived_trade.get("size")
+    resolved_trade_timestamp = trade_timestamp or derived_trade.get("trade_timestamp")
+    resolved_trade_id = trade_id or derived_trade.get("trade_id")
+
     row = TraderOrderVerificationEvent(
         id=uuid4().hex,
         trader_order_id=trader_order_id,
@@ -420,6 +507,12 @@ def append_trader_order_verification_event(
         provider_clob_order_id=str(provider_clob_order_id or "").strip() or None,
         execution_wallet_address=str(execution_wallet_address or "").strip().lower() or None,
         tx_hash=str(tx_hash or "").strip() or None,
+        token_id=str(resolved_token_id or "").strip() or None,
+        side=str(resolved_side or "").strip() or None,
+        price=_safe_float(resolved_price),
+        size=_safe_float(resolved_size),
+        trade_timestamp=_parse_timestamp(resolved_trade_timestamp),
+        trade_id=str(resolved_trade_id or "").strip() or None,
         payload_json=dict(payload_json or {}),
         created_at=created_at or utcnow(),
     )

@@ -404,6 +404,8 @@ export const getOpportunities = async (params?: {
   exclude_strategy?: string
   limit?: number
   offset?: number
+  include_price_history?: boolean
+  block_for_history_backfill?: boolean
 }): Promise<OpportunitiesResponse> => {
   const response = await api.get('/opportunities', { params })
   const payload = unwrapApiData(response.data)

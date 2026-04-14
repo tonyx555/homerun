@@ -646,6 +646,14 @@ async def get_opportunities(
         "markets",
         description="Opportunity source: markets, traders, all",
     ),
+    include_price_history: bool = Query(
+        False,
+        description="Include per-market price history (for sparkline backfills).",
+    ),
+    block_for_history_backfill: bool = Query(
+        False,
+        description="Block briefly to backfill missing price history if needed.",
+    ),
 ):
     """Get current arbitrage opportunities (from DB snapshot)."""
     total = 0
@@ -713,8 +721,8 @@ async def get_opportunities(
             page_payloads,
             source=source,
             include_live_prices=False,
-            include_price_history=False,
-            block_for_history_backfill=False,
+            include_price_history=include_price_history,
+            block_for_history_backfill=block_for_history_backfill,
         )
     )[:limit]
 
