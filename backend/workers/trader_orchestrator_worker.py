@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from sqlalchemy import and_, func, select, text, update as sa_update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from config import settings
@@ -540,14 +541,24 @@ async def list_unconsumed_trade_signals(
     )
 
 
+def _json_safe_runtime_signal_value(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return to_iso(value)
+    if isinstance(value, dict):
+        return {
+            str(key): _json_safe_runtime_signal_value(nested_value)
+            for key, nested_value in value.items()
+        }
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_runtime_signal_value(item) for item in value]
+    return value
+
+
 async def _ensure_runtime_signal_persisted(session, signal: Any) -> None:
     signal_id = str(getattr(signal, "id", "") or "").strip()
     if not signal_id:
         return
-    row = await session.get(TradeSignal, signal_id)
-    if row is not None:
-        return
-    row = TradeSignal(
+    row_values = dict(
         id=signal_id,
         source=str(getattr(signal, "source", "") or "").strip(),
         source_item_id=str(getattr(signal, "source_item_id", "") or "").strip() or None,
@@ -561,8 +572,10 @@ async def _ensure_runtime_signal_persisted(session, signal: Any) -> None:
         confidence=safe_float(getattr(signal, "confidence", None), None),
         liquidity=safe_float(getattr(signal, "liquidity", None), None),
         expires_at=getattr(signal, "expires_at", None),
-        payload_json=dict(getattr(signal, "payload_json", None) or {}),
-        strategy_context_json=dict(getattr(signal, "strategy_context_json", None) or {}),
+        payload_json=_json_safe_runtime_signal_value(dict(getattr(signal, "payload_json", None) or {})),
+        strategy_context_json=_json_safe_runtime_signal_value(
+            dict(getattr(signal, "strategy_context_json", None) or {})
+        ),
         quality_passed=getattr(signal, "quality_passed", None),
         quality_rejection_reasons=None,
         dedupe_key=str(getattr(signal, "dedupe_key", "") or "").strip(),
@@ -571,8 +584,11 @@ async def _ensure_runtime_signal_persisted(session, signal: Any) -> None:
         created_at=utcnow(),
         updated_at=utcnow(),
     )
-    session.add(row)
-    await session.flush()
+    await session.execute(
+        pg_insert(TradeSignal)
+        .values(**row_values)
+        .on_conflict_do_nothing()
+    )
 
 
 async def get_open_position_count_for_trader(session, trader_id, mode=None, position_cap_scope=None):
@@ -1279,8 +1295,15 @@ def _session_dialect_name(session: Any) -> str:
         return ""
 
 
-async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwargs: Any) -> None:
+async def _write_orchestrator_snapshot_best_effort(
+    session: Any,
+    *,
+    lane: str = _LANE_GENERAL,
+    persist: bool = True,
+    **snapshot_kwargs: Any,
+) -> None:
     runtime_status.update_orchestrator(
+        lane=lane,
         running=snapshot_kwargs.get("running"),
         enabled=snapshot_kwargs.get("enabled"),
         current_activity=snapshot_kwargs.get("current_activity"),
@@ -1289,6 +1312,8 @@ async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwar
         last_error=snapshot_kwargs.get("last_error"),
         stats=dict(snapshot_kwargs.get("stats") or {}),
     )
+    if not persist:
+        return
     try:
         await write_orchestrator_snapshot(session, **snapshot_kwargs)
     except (OperationalError, DBAPIError, asyncpg.PostgresError, asyncio.TimeoutError, TimeoutError) as exc:
@@ -4137,8 +4162,18 @@ async def _run_trader_once(
             run_mode=run_mode,
             now=maintenance_now,
         )
+        pre_maintenance_open_order_count = 0
         if stream_trigger_mode and effective_process_signals:
             run_trader_maintenance = False
+        if run_trader_maintenance:
+            pre_maintenance_open_order_count = int(
+                await get_open_order_count_for_trader(
+                    session,
+                    trader_id,
+                    mode=run_mode,
+                )
+                or 0
+            )
 
         if run_trader_maintenance:
             if run_mode == "shadow":
@@ -4226,7 +4261,7 @@ async def _run_trader_once(
                     message=f"Expired {int(reconcile_result['expired'])} execution session(s)",
                     payload=reconcile_result,
                 )
-        if run_execution_maintenance:
+        if run_execution_maintenance and pre_maintenance_open_order_count > 0:
             try:
                 timeout_cleanup = await asyncio.wait_for(
                     _enforce_source_open_order_timeouts(
@@ -7839,18 +7874,19 @@ async def run_worker_loop(
                     logger.debug(
                         "Orchestrator cycle lock held by another worker instance; waiting to retry",
                     )
-                    if write_snapshot:
-                        try:
-                            async with AsyncSessionLocal() as _lock_session:
-                                await _write_orchestrator_snapshot_best_effort(
-                                    _lock_session,
-                                    running=False,
-                                    enabled=True,
-                                    current_activity="Waiting for orchestrator cycle lock",
-                                    interval_seconds=cycle_interval,
-                                )
-                        except Exception:
-                            pass
+                    try:
+                        async with AsyncSessionLocal() as _lock_session:
+                            await _write_orchestrator_snapshot_best_effort(
+                                _lock_session,
+                                lane=lane_key,
+                                persist=write_snapshot,
+                                running=False,
+                                enabled=True,
+                                current_activity="Waiting for orchestrator cycle lock",
+                                interval_seconds=cycle_interval,
+                            )
+                    except Exception:
+                        pass
                     await _worker_sleep(2)
                     continue
 
@@ -7914,15 +7950,16 @@ async def run_worker_loop(
                                 lane=lane_key,
                                 traders=traders,
                             )
-                            if write_snapshot:
-                                await _write_orchestrator_snapshot_best_effort(
-                                    session,
-                                    running=False,
-                                    enabled=False,
-                                    current_activity="Disabled",
-                                    interval_seconds=cycle_interval,
-                                    stats=disabled_stats,
-                                )
+                            await _write_orchestrator_snapshot_best_effort(
+                                session,
+                                lane=lane_key,
+                                persist=write_snapshot,
+                                running=False,
+                                enabled=False,
+                                current_activity="Disabled",
+                                interval_seconds=cycle_interval,
+                                stats=disabled_stats,
+                            )
                             skip_cycle = True
 
                     if not skip_cycle and bool(control.get("is_paused")):
@@ -7985,16 +8022,17 @@ async def run_worker_loop(
                                     lane=lane_key,
                                     traders=traders,
                                 )
-                                if write_snapshot:
-                                    await _write_orchestrator_snapshot_best_effort(
-                                        session,
-                                        running=False,
-                                        enabled=True,
-                                        current_activity="Blocked: live credentials missing",
-                                        interval_seconds=cycle_interval,
-                                        last_error=None,
-                                        stats=creds_stats,
-                                    )
+                                await _write_orchestrator_snapshot_best_effort(
+                                    session,
+                                    lane=lane_key,
+                                    persist=write_snapshot,
+                                    running=False,
+                                    enabled=True,
+                                    current_activity="Blocked: live credentials missing",
+                                    interval_seconds=cycle_interval,
+                                    last_error=None,
+                                    stats=creds_stats,
+                                )
                                 skip_cycle = True
                             else:
                                 needs_live_execution_init = True
@@ -8016,16 +8054,17 @@ async def run_worker_loop(
                             lane=lane_key,
                             traders=traders,
                         )
-                        if write_snapshot:
-                            await _write_orchestrator_snapshot_best_effort(
-                                session,
-                                running=False,
-                                enabled=True,
-                                current_activity="Blocked: live trading service failed to initialize",
-                                interval_seconds=cycle_interval,
-                                last_error=None,
-                                stats=init_stats,
-                            )
+                        await _write_orchestrator_snapshot_best_effort(
+                            session,
+                            lane=lane_key,
+                            persist=write_snapshot,
+                            running=False,
+                            enabled=True,
+                            current_activity="Blocked: live trading service failed to initialize",
+                            interval_seconds=cycle_interval,
+                            last_error=None,
+                            stats=init_stats,
+                        )
                     skip_cycle = True
 
                 if skip_cycle:
@@ -8049,31 +8088,25 @@ async def run_worker_loop(
                     else ""
                 ) or ("requested_run" if manual_force_cycle else "scheduled")
 
-                if write_snapshot:
-                    async with AsyncSessionLocal() as session:
-                        if manual_force_cycle:
-                            await update_orchestrator_control(session, requested_run_at=None)
-                        await _write_orchestrator_snapshot_best_effort(
-                            session,
-                            running=True,
-                            enabled=bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True)),
-                            current_activity=f"Starting cycle[{cycle_trigger_label}:{lane_key}]",
-                            interval_seconds=cycle_interval,
-                            last_error=None,
-                            stats=await _build_orchestrator_snapshot_metrics(
-                                session=session,
-                                lane=lane_key,
-                                traders=traders,
-                            ),
-                        )
-                else:
-                    # Update lane metrics so the writing lane can merge them
-                    async with AsyncSessionLocal() as session:
-                        await _build_orchestrator_snapshot_metrics(
-                            session=session,
-                            lane=lane_key,
-                            traders=traders,
-                        )
+                async with AsyncSessionLocal() as session:
+                    if manual_force_cycle:
+                        await update_orchestrator_control(session, requested_run_at=None)
+                    start_metrics = await _build_orchestrator_snapshot_metrics(
+                        session=session,
+                        lane=lane_key,
+                        traders=traders,
+                    )
+                    await _write_orchestrator_snapshot_best_effort(
+                        session,
+                        lane=lane_key,
+                        persist=write_snapshot,
+                        running=True,
+                        enabled=bool(control.get("is_enabled", False)) and not bool(control.get("is_paused", True)),
+                        current_activity=f"Starting cycle[{cycle_trigger_label}:{lane_key}]",
+                        interval_seconds=cycle_interval,
+                        last_error=None,
+                        stats=start_metrics,
+                    )
 
                 total_decisions = 0
                 total_orders = 0
@@ -8269,68 +8302,59 @@ async def run_worker_loop(
                         logger.warning("Hot state maintenance failed: %s", exc)
                     last_maintenance_at = utcnow()
 
-                if write_snapshot:
-                    async with AsyncSessionLocal() as session:
-                        if manual_force_cycle and not manage_only_cycle:
-                            await update_orchestrator_control(session, requested_run_at=None)
-                        metrics = await _build_orchestrator_snapshot_metrics(
-                            session=session,
-                            lane=lane_key,
-                            traders=traders,
-                            decisions_delta=total_decisions,
-                            orders_delta=total_orders,
-                        )
-                        metrics["decisions_last_cycle"] = total_decisions
-                        metrics["orders_last_cycle"] = total_orders
-                        metrics["signals_processed_last_cycle"] = total_processed_signals
-                        metrics["cycle_lane"] = lane_key
-                        metrics["cycle_trigger"] = cycle_trigger_label
-                        metrics["maintenance_run"] = bool(run_maintenance)
-                        metrics["maintenance_interval_seconds"] = float(maintenance_interval_seconds)
-                        _maybe_log_execution_latency_sla_breach(
-                            lane=lane_key,
-                            metrics=metrics,
-                        )
-                        open_orders = int(metrics.get("open_orders", 0) or 0)
+                async with AsyncSessionLocal() as session:
+                    if manual_force_cycle and not manage_only_cycle:
+                        await update_orchestrator_control(session, requested_run_at=None)
+                    metrics = await _build_orchestrator_snapshot_metrics(
+                        session=session,
+                        lane=lane_key,
+                        traders=traders,
+                        decisions_delta=total_decisions,
+                        orders_delta=total_orders,
+                    )
+                    metrics["decisions_last_cycle"] = total_decisions
+                    metrics["orders_last_cycle"] = total_orders
+                    metrics["signals_processed_last_cycle"] = total_processed_signals
+                    metrics["cycle_lane"] = lane_key
+                    metrics["cycle_trigger"] = cycle_trigger_label
+                    metrics["maintenance_run"] = bool(run_maintenance)
+                    metrics["maintenance_interval_seconds"] = float(maintenance_interval_seconds)
+                    _maybe_log_execution_latency_sla_breach(
+                        lane=lane_key,
+                        metrics=metrics,
+                    )
+                    open_orders = int(metrics.get("open_orders", 0) or 0)
+                    activity = (
+                        f"Cycle[{cycle_trigger_label}:{lane_key}] signals={total_processed_signals} "
+                        f"decisions={total_decisions} orders={total_orders}"
+                    )
+                    if manage_only_cycle:
+                        reasons = ",".join(manage_only_reasons) if manage_only_reasons else "gated"
                         activity = (
-                            f"Cycle[{cycle_trigger_label}:{lane_key}] signals={total_processed_signals} "
+                            f"Manage-only[{cycle_trigger_label}:{lane_key}] ({reasons}) signals={total_processed_signals} "
                             f"decisions={total_decisions} orders={total_orders}"
                         )
-                        if manage_only_cycle:
-                            reasons = ",".join(manage_only_reasons) if manage_only_reasons else "gated"
-                            activity = (
-                                f"Manage-only[{cycle_trigger_label}:{lane_key}] ({reasons}) signals={total_processed_signals} "
-                                f"decisions={total_decisions} orders={total_orders}"
-                            )
-                        elif (
-                            total_processed_signals == 0 and total_decisions == 0 and total_orders == 0 and open_orders > 0
-                        ):
-                            activity = (
-                                f"Cycle[{cycle_trigger_label}:{lane_key}] monitoring open orders={open_orders} (no new pending signals)"
-                            )
-                        elif high_frequency_crypto_active and total_processed_signals == 0:
-                            activity = (
-                                f"Cycle[{cycle_trigger_label}:{lane_key}] high-frequency crypto monitor active (no new pending signals)"
-                            )
-                        await _write_orchestrator_snapshot_best_effort(
-                            session,
-                            running=True,
-                            enabled=True,
-                            current_activity=activity,
-                            interval_seconds=cycle_interval,
-                            last_run_at=utcnow(),
-                            stats=metrics,
+                    elif (
+                        total_processed_signals == 0 and total_decisions == 0 and total_orders == 0 and open_orders > 0
+                    ):
+                        activity = (
+                            f"Cycle[{cycle_trigger_label}:{lane_key}] monitoring open orders={open_orders} (no new pending signals)"
                         )
-                else:
-                    # Update lane metrics so the writing lane can merge them
-                    async with AsyncSessionLocal() as session:
-                        await _build_orchestrator_snapshot_metrics(
-                            session=session,
-                            lane=lane_key,
-                            traders=traders,
-                            decisions_delta=total_decisions,
-                            orders_delta=total_orders,
+                    elif high_frequency_crypto_active and total_processed_signals == 0:
+                        activity = (
+                            f"Cycle[{cycle_trigger_label}:{lane_key}] high-frequency crypto monitor active (no new pending signals)"
                         )
+                    await _write_orchestrator_snapshot_best_effort(
+                        session,
+                        lane=lane_key,
+                        persist=write_snapshot,
+                        running=True,
+                        enabled=True,
+                        current_activity=activity,
+                        interval_seconds=cycle_interval,
+                        last_run_at=utcnow(),
+                        stats=metrics,
+                    )
 
                 # Cortex fleet commander — check if a cycle is due
                 if lane_key == _LANE_GENERAL and not skip_cycle:
@@ -8363,18 +8387,19 @@ async def run_worker_loop(
                             lane=lane_key,
                             traders=traders,
                         )
-                        if write_snapshot:
-                            await _write_orchestrator_snapshot_best_effort(
-                                session,
-                                running=False,
-                                enabled=bool(control.get("is_enabled", False)),
-                                current_activity="Worker error",
-                                interval_seconds=max(
-                                    1, int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS)
-                                ),
-                                last_error=str(exc),
-                                stats=error_stats,
-                            )
+                        await _write_orchestrator_snapshot_best_effort(
+                            session,
+                            lane=lane_key,
+                            persist=write_snapshot,
+                            running=False,
+                            enabled=bool(control.get("is_enabled", False)),
+                            current_activity="Worker error",
+                            interval_seconds=max(
+                                1, int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS)
+                            ),
+                            last_error=str(exc),
+                            stats=error_stats,
+                        )
                 except Exception as snapshot_exc:
                     logger.warning(
                         "Failed to persist orchestrator worker error state",

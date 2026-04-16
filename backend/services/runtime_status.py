@@ -27,18 +27,33 @@ class RuntimeStatus:
             "stats": {},
             "control": {},
         }
-        self._orchestrator: dict[str, Any] = {
-            "worker_name": "trader_orchestrator",
-            "running": False,
-            "enabled": False,
-            "current_activity": "Starting",
-            "interval_seconds": 5,
-            "last_run_at": None,
-            "lag_seconds": None,
-            "last_error": None,
-            "updated_at": None,
-            "stats": {},
-            "control": {},
+        self._orchestrators: dict[str, dict[str, Any]] = {
+            "general": {
+                "worker_name": "trader_orchestrator",
+                "running": False,
+                "enabled": False,
+                "current_activity": "Starting",
+                "interval_seconds": 5,
+                "last_run_at": None,
+                "lag_seconds": None,
+                "last_error": None,
+                "updated_at": None,
+                "stats": {},
+                "control": {},
+            },
+            "crypto": {
+                "worker_name": "trader_orchestrator_crypto",
+                "running": False,
+                "enabled": False,
+                "current_activity": "Starting",
+                "interval_seconds": 5,
+                "last_run_at": None,
+                "lag_seconds": None,
+                "last_error": None,
+                "updated_at": None,
+                "stats": {},
+                "control": {},
+            },
         }
 
     def update_crypto(
@@ -70,6 +85,7 @@ class RuntimeStatus:
     def update_orchestrator(
         self,
         *,
+        lane: str = "general",
         running: Any = _UNSET,
         enabled: Any = _UNSET,
         current_activity: Any = _UNSET,
@@ -80,8 +96,9 @@ class RuntimeStatus:
         stats: Any = _UNSET,
         control: Any = _UNSET,
     ) -> None:
+        lane_key = self._normalize_orchestrator_lane(lane)
         self._update(
-            self._orchestrator,
+            self._orchestrators[lane_key],
             running=running,
             enabled=enabled,
             current_activity=current_activity,
@@ -92,6 +109,10 @@ class RuntimeStatus:
             stats=stats,
             control=control,
         )
+
+    def _normalize_orchestrator_lane(self, lane: Any) -> str:
+        lane_key = str(lane or "general").strip().lower()
+        return lane_key if lane_key in self._orchestrators else "general"
 
     def _update(
         self,
@@ -130,11 +151,15 @@ class RuntimeStatus:
     def get_crypto(self) -> dict[str, Any]:
         return _clone(self._crypto)
 
-    def get_orchestrator(self) -> dict[str, Any]:
-        return _clone(self._orchestrator)
+    def get_orchestrator(self, lane: str = "general") -> dict[str, Any]:
+        return _clone(self._orchestrators[self._normalize_orchestrator_lane(lane)])
 
     def list_runtime_rows(self) -> list[dict[str, Any]]:
-        return [self.get_crypto(), self.get_orchestrator()]
+        return [
+            self.get_crypto(),
+            self.get_orchestrator("general"),
+            self.get_orchestrator("crypto"),
+        ]
 
 
 runtime_status = RuntimeStatus()

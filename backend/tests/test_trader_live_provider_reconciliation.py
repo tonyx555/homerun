@@ -815,6 +815,249 @@ async def test_recover_missing_live_trader_orders_adopts_pre_submit_placeholder_
 
 
 @pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_adopts_timed_out_pre_submit_placeholder_without_creating_recovered_row(
+    tmp_path,
+):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-adopt-timed-out-placeholder"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-timed-out-placeholder",
+                signal_id="signal-timed-out-placeholder",
+                market_id="market-timed-out-placeholder",
+                market_question="Will Timed-Out Placeholder Market settle YES?",
+                direction="buy_yes",
+                strategy_key="generic_strategy",
+            )
+            now = utcnow()
+            timeout_at = now + timedelta(seconds=45)
+            recovered_at = timeout_at + timedelta(seconds=4)
+            timeout_reason = "Live order submission did not persist provider acknowledgement within 45s."
+            submission_intent = {
+                "state": "submit_timeout",
+                "persisted_at": now.isoformat(),
+                "requested_notional_usd": 5.0,
+                "requested_shares": 10.0,
+                "time_in_force": "IOC",
+                "post_only": False,
+                "price_policy": "taker_limit",
+                "submit_status": "timed_out",
+                "error_message": timeout_reason,
+                "last_submit_result_at": timeout_at.isoformat(),
+            }
+            session.add_all(
+                [
+                    ExecutionSession(
+                        id="execution-session-timed-out-placeholder",
+                        trader_id=trader_id,
+                        signal_id="signal-timed-out-placeholder",
+                        decision_id="decision-timed-out-placeholder",
+                        source="scanner",
+                        strategy_key="generic_strategy",
+                        strategy_version=1,
+                        mode="live",
+                        status="failed",
+                        policy="SINGLE_LEG",
+                        plan_id="plan-timed-out-placeholder",
+                        market_ids_json=["market-timed-out-placeholder"],
+                        legs_total=1,
+                        legs_completed=0,
+                        legs_failed=1,
+                        legs_open=0,
+                        requested_notional_usd=5.0,
+                        executed_notional_usd=0.0,
+                        max_unhedged_notional_usd=0.0,
+                        unhedged_notional_usd=0.0,
+                        trace_id="trace-timed-out-placeholder",
+                        started_at=now,
+                        completed_at=timeout_at,
+                        error_message=timeout_reason,
+                        payload_json={},
+                        created_at=now,
+                        updated_at=timeout_at,
+                    ),
+                    ExecutionSessionLeg(
+                        id="execution-leg-timed-out-placeholder",
+                        session_id="execution-session-timed-out-placeholder",
+                        leg_index=0,
+                        leg_id="leg-timed-out-placeholder",
+                        market_id="market-timed-out-placeholder",
+                        market_question="Will Timed-Out Placeholder Market settle YES?",
+                        token_id="token-timed-out-placeholder",
+                        side="buy",
+                        outcome="yes",
+                        price_policy="taker_limit",
+                        time_in_force="IOC",
+                        post_only=False,
+                        target_price=0.5,
+                        requested_notional_usd=5.0,
+                        requested_shares=10.0,
+                        filled_notional_usd=0.0,
+                        filled_shares=0.0,
+                        status="failed",
+                        last_error=timeout_reason,
+                        metadata_json={},
+                        created_at=now,
+                        updated_at=timeout_at,
+                    ),
+                    TraderOrder(
+                        id="timed-out-placeholder-order",
+                        trader_id=trader_id,
+                        signal_id="signal-timed-out-placeholder",
+                        decision_id="decision-timed-out-placeholder",
+                        source="scanner",
+                        strategy_key="generic_strategy",
+                        market_id="market-timed-out-placeholder",
+                        market_question="Will Timed-Out Placeholder Market settle YES?",
+                        direction="buy_yes",
+                        mode="live",
+                        status="failed",
+                        notional_usd=0.0,
+                        entry_price=0.5,
+                        effective_price=None,
+                        reason="Signal selected",
+                        payload_json={
+                            "token_id": "token-timed-out-placeholder",
+                            "market_id": "market-timed-out-placeholder",
+                            "direction": "buy_yes",
+                            "submission_intent": dict(submission_intent),
+                            "execution_session": {
+                                "session_id": "execution-session-timed-out-placeholder",
+                                "leg_id": "execution-leg-timed-out-placeholder",
+                                "leg_ref": "leg-timed-out-placeholder",
+                                "policy": "SINGLE_LEG",
+                            },
+                            "session_cancel": {
+                                "session_id": "execution-session-timed-out-placeholder",
+                                "terminal_status": "failed",
+                                "reason": timeout_reason,
+                                "cancelled_at": timeout_at.isoformat(),
+                            },
+                        },
+                        created_at=now,
+                        updated_at=timeout_at,
+                        verification_status="local",
+                        error_message=timeout_reason,
+                    ),
+                    LiveTradingOrder(
+                        id="venue-order-timed-out-placeholder",
+                        wallet_address="0xwallet",
+                        market_id="market-timed-out-placeholder",
+                        clob_order_id="clob-timed-out-placeholder",
+                        token_id="token-timed-out-placeholder",
+                        side="BUY",
+                        price=0.5,
+                        size=10.0,
+                        order_type="IOC",
+                        status="filled",
+                        filled_size=10.0,
+                        average_fill_price=0.5,
+                        market_question="Will Timed-Out Placeholder Market settle YES?",
+                        created_at=recovered_at,
+                        updated_at=recovered_at,
+                    ),
+                    LiveTradingPosition(
+                        id="0xwallet:token-timed-out-placeholder",
+                        wallet_address="0xwallet",
+                        token_id="token-timed-out-placeholder",
+                        market_id="market-timed-out-placeholder",
+                        market_question="Will Timed-Out Placeholder Market settle YES?",
+                        outcome="Yes",
+                        size=10.0,
+                        average_cost=0.5,
+                        current_price=0.5,
+                        unrealized_pnl=0.0,
+                        redeemable=False,
+                        counts_as_open=True,
+                        end_date=None,
+                        created_at=recovered_at,
+                        updated_at=recovered_at,
+                    ),
+                ]
+            )
+            await session.flush()
+            session.add(
+                ExecutionSessionOrder(
+                    id="execution-order-timed-out-placeholder",
+                    session_id="execution-session-timed-out-placeholder",
+                    leg_id="execution-leg-timed-out-placeholder",
+                    trader_order_id="timed-out-placeholder-order",
+                    provider_order_id=None,
+                    provider_clob_order_id=None,
+                    action="submit",
+                    side="buy",
+                    price=0.5,
+                    size=10.0,
+                    notional_usd=5.0,
+                    status="placing",
+                    reason="Signal selected",
+                    payload_json={"submission_intent": dict(submission_intent)},
+                    error_message=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            trader_rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.created_at.asc(), TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert [row.id for row in trader_rows] == ["timed-out-placeholder-order"]
+            placeholder_order = trader_rows[0]
+            assert placeholder_order.status == "executed"
+            assert placeholder_order.error_message is None
+            assert placeholder_order.provider_clob_order_id == "clob-timed-out-placeholder"
+            assert placeholder_order.notional_usd == pytest.approx(5.0)
+            placeholder_payload = dict(placeholder_order.payload_json or {})
+            assert placeholder_payload["submission_intent"]["state"] == "recovered_from_live_authority"
+            assert placeholder_payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-timed-out-placeholder"
+
+            execution_order = await session.get(ExecutionSessionOrder, "execution-order-timed-out-placeholder")
+            assert execution_order is not None
+            assert execution_order.status == "executed"
+            assert execution_order.provider_clob_order_id == "clob-timed-out-placeholder"
+            assert dict(execution_order.payload_json or {})["submission_intent"]["state"] == "recovered_from_live_authority"
+
+            execution_leg = await session.get(ExecutionSessionLeg, "execution-leg-timed-out-placeholder")
+            assert execution_leg is not None
+            assert execution_leg.status == "completed"
+            assert execution_leg.filled_notional_usd == pytest.approx(5.0)
+            assert execution_leg.filled_shares == pytest.approx(10.0)
+            assert execution_leg.avg_fill_price == pytest.approx(0.5)
+            assert execution_leg.last_error is None
+
+            execution_session = await session.get(ExecutionSession, "execution-session-timed-out-placeholder")
+            assert execution_session is not None
+            assert execution_session.status == "completed"
+            assert execution_session.error_message is None
+            assert execution_session.legs_completed == 1
+            assert execution_session.legs_failed == 0
+            assert execution_session.legs_open == 0
+            assert execution_session.executed_notional_usd == pytest.approx(5.0)
+            assert execution_session.completed_at is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_recover_missing_live_trader_orders_collapses_duplicate_authority_rows(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-collapse-authority"

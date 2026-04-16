@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 import asyncpg
 import pytest
+from sqlalchemy.dialects import postgresql
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -105,6 +106,78 @@ def test_build_execution_latency_sample_uses_latest_emit_time_when_requeued():
     assert sample["emit_to_queue_wake_ms"] == 1000
     assert sample["ws_release_to_submit_start_ms"] == 4000
     assert sample["emit_to_submit_start_ms"] == 4000
+
+
+def test_json_safe_runtime_signal_value_serializes_nested_datetimes():
+    observed_at = datetime(2026, 4, 16, 3, 1, 51, tzinfo=timezone.utc)
+
+    payload = trader_orchestrator_worker._json_safe_runtime_signal_value(
+        {
+            "observed_at": observed_at,
+            "nested": {
+                "expires_at": observed_at + timedelta(minutes=5),
+            },
+            "history": [observed_at],
+        }
+    )
+
+    assert payload == {
+        "observed_at": "2026-04-16T03:01:51Z",
+        "nested": {
+            "expires_at": "2026-04-16T03:06:51Z",
+        },
+        "history": ["2026-04-16T03:01:51Z"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_ensure_runtime_signal_persisted_uses_on_conflict_do_nothing_for_runtime_duplicates():
+    statements: list[object] = []
+
+    class _Session:
+        async def execute(self, stmt):
+            statements.append(stmt)
+            return None
+
+    signal = SimpleNamespace(
+        id="signal-runtime-1",
+        source="scanner",
+        source_item_id="scanner-item-1",
+        signal_type="scanner_opportunity",
+        strategy_type="prob_surface_arb",
+        market_id="market-1",
+        market_question="Will this avoid duplicate runtime inserts?",
+        direction="buy_yes",
+        entry_price=0.42,
+        edge_percent=5.5,
+        confidence=0.77,
+        liquidity=1000.0,
+        expires_at=datetime(2026, 4, 16, 5, 15, tzinfo=timezone.utc),
+        payload_json={
+            "observed_at": datetime(2026, 4, 16, 3, 15, tzinfo=timezone.utc),
+            "history": [datetime(2026, 4, 16, 3, 16, tzinfo=timezone.utc)],
+        },
+        strategy_context_json={
+            "ingested_at": datetime(2026, 4, 16, 3, 17, tzinfo=timezone.utc),
+        },
+        quality_passed=True,
+        dedupe_key="dedupe-runtime-1",
+        runtime_sequence=123,
+        status="pending",
+    )
+
+    await trader_orchestrator_worker._ensure_runtime_signal_persisted(_Session(), signal)
+
+    assert len(statements) == 1
+    compiled = statements[0].compile(dialect=postgresql.dialect())
+    assert "ON CONFLICT DO NOTHING" in str(compiled)
+    assert compiled.params["payload_json"] == {
+        "observed_at": "2026-04-16T03:15:00Z",
+        "history": ["2026-04-16T03:16:00Z"],
+    }
+    assert compiled.params["strategy_context_json"] == {
+        "ingested_at": "2026-04-16T03:17:00Z",
+    }
 
 
 def test_maybe_log_execution_latency_sla_breach_does_not_repeat_same_signature(monkeypatch):

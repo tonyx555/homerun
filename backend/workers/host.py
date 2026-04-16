@@ -23,6 +23,7 @@ from services.live_execution_service import live_execution_service
 from services.market_cache import market_cache_service
 from services.market_runtime import get_market_runtime
 from services.position_monitor import position_monitor
+from services.runtime_status import runtime_status
 from services.trader_orchestrator_state import read_orchestrator_snapshot
 from services.traders_copy_trade_signal_service import traders_copy_trade_signal_service
 from services.worker_state import list_worker_snapshots
@@ -493,7 +494,10 @@ class WorkerHost:
                 )
                 await self._restart_worker_task(module_name, reason="stale_heartbeat")
 
-            orchestrator_runtime_snapshot = orchestrator_snapshot if isinstance(orchestrator_snapshot, dict) else None
+            orchestrator_runtime_snapshot = runtime_status.get_orchestrator("general")
+            crypto_runtime_snapshot = runtime_status.get_orchestrator("crypto")
+            if not isinstance(orchestrator_runtime_snapshot, dict) or not orchestrator_runtime_snapshot.get("updated_at"):
+                orchestrator_runtime_snapshot = orchestrator_snapshot if isinstance(orchestrator_snapshot, dict) else None
             for runtime_name, task in list(self._runtime_tasks.items()):
                 if task.done():
                     continue
@@ -501,15 +505,15 @@ class WorkerHost:
                     snapshot = orchestrator_runtime_snapshot
                     worker_name = "trader_orchestrator"
                 else:
-                    snapshot = snapshot_by_name.get("crypto")
-                    worker_name = "crypto"
+                    snapshot = crypto_runtime_snapshot
+                    worker_name = "trader_orchestrator_crypto"
                 if not snapshot:
                     continue
                 updated_at = _parse_iso_utc(snapshot.get("updated_at"))
                 if updated_at is None:
                     continue
                 interval_seconds = max(1, int(snapshot.get("interval_seconds") or 5))
-                stale_after_seconds = max(30, interval_seconds * 20) if worker_name == "crypto" else max(60, interval_seconds * 12)
+                stale_after_seconds = max(30, interval_seconds * 20) if worker_name == "trader_orchestrator_crypto" else max(60, interval_seconds * 12)
                 age_seconds = (now - updated_at).total_seconds()
                 if age_seconds <= stale_after_seconds:
                     continue

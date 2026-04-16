@@ -2662,12 +2662,19 @@ async def recover_missing_live_trader_orders(
             or ""
         ).strip()
         submission_intent = payload.get("submission_intent")
+        submission_intent_state = (
+            _normalize_status_key(submission_intent.get("state"))
+            if isinstance(submission_intent, dict)
+            else ""
+        )
         if (
             not authority_key
             and not provider_order_id
-            and row_status == "placing"
+            and (
+                (row_status == "placing" and submission_intent_state == "pre_submit_persisted")
+                or (row_status == "failed" and submission_intent_state == "submit_timeout")
+            )
             and isinstance(submission_intent, dict)
-            and _normalize_status_key(submission_intent.get("state")) == "pre_submit_persisted"
         ):
             token_key = _wallet_position_token_key(_extract_order_token_id(row))
             if token_key:
@@ -2833,7 +2840,10 @@ async def recover_missing_live_trader_orders(
                 submission_intent = placeholder_payload.get("submission_intent")
                 if not isinstance(submission_intent, dict):
                     continue
-                if _normalize_status_key(submission_intent.get("state")) != "pre_submit_persisted":
+                if _normalize_status_key(submission_intent.get("state")) not in {
+                    "pre_submit_persisted",
+                    "submit_timeout",
+                }:
                     continue
                 if _live_order_authority_key_from_row(placeholder_row):
                     continue
