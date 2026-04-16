@@ -544,6 +544,7 @@ class MarketRuntime:
         stats = self._build_crypto_stats(include_markets=False)
         persisted_stats = summarize_worker_stats(stats)
         persisted_stats["markets_count"] = len(self._crypto_markets)
+        persisted_stats["markets"] = self.get_crypto_markets()
         oracle_prices = stats.get("oracle_prices")
         if isinstance(oracle_prices, dict) and oracle_prices:
             persisted_stats["oracle_prices"] = copy.deepcopy(oracle_prices)

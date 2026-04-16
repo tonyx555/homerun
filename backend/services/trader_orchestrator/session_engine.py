@@ -47,6 +47,7 @@ from services.trader_orchestrator_state import (
     get_execution_session_detail,
     get_execution_session_leg_rollups,
     list_active_execution_sessions,
+    recover_missing_live_trader_orders,
     sync_trader_position_inventory,
     update_execution_leg,
     update_execution_session_status,
@@ -243,6 +244,13 @@ def _requires_full_bundle_execution(signal: Any, legs: list[dict[str, Any]]) -> 
     if len(legs) < 2:
         return False
     payload = _signal_payload(signal)
+    strategy_type = str(
+        payload.get("strategy_type")
+        or getattr(signal, "strategy_type", "")
+        or ""
+    ).strip().lower()
+    if strategy_type == "prob_surface_arb":
+        return True
     if not bool(payload.get("is_guaranteed")):
         return False
     selected_market_ids = _selected_market_ids(legs)
@@ -749,6 +757,8 @@ class ExecutionSessionEngine:
         signal_payload = getattr(signal, "payload_json", None)
         signal_payload = signal_payload if isinstance(signal_payload, dict) else {}
         _enforce_live_full_bundle_plan(signal=signal, plan=plan, legs=legs, constraints=constraints)
+        if isinstance(getattr(signal, "payload_json", None), dict):
+            signal.payload_json["execution_plan"] = plan
         session_timeout_seconds = safe_int(constraints.get("session_timeout_seconds"), 300)
         expires_at = utcnow() + timedelta(seconds=max(1, session_timeout_seconds))
         session_row, built_leg_rows = build_execution_session_rows(
@@ -2485,6 +2495,10 @@ class ExecutionSessionEngine:
             final_status = "failed"
             signal_status = "failed"
             error_message = "All execution legs failed."
+        elif failed_legs > 0 and requires_pair_lock(plan["policy"], constraints):
+            final_status = "failed"
+            signal_status = "failed"
+            error_message = "Full-bundle execution failed: not all legs completed."
         elif failed_legs > 0:
             final_status = "hedging"
             signal_status = "submitted"
@@ -2590,6 +2604,21 @@ class ExecutionSessionEngine:
                     baseline_ts = baseline_ts.astimezone(timezone.utc)
                 placing_age_seconds = max(0.0, (now - baseline_ts).total_seconds())
                 if placing_age_seconds >= _STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS:
+                    if mode == "live":
+                        await recover_missing_live_trader_orders(
+                            self.db,
+                            trader_ids=[str(row.trader_id or "").strip()],
+                            commit=False,
+                            broadcast=False,
+                        )
+                        refreshed_row = await self.db.get(type(row), row.id)
+                        refreshed_status = str(getattr(refreshed_row, "status", "") or "").strip().lower()
+                        if refreshed_row is not None and refreshed_status != "placing":
+                            if refreshed_status == "completed":
+                                completed += 1
+                            elif refreshed_status in {"cancelled", "failed", "expired", "skipped"}:
+                                cancelled += 1
+                            continue
                     timeout_reason = (
                         "Live order submission did not persist provider acknowledgement within "
                         f"{int(_STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS)}s."

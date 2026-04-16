@@ -24,6 +24,7 @@ from __future__ import annotations
 import re
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from models import Market, Event, Opportunity
@@ -48,6 +49,17 @@ _THRESHOLD_PATTERNS = [
 # means monotone increasing.
 _ABOVE_PATTERN = re.compile(r"\b(?:above|exceed|over|reach|at least|more than)\b", re.IGNORECASE)
 _BELOW_PATTERN = re.compile(r"\b(?:below|under|less than|at most)\b", re.IGNORECASE)
+
+
+def _market_days_to_resolution(market: Market) -> float | None:
+    end_date = market.end_date
+    if end_date is None:
+        return None
+    if end_date.tzinfo is None:
+        resolved_end_date = end_date.replace(tzinfo=timezone.utc)
+    else:
+        resolved_end_date = end_date.astimezone(timezone.utc)
+    return (resolved_end_date - datetime.now(timezone.utc)).total_seconds() / 86400.0
 
 
 def _parse_threshold(question: str) -> Optional[float]:
@@ -113,6 +125,7 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         "min_family_size": 3,
         "min_deviation_cents": 0.03,
         "min_liquidity": 500.0,
+        "max_days_to_resolution": 2.0,
         "max_opportunities": 20,
         "take_profit_pct": 12.0,
     }
@@ -213,6 +226,7 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         """
         min_family_size = int(cfg.get("min_family_size", 3))
         min_liquidity = float(cfg.get("min_liquidity", 500.0))
+        max_days_to_resolution = float(cfg.get("max_days_to_resolution", 2.0))
 
         # Map market_id -> event for fast lookup
         market_to_event: dict[str, Event] = {}
@@ -229,6 +243,9 @@ class ProbSurfaceArbStrategy(BaseStrategy):
             if len(market.outcome_prices) < 2:
                 continue
             if market.liquidity < min_liquidity:
+                continue
+            days_to_resolution = _market_days_to_resolution(market)
+            if days_to_resolution is None or days_to_resolution < 0.0 or days_to_resolution > max_days_to_resolution:
                 continue
 
             threshold = _parse_threshold(market.question or "")

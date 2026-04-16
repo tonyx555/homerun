@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import and_, or_, select, text
 
 from config import settings
-from models.database import AsyncSessionLocal, TradeSignal
+from models.database import AsyncSessionLocal, TradeSignal, TradeSignalEmission
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
 from services.runtime_signal_queue import publish_signal_batch
@@ -21,7 +21,6 @@ from services.signal_bus import (
     build_signal_contract_from_opportunity,
     expire_source_signals_except,
     make_dedupe_key,
-    set_trade_signal_status as project_trade_signal_status,
     upsert_trade_signal,
 )
 from services.strategy_loader import strategy_loader
@@ -59,6 +58,12 @@ _PAYLOAD_VOLATILE_KEYS = {
     "signal_emitted_at",
     "source_observed_at",
 }
+_NON_REACTIVATABLE_DEFERRED_REASONS_BY_SOURCE = {
+    "crypto": {
+        "strict_ws_pricing_live_context_unavailable",
+        "strict_ws_pricing_signal_release_stale",
+    },
+}
 
 
 def _strict_ws_ttl_seconds_for_source(source: Any) -> float:
@@ -71,6 +76,14 @@ def _strict_ws_ttl_seconds_for_source(source: Any) -> float:
     except Exception:
         scanner_max_age_ms = 30000.0
     return max(default_ttl, max(100.0, scanner_max_age_ms) / 1000.0)
+
+
+def _deferred_reason_is_nonreactivatable(snapshot: dict[str, Any]) -> bool:
+    source = str(snapshot.get("source") or "").strip().lower()
+    deferred_reason = str(snapshot.get("deferred_reason") or "").strip().lower()
+    if not source or not deferred_reason:
+        return False
+    return deferred_reason in _NON_REACTIVATABLE_DEFERRED_REASONS_BY_SOURCE.get(source, set())
 
 
 def _to_utc(dt: datetime | None) -> datetime | None:
@@ -1108,12 +1121,22 @@ class IntentRuntime:
         now = utcnow()
         published_by_source: dict[str, dict[str, dict[str, Any]]] = {}
         projection_snapshots: dict[str, dict[str, Any]] = {}
+        expired_snapshots: dict[str, dict[str, Any]] = {}
         async with self._lock:
             signal_ids = sorted(self._deferred_signal_ids_by_token.get(normalized_token, set()))
             for signal_id in signal_ids:
                 snapshot = self._signals_by_id.get(signal_id)
                 if snapshot is None:
                     self._clear_deferred_state_locked(signal_id)
+                    continue
+                if _deferred_reason_is_nonreactivatable(snapshot):
+                    self._clear_deferred_state_locked(signal_id)
+                    snapshot["status"] = "expired"
+                    snapshot["runtime_sequence"] = None
+                    snapshot["deferred_until_ws"] = False
+                    snapshot["deferred_reason"] = None
+                    snapshot["updated_at"] = _to_iso(now)
+                    expired_snapshots[signal_id] = copy.deepcopy(snapshot)
                     continue
                 if not self._snapshot_ready_for_runtime(snapshot):
                     continue
@@ -1170,6 +1193,17 @@ class IntentRuntime:
                 }
             )
             await self._publish_signal_stats()
+        if expired_snapshots:
+            await self._enqueue_projection(
+                {
+                    "kind": "upsert",
+                    "source": "__deferred__",
+                    "snapshots": expired_snapshots,
+                    "sweep_missing": False,
+                    "keep_dedupe_keys": [],
+                }
+            )
+            await self._publish_signal_stats()
 
     async def _run_deferred_timeout_loop(self) -> None:
         while True:
@@ -1186,6 +1220,7 @@ class IntentRuntime:
         now = utcnow()
         published_by_source: dict[str, dict[str, dict[str, Any]]] = {}
         projection_snapshots: dict[str, dict[str, Any]] = {}
+        expired_snapshots: dict[str, dict[str, Any]] = {}
         quote_gated_reasons = {
             "awaiting_post_arm_ws_tick",
             "prewarm_waiting_for_strict_ws_quote",
@@ -1213,6 +1248,15 @@ class IntentRuntime:
                 if age_seconds < required_age_seconds:
                     continue
                 deferred_reason = str(snapshot.get("deferred_reason") or "").strip().lower()
+                if _deferred_reason_is_nonreactivatable(snapshot):
+                    self._clear_deferred_state_locked(signal_id)
+                    snapshot["status"] = "expired"
+                    snapshot["runtime_sequence"] = None
+                    snapshot["deferred_until_ws"] = False
+                    snapshot["deferred_reason"] = None
+                    snapshot["updated_at"] = _to_iso(now)
+                    expired_snapshots[signal_id] = copy.deepcopy(snapshot)
+                    continue
                 if deferred_reason in quote_gated_reasons and not self._snapshot_ready_for_runtime(snapshot):
                     continue
                 self._clear_deferred_state_locked(signal_id)
@@ -1267,6 +1311,17 @@ class IntentRuntime:
                     "kind": "upsert",
                     "source": "__deferred__",
                     "snapshots": projection_snapshots,
+                    "sweep_missing": False,
+                    "keep_dedupe_keys": [],
+                }
+            )
+            await self._publish_signal_stats()
+        if expired_snapshots:
+            await self._enqueue_projection(
+                {
+                    "kind": "upsert",
+                    "source": "__deferred__",
+                    "snapshots": expired_snapshots,
                     "sweep_missing": False,
                     "keep_dedupe_keys": [],
                 }
@@ -2205,16 +2260,64 @@ class IntentRuntime:
                     await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
                 except Exception:
                     pass
-                changed_any = False
-                for item in chunk:
-                    changed = await project_trade_signal_status(
-                        session,
-                        str(item.get("signal_id") or ""),
-                        str(item.get("status") or ""),
-                        effective_price=item.get("effective_price"),
-                        commit=False,
+                signal_ids = [str(item.get("signal_id") or "").strip() for item in chunk if str(item.get("signal_id") or "").strip()]
+                if not signal_ids:
+                    continue
+                rows = (
+                    await session.execute(
+                        select(TradeSignal).where(TradeSignal.id.in_(signal_ids))
                     )
-                    changed_any = changed_any or bool(changed)
+                ).scalars().all()
+                rows_by_id = {
+                    str(row.id or "").strip(): row
+                    for row in rows
+                    if str(row.id or "").strip()
+                }
+                changed_any = False
+                changed_at = utcnow()
+                for item in chunk:
+                    signal_id = str(item.get("signal_id") or "").strip()
+                    if not signal_id:
+                        continue
+                    row = rows_by_id.get(signal_id)
+                    if row is None:
+                        continue
+                    normalized_status = str(item.get("status") or "").strip().lower()
+                    previous_status = str(row.status or "").strip().lower()
+                    effective_price = item.get("effective_price")
+                    if previous_status == normalized_status and (
+                        effective_price is None or row.effective_price == effective_price
+                    ):
+                        continue
+                    row.status = normalized_status
+                    row.updated_at = changed_at
+                    if effective_price is not None:
+                        row.effective_price = effective_price
+                    session.add(
+                        TradeSignalEmission(
+                            id=uuid.uuid4().hex,
+                            signal_id=row.id,
+                            source=str(row.source or ""),
+                            source_item_id=row.source_item_id,
+                            signal_type=str(row.signal_type or ""),
+                            strategy_type=row.strategy_type,
+                            market_id=str(row.market_id or ""),
+                            direction=row.direction,
+                            entry_price=row.entry_price,
+                            effective_price=row.effective_price,
+                            edge_percent=row.edge_percent,
+                            confidence=row.confidence,
+                            liquidity=row.liquidity,
+                            status=str(row.status or ""),
+                            dedupe_key=str(row.dedupe_key or ""),
+                            event_type="status_update",
+                            reason=f"status:{normalized_status}",
+                            payload_json=None,
+                            snapshot_json=None,
+                            created_at=changed_at,
+                        )
+                    )
+                    changed_any = True
                 if changed_any:
                     await session.commit()
 

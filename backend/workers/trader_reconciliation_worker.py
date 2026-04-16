@@ -122,6 +122,12 @@ def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
 async def _graceful_timeout(coro, *, timeout: float, label: str):
     existing = _inflight_timed_tasks.get(label)
     if existing is not None and not existing.done():
+        close = getattr(coro, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
         raise _TimedTaskStillRunningError(label)
 
     task = asyncio.create_task(coro, name=f"trader-reconciliation-{label}")
@@ -133,18 +139,8 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
         if done:
             return task.result()
 
-        task.cancel()
-        done_after, _ = await asyncio.wait({task}, timeout=_TIMEOUT_CANCEL_GRACE_SECONDS)
-        if done_after:
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-        else:
-            _abandoned_timed_tasks.add(task)
-            task.add_done_callback(_discard_abandoned_task)
+        _abandoned_timed_tasks.add(task)
+        task.add_done_callback(_discard_abandoned_task)
         raise asyncio.TimeoutError()
     except asyncio.CancelledError:
         if not task.done():
@@ -565,17 +561,20 @@ async def _run_reconciliation_cycle(
     now_mono = time.monotonic()
     if now_mono >= _recovery_next_attempt_at:
         try:
-            async with AsyncSessionLocal() as session:
-                await _graceful_timeout(
-                    recover_missing_live_trader_orders(
+            async def _authority_recovery() -> None:
+                async with AsyncSessionLocal() as session:
+                    await recover_missing_live_trader_orders(
                         session,
                         trader_ids=None,
                         commit=True,
                         broadcast=True,
-                    ),
-                    label="authority_recovery",
-                    timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
-                )
+                    )
+
+            await _graceful_timeout(
+                _authority_recovery(),
+                label="authority_recovery",
+                timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
+            )
             _recovery_next_attempt_at = time.monotonic() + _RECOVERY_SUCCESS_INTERVAL_SECONDS
         except _TimedTaskStillRunningError:
             _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS

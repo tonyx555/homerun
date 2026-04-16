@@ -38,10 +38,15 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
 _WALLET_CACHE_TTL_SECONDS = 15.0
-_WALLET_HISTORY_CACHE_TTL_SECONDS = 60.0
+_WALLET_HISTORY_CACHE_TTL_SECONDS = 180.0
 _WALLET_HISTORY_GRACE_SECONDS = 120.0
 _WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS = 4.0
-_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS = 12.0
+_WALLET_HISTORY_LOAD_TIMEOUT_SECONDS = 6.0
+_WALLET_HISTORY_MAX_CLOSED_POSITIONS = 300
+_WALLET_HISTORY_MAX_TRADES = 300
+_WALLET_HISTORY_TRADE_PAGE_SIZE = 200
+_WALLET_HISTORY_MAX_ACTIVITY_ITEMS = 500
+_WALLET_HISTORY_ACTIVITY_PAGE_SIZE = 200
 _wallet_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
 _wallet_positions_last_refresh_succeeded = False
 _wallet_closed_positions_cache: tuple[float, dict[str, dict[str, Any]]] = (0.0, {})
@@ -54,8 +59,8 @@ _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
 _LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 3.0
-_MARKET_INFO_LOAD_TIMEOUT_SECONDS = 4.0
-_ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 3.0
+_MARKET_INFO_LOAD_TIMEOUT_SECONDS = 2.5
+_ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 2.0
 _RECONCILE_TIMING_WARN_SECONDS = 20.0
 _TERMINAL_REOPEN_LOOKBACK_HOURS = 6.0
 _NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS = 24.0
@@ -1976,7 +1981,10 @@ async def _load_execution_wallet_closed_positions_by_token() -> dict[str, dict[s
         return {}
 
     try:
-        positions = await polymarket_client.get_closed_positions_paginated(wallet, max_positions=1000)
+        positions = await polymarket_client.get_closed_positions_paginated(
+            wallet,
+            max_positions=_WALLET_HISTORY_MAX_CLOSED_POSITIONS,
+        )
     except Exception:
         _wallet_closed_positions_last_refresh_succeeded = False
         return {}
@@ -2007,7 +2015,11 @@ async def _load_execution_wallet_recent_sell_trades_by_token() -> dict[str, dict
     if not wallet:
         return {}
     try:
-        trades = await polymarket_client.get_wallet_trades_paginated(wallet, max_trades=1500, page_size=500)
+        trades = await polymarket_client.get_wallet_trades_paginated(
+            wallet,
+            max_trades=_WALLET_HISTORY_MAX_TRADES,
+            page_size=_WALLET_HISTORY_TRADE_PAGE_SIZE,
+        )
     except Exception:
         return {}
     if not isinstance(trades, list):
@@ -2132,8 +2144,8 @@ async def _load_execution_wallet_recent_close_activity_by_token() -> dict[str, d
     try:
         activities = await polymarket_client.get_wallet_activity_paginated(
             wallet,
-            max_items=1500,
-            page_size=250,
+            max_items=_WALLET_HISTORY_MAX_ACTIVITY_ITEMS,
+            page_size=_WALLET_HISTORY_ACTIVITY_PAGE_SIZE,
             activity_types=("TRADE", "MERGE", "REDEEM", "CLAIM", "CONVERSION", "CONVERT"),
         )
     except Exception:
@@ -2252,7 +2264,7 @@ def _cached_order_snapshots_by_clob_ids(clob_order_ids: list[str]) -> dict[str, 
 # Module-level TTL cache for market metadata to avoid redundant REST API calls.
 # Each entry maps lookup_id -> (fetched_at_monotonic, market_info_dict).
 _market_info_cache: dict[str, tuple[float, Optional[dict[str, Any]]]] = {}
-_MARKET_INFO_CACHE_TTL_SECONDS = 60.0
+_MARKET_INFO_CACHE_TTL_SECONDS = 180.0
 _MARKET_INFO_NEAR_RESOLUTION_SECONDS = 300.0  # 5 minutes
 _MARKET_INFO_CACHE_MAX_SIZE = 2000
 _market_info_cache_last_eviction: float = 0.0
@@ -4926,18 +4938,6 @@ async def reconcile_live_positions(
             pending_close_trigger = str(pending_exit.get("close_trigger") or "").strip().lower()
             pending_exit_kind = str(pending_exit.get("kind") or "").strip().lower()
             last_error_text = str(pending_exit.get("last_error") or "")
-            allow_unbounded_retry = (
-                bool(token_id)
-                and wallet_position_size > _WALLET_SIZE_EPSILON
-                and pending_winning_idx is None
-                and wallet_settlement_price is None
-                and not _is_zero_balance_error(last_error_text)
-                and not _is_allowance_error(last_error_text)
-                and not _is_rate_limited_error(last_error_text)
-                and not _is_invalid_signature_error(last_error_text)
-            )
-            if allow_unbounded_retry and retry_count >= _FAILED_EXIT_MAX_RETRIES:
-                retry_count = _FAILED_EXIT_MAX_RETRIES - 1
             force_rapid_retry = _is_rapid_close_trigger(pending_close_trigger)
             if force_rapid_retry:
                 min_retry_seconds = max(0.5, safe_float(pending_exit.get("rapid_retry_seconds"), 1.0) or 1.0)

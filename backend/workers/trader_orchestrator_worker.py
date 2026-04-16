@@ -542,34 +542,47 @@ async def _ensure_runtime_signal_persisted(session, signal: Any) -> None:
     signal_id = str(getattr(signal, "id", "") or "").strip()
     if not signal_id:
         return
-    row = await _upsert_trade_signal(
-        session,
-        source=str(getattr(signal, "source", "") or "").strip(),
-        source_item_id=str(getattr(signal, "source_item_id", "") or "").strip() or None,
-        signal_type=str(getattr(signal, "signal_type", "") or "").strip(),
-        strategy_type=str(getattr(signal, "strategy_type", "") or "").strip() or None,
-        market_id=str(getattr(signal, "market_id", "") or "").strip(),
-        market_question=str(getattr(signal, "market_question", "") or "").strip() or None,
-        direction=str(getattr(signal, "direction", "") or "").strip() or None,
-        entry_price=safe_float(getattr(signal, "entry_price", None), None),
-        edge_percent=safe_float(getattr(signal, "edge_percent", None), None),
-        confidence=safe_float(getattr(signal, "confidence", None), None),
-        liquidity=safe_float(getattr(signal, "liquidity", None), None),
-        expires_at=getattr(signal, "expires_at", None),
-        payload_json=dict(getattr(signal, "payload_json", None) or {}),
-        strategy_context_json=dict(getattr(signal, "strategy_context_json", None) or {}),
-        quality_passed=getattr(signal, "quality_passed", None),
-        quality_rejection_reasons=None,
-        dedupe_key=str(getattr(signal, "dedupe_key", "") or "").strip(),
-        signal_id=signal_id,
-        runtime_sequence=getattr(signal, "runtime_sequence", None),
-        commit=False,
-    )
+    row = await session.get(TradeSignal, signal_id)
+    row_changed = False
+    if row is None:
+        row = TradeSignal(
+            id=signal_id,
+            source=str(getattr(signal, "source", "") or "").strip(),
+            source_item_id=str(getattr(signal, "source_item_id", "") or "").strip() or None,
+            signal_type=str(getattr(signal, "signal_type", "") or "").strip(),
+            strategy_type=str(getattr(signal, "strategy_type", "") or "").strip() or None,
+            market_id=str(getattr(signal, "market_id", "") or "").strip(),
+            market_question=str(getattr(signal, "market_question", "") or "").strip() or None,
+            direction=str(getattr(signal, "direction", "") or "").strip() or None,
+            entry_price=safe_float(getattr(signal, "entry_price", None), None),
+            edge_percent=safe_float(getattr(signal, "edge_percent", None), None),
+            confidence=safe_float(getattr(signal, "confidence", None), None),
+            liquidity=safe_float(getattr(signal, "liquidity", None), None),
+            expires_at=getattr(signal, "expires_at", None),
+            payload_json=dict(getattr(signal, "payload_json", None) or {}),
+            strategy_context_json=dict(getattr(signal, "strategy_context_json", None) or {}),
+            quality_passed=getattr(signal, "quality_passed", None),
+            quality_rejection_reasons=None,
+            dedupe_key=str(getattr(signal, "dedupe_key", "") or "").strip(),
+            runtime_sequence=safe_int(getattr(signal, "runtime_sequence", None), None),
+            status=str(getattr(signal, "status", "") or "").strip().lower() or "pending",
+            created_at=utcnow(),
+            updated_at=utcnow(),
+        )
+        session.add(row)
+        row_changed = True
     desired_status = str(getattr(signal, "status", "") or "").strip().lower()
     if desired_status and str(getattr(row, "status", "") or "").strip().lower() != desired_status:
         row.status = desired_status
         row.updated_at = utcnow()
-    await session.flush()
+        row_changed = True
+    desired_runtime_sequence = safe_int(getattr(signal, "runtime_sequence", None), None)
+    if desired_runtime_sequence is not None and desired_runtime_sequence != safe_int(getattr(row, "runtime_sequence", None), None):
+        row.runtime_sequence = desired_runtime_sequence
+        row.updated_at = utcnow()
+        row_changed = True
+    if row_changed:
+        await session.flush()
 
 
 async def get_open_position_count_for_trader(session, trader_id, mode=None, position_cap_scope=None):
@@ -581,7 +594,47 @@ async def get_open_order_count_for_trader(session, trader_id, mode=None):
 
 
 async def get_occupied_market_ids_for_trader(session, trader_id, mode=None):
-    return hot_state.get_occupied_market_ids(trader_id, mode or "live")
+    mode_key = str(mode or "live").strip().lower()
+    occupied_market_ids: set[str] = set(hot_state.get_occupied_market_ids(trader_id, mode_key))
+
+    position_query = (
+        select(TraderPosition.market_id)
+        .where(TraderPosition.trader_id == trader_id)
+        .where(func.lower(func.coalesce(TraderPosition.status, "")) == "open")
+    )
+    if mode_key:
+        position_query = position_query.where(func.lower(func.coalesce(TraderPosition.mode, "")) == mode_key)
+    position_rows = (await session.execute(position_query)).all()
+    for row in position_rows:
+        market_id = str(row.market_id or "").strip()
+        if market_id:
+            occupied_market_ids.add(market_id)
+
+    active_order_statuses = (
+        "pending",
+        "placing",
+        "submitted",
+        "open",
+        "working",
+        "partial",
+        "partially_filled",
+        "hedging",
+        "executed",
+    )
+    order_query = (
+        select(TraderOrder.market_id)
+        .where(TraderOrder.trader_id == trader_id)
+        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(active_order_statuses))
+    )
+    if mode_key:
+        order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
+    order_rows = (await session.execute(order_query)).all()
+    for row in order_rows:
+        market_id = str(row.market_id or "").strip()
+        if market_id:
+            occupied_market_ids.add(market_id)
+
+    return occupied_market_ids
 
 
 async def get_reentry_cooldown_market_ids_for_trader(session, trader_id, mode=None):
@@ -1248,7 +1301,6 @@ async def _write_orchestrator_snapshot_best_effort(session: Any, **snapshot_kwar
 
 async def submit_order(
     *,
-    session_engine: ExecutionSessionEngine,
     trader_id: str,
     signal: RuntimeTradeSignalView,
     decision_id: str,
@@ -1261,19 +1313,21 @@ async def submit_order(
     reason: str,
     explicit_strategy_params: dict[str, Any] | None = None,
 ):
-    return await session_engine.execute_signal(
-        trader_id=trader_id,
-        signal=signal,
-        decision_id=decision_id,
-        strategy_key=strategy_key,
-        strategy_version=strategy_version,
-        strategy_params=strategy_params,
-        explicit_strategy_params=explicit_strategy_params,
-        risk_limits=risk_limits,
-        mode=mode,
-        size_usd=size_usd,
-        reason=reason,
-    )
+    async with AsyncSessionLocal() as submit_session:
+        session_engine = ExecutionSessionEngine(submit_session)
+        return await session_engine.execute_signal(
+            trader_id=trader_id,
+            signal=signal,
+            decision_id=decision_id,
+            strategy_key=strategy_key,
+            strategy_version=strategy_version,
+            strategy_params=strategy_params,
+            explicit_strategy_params=explicit_strategy_params,
+            risk_limits=risk_limits,
+            mode=mode,
+            size_usd=size_usd,
+            reason=reason,
+        )
 
 
 def _execution_outcome_decision_check(
@@ -4903,6 +4957,10 @@ async def _run_trader_once(
                 prefiltered += 1
             if prefiltered > 0:
                 await _commit_with_retry(session)
+                try:
+                    await session.reset()
+                except Exception:
+                    pass
             if not scoped_signals:
                 if prefiltered_signals > 0 and decisions_written == 0 and orders_written == 0 and process_signals:
                     payload = {
@@ -5042,6 +5100,8 @@ async def _run_trader_once(
 
             deferred_signals = 0
             deferred_by_reason: dict[str, int] = {}
+            expired_signals = 0
+            expired_by_reason: dict[str, int] = {}
             defer_signal_processing = False
             for signal in signals:
                 signal_id = str(signal.id)
@@ -5122,16 +5182,19 @@ async def _run_trader_once(
                                 int((signal_wake_started_at - signal_emitted_at).total_seconds() * 1000),
                             )
                             if signal_release_age_ms > strict_release_age_budget_ms:
-                                await get_intent_runtime().defer_signal(
+                                await get_intent_runtime().update_signal_status(
                                     signal_id=signal_id,
-                                    required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
-                                    reason="strict_ws_pricing_signal_release_stale",
-                                    min_observed_at=signal_wake_started_at,
-                                    required_max_age_ms=strict_release_age_budget_ms,
+                                    status="expired",
                                 )
-                                deferred_signals += 1
-                                deferred_by_reason["strict_ws_pricing_signal_release_stale"] = (
-                                    deferred_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
+                                await set_trade_signal_status(
+                                    session,
+                                    signal_id=signal_id,
+                                    status="expired",
+                                    commit=False,
+                                )
+                                expired_signals += 1
+                                expired_by_reason["strict_ws_pricing_signal_release_stale"] = (
+                                    expired_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
                                 )
                                 defer_signal_processing = True
                                 continue
@@ -5357,17 +5420,33 @@ async def _run_trader_once(
                             )
                             live_reason_parts.append(f"max_age_ms={effective_max_age_ms}")
                             live_reason_parts.append(f"required_sources={effective_strict_sources}")
-                            await get_intent_runtime().defer_signal(
-                                signal_id=signal_id,
-                                required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
-                                reason="strict_ws_pricing_live_context_unavailable",
-                                min_observed_at=signal_wake_started_at,
-                                required_max_age_ms=effective_max_age_ms,
-                            )
-                            deferred_signals += 1
-                            deferred_by_reason["strict_ws_pricing_live_context_unavailable"] = (
-                                deferred_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
-                            )
+                            if signal_source == "crypto":
+                                await get_intent_runtime().update_signal_status(
+                                    signal_id=signal_id,
+                                    status="expired",
+                                )
+                                await set_trade_signal_status(
+                                    session,
+                                    signal_id=signal_id,
+                                    status="expired",
+                                    commit=False,
+                                )
+                                expired_signals += 1
+                                expired_by_reason["strict_ws_pricing_live_context_unavailable"] = (
+                                    expired_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
+                                )
+                            else:
+                                await get_intent_runtime().defer_signal(
+                                    signal_id=signal_id,
+                                    required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
+                                    reason="strict_ws_pricing_live_context_unavailable",
+                                    min_observed_at=signal_wake_started_at,
+                                    required_max_age_ms=effective_max_age_ms,
+                                )
+                                deferred_signals += 1
+                                deferred_by_reason["strict_ws_pricing_live_context_unavailable"] = (
+                                    deferred_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
+                                )
                             defer_signal_processing = True
                             continue
                     context_ready_at = utcnow()
@@ -6291,19 +6370,12 @@ async def _run_trader_once(
                         # spending real money.  The hot-state pre-gate is fast but
                         # can miss entries during reseed or after wallet_absent_close.
                         if _pre_gate_market_id and not allow_averaging and run_mode == "live":
-                            _db_stacking_exists = (
-                                await session.execute(
-                                    select(func.count()).select_from(TraderOrder).where(
-                                        TraderOrder.trader_id == trader_id,
-                                        TraderOrder.market_id == _pre_gate_market_id,
-                                        TraderOrder.mode == "live",
-                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
-                                            ("submitted", "executed", "open")
-                                        ),
-                                    )
-                                )
-                            ).scalar_one()
-                            if _db_stacking_exists > 0:
+                            _db_occupied_market_ids = await get_occupied_market_ids_for_trader(
+                                session,
+                                trader_id,
+                                mode=run_mode,
+                            )
+                            if _pre_gate_market_id in _db_occupied_market_ids:
                                 final_decision = "blocked"
                                 final_reason = "Stacking guard: market already occupied (DB verification)"
                                 checks_payload = list(checks_payload)
@@ -6316,7 +6388,7 @@ async def _run_trader_once(
                                         "detail": "Market already occupied by an open live order in DB verification.",
                                         "payload": {
                                             "market_id": _pre_gate_market_id,
-                                            "existing_live_orders": int(_db_stacking_exists),
+                                            "occupied_market_ids": sorted(_db_occupied_market_ids),
                                             "allow_averaging": False,
                                         },
                                     }
@@ -6329,14 +6401,16 @@ async def _run_trader_once(
                                         "reason": "Market already occupied (DB verification)",
                                         "payload": {
                                             "market_id": _pre_gate_market_id,
-                                            "existing_live_orders": int(_db_stacking_exists),
+                                            "occupied_market_ids": sorted(_db_occupied_market_ids),
                                         },
                                     }
                                 )
                                 logger.warning(
-                                    "DB stacking guard blocked order that passed hot-state check "
-                                    "trader=%s market=%s existing_orders=%d",
-                                    trader_id, _pre_gate_market_id, _db_stacking_exists,
+                                    "DB stacking guard blocked order that passed pre-gates "
+                                    "trader=%s market=%s occupied_markets=%d",
+                                    trader_id,
+                                    _pre_gate_market_id,
+                                    len(_db_occupied_market_ids),
                                 )
 
                     execution_plan_override = strategy_payload.get("execution_plan_override")
@@ -6531,22 +6605,24 @@ async def _run_trader_once(
                             cursor_signal_id = signal_id
                             cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
                         await _commit_with_retry(session)
+                        try:
+                            await session.reset()
+                        except Exception:
+                            pass
                         submit_started_at = utcnow()
-                        async with release_conn(session):
-                            submit_result = await submit_order(
-                                session_engine=session_engine,
-                                trader_id=trader_id,
-                                signal=runtime_signal,
-                                decision_id=decision_row.id,
-                                strategy_key=resolved_strategy_key,
-                                strategy_version=resolved_strategy_version,
-                                strategy_params=strategy_params,
-                                explicit_strategy_params=explicit_strategy_params,
-                                risk_limits=effective_risk_limits,
-                                mode=str(control.get("mode", "shadow")),
-                                size_usd=size_usd,
-                                reason=final_reason,
-                            )
+                        submit_result = await submit_order(
+                            trader_id=trader_id,
+                            signal=runtime_signal,
+                            decision_id=decision_row.id,
+                            strategy_key=resolved_strategy_key,
+                            strategy_version=resolved_strategy_version,
+                            strategy_params=strategy_params,
+                            explicit_strategy_params=explicit_strategy_params,
+                            risk_limits=effective_risk_limits,
+                            mode=str(control.get("mode", "shadow")),
+                            size_usd=size_usd,
+                            reason=final_reason,
+                        )
                         submit_completed_at = utcnow()
                         submit_latency_payload = _compute_signal_latency_payload(
                             runtime_signal,
@@ -6917,6 +6993,10 @@ async def _run_trader_once(
                         commit=False,
                     )
                     await _commit_with_retry(session)
+                    try:
+                        await session.reset()
+                    except Exception:
+                        pass
                     cursor_created_at = _signal_cursor_timestamp(signal)
                     cursor_signal_id = signal_id
                     cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
@@ -7035,6 +7115,10 @@ async def _run_trader_once(
                             commit=False,
                         )
                         await _commit_with_retry(session)
+                        try:
+                            await session.reset()
+                        except Exception:
+                            pass
                     except Exception as recovery_exc:
                         logger.warning(
                             "Trader %s failed to record error decision for signal %s: %s",
@@ -7063,6 +7147,19 @@ async def _run_trader_once(
                                 "orders_written": orders_written,
                                 "deferred_signals": deferred_signals,
                                 "deferred_by_reason": deferred_by_reason,
+                            },
+                        )
+                    elif expired_signals > 0:
+                        await _emit_cycle_heartbeat_if_due(
+                            session,
+                            trader_id=trader_id,
+                            message="Idle cycle: stale crypto signals expired before evaluation.",
+                            payload={
+                                "processed_signals": processed_signals,
+                                "decisions_written": decisions_written,
+                                "orders_written": orders_written,
+                                "expired_signals": expired_signals,
+                                "expired_by_reason": expired_by_reason,
                             },
                         )
                     elif prefiltered_signals > 0:

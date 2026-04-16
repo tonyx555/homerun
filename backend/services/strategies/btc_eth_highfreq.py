@@ -215,13 +215,13 @@ CRYPTO_HF_SCOPE_DEFAULTS: dict[str, Any] = {
     "max_spread_pct": 0.08,
     "max_signal_age_seconds": 35.0,
     "max_open_order_seconds": 45.0,
-    "max_signal_age_seconds_5m": 8.0,
-    "max_signal_age_seconds_15m": 12.0,
+    "max_signal_age_seconds_5m": 10.0,
+    "max_signal_age_seconds_15m": 16.0,
     "max_signal_age_seconds_1h": 20.0,
     "max_signal_age_seconds_4h": 30.0,
     "max_market_data_age_ms": 8000,
-    "max_market_data_age_ms_5m": 8000,
-    "max_market_data_age_ms_15m": 10000,
+    "max_market_data_age_ms_5m": 2500,
+    "max_market_data_age_ms_15m": 4000,
     "max_market_data_age_ms_1h": 12000,
     "max_market_data_age_ms_4h": 15000,
     "enforce_market_data_freshness": True,
@@ -4074,9 +4074,23 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                     if candidate_mode in enabled_active_modes:
                         active_mode = candidate_mode
                         break
-            if active_mode == "auto" or active_mode not in enabled_active_modes:
-                active_mode = "directional"
+        if active_mode == "auto" or active_mode not in enabled_active_modes:
+            active_mode = "directional"
         mode_allowlist_ok = active_mode in enabled_active_modes
+
+        trader_context = context.get("trader")
+        risk_limits_context = (
+            trader_context.get("risk_limits")
+            if isinstance(trader_context, dict) and isinstance(trader_context.get("risk_limits"), dict)
+            else {}
+        )
+        max_trade_notional_hint = self._float(risk_limits_context.get("max_trade_notional_usd"))
+        size_cap_for_gates: Optional[float] = None
+        if max_trade_notional_hint is not None and max_trade_notional_hint > 0.0:
+            size_cap_for_gates = max_trade_notional_hint
+        elif max_size > 0.0:
+            size_cap_for_gates = max_size
+        low_notional_live_mode = size_cap_for_gates is not None and size_cap_for_gates <= 5.0
 
         # --- Source / origin checks ---
         source_ok = str(getattr(signal, "source", "")) == "crypto"
@@ -4117,10 +4131,15 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             signal_is_current = signal_is_live
         live_window_ok = (not live_window_required) or bool(signal_is_live and signal_is_current)
 
-        max_live_context_age_seconds = max(
-            0.1,
-            to_float(params.get("max_live_context_age_seconds", 3.0), 3.0),
-        )
+        max_live_context_age_seconds = max(0.1, to_float(params.get("max_live_context_age_seconds", 3.0), 3.0))
+        if low_notional_live_mode:
+            live_context_floor_by_timeframe = {
+                "5m": 3.0,
+                "15m": 5.0,
+            }
+            live_context_floor = live_context_floor_by_timeframe.get(signal_timeframe)
+            if live_context_floor is not None:
+                max_live_context_age_seconds = max(max_live_context_age_seconds, live_context_floor)
         live_context_fetched_at = parse_datetime_utc(
             _first_present(
                 live_market.get("fetched_at"),
@@ -4168,6 +4187,14 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if max_signal_age_seconds_cfg is None:
             max_signal_age_seconds_cfg = to_float(params.get("max_signal_age_seconds", 20.0), 20.0)
         max_signal_age_seconds = max(0.1, float(max_signal_age_seconds_cfg))
+        if low_notional_live_mode:
+            signal_age_floor_by_timeframe = {
+                "5m": 10.0,
+                "15m": 16.0,
+            }
+            signal_age_floor = signal_age_floor_by_timeframe.get(signal_timeframe)
+            if signal_age_floor is not None:
+                max_signal_age_seconds = max(max_signal_age_seconds, signal_age_floor)
         signal_fresh_ok = signal_age_seconds is None or signal_age_seconds <= max_signal_age_seconds
 
         market_data_age_ms = self._float(
@@ -4199,6 +4226,14 @@ class BtcEthHighFreqStrategy(BaseStrategy):
         if max_market_data_age_ms_cfg is None:
             max_market_data_age_ms_cfg = to_float(params.get("max_market_data_age_ms", 900.0), 900.0)
         max_market_data_age_ms = max(50.0, float(max_market_data_age_ms_cfg))
+        if low_notional_live_mode:
+            market_data_floor_by_timeframe = {
+                "5m": 2500.0,
+                "15m": 4000.0,
+            }
+            market_data_floor = market_data_floor_by_timeframe.get(signal_timeframe)
+            if market_data_floor is not None:
+                max_market_data_age_ms = max(max_market_data_age_ms, market_data_floor)
         require_market_data_age_for_sources = {
             str(item or "").strip().lower()
             for item in _as_list(_first_present(params.get("require_market_data_age_for_sources"), ["crypto"]))
@@ -4299,6 +4334,11 @@ class BtcEthHighFreqStrategy(BaseStrategy):
                 min_liquidity_opening = self._float(params.get("min_liquidity_usd_opening"))
             if min_liquidity_opening is not None:
                 min_liquidity_usd = max(min_liquidity_usd, max(0.0, float(min_liquidity_opening)))
+        if low_notional_live_mode and size_cap_for_gates is not None:
+            liquidity_cap_floor = max(150.0, size_cap_for_gates * 125.0)
+            if regime == "opening":
+                liquidity_cap_floor = max(liquidity_cap_floor, 250.0)
+            min_liquidity_usd = min(min_liquidity_usd, liquidity_cap_floor)
         liquidity_ok = signal_liquidity_usd is None or signal_liquidity_usd >= min_liquidity_usd
         liquidity_detail = (
             f"liquidity={signal_liquidity_usd:.0f} min={min_liquidity_usd:.0f}"
@@ -4770,6 +4810,24 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             * _REGIME_CONF_FACTORS.get(regime, 1.0)
             * oracle_threshold_conf_multiplier
         )
+        if size_cap_for_gates is not None and size_cap_for_gates < 10.0:
+            notional_threshold_scale = clamp(0.55 + (0.045 * size_cap_for_gates), 0.55, 1.0)
+            notional_conf_scale = clamp(0.78 + (0.022 * size_cap_for_gates), 0.78, 1.0)
+            required_edge *= notional_threshold_scale
+            required_conf *= notional_conf_scale
+        min_oracle_move_pct_cfg = self._float(_timeframe_override(params, "min_oracle_move_pct", signal_timeframe))
+        if min_oracle_move_pct_cfg is None:
+            min_oracle_move_pct_cfg = self._float(params.get("min_oracle_move_pct"))
+        min_oracle_move_pct_effective = (
+            max(0.05, float(min_oracle_move_pct_cfg))
+            if min_oracle_move_pct_cfg is not None
+            else 0.15
+        )
+        if low_notional_live_mode and size_cap_for_gates is not None:
+            low_notional_edge_ceiling = max(0.35, min_oracle_move_pct_effective * 1.25)
+            if size_cap_for_gates <= 2.5:
+                low_notional_edge_ceiling = max(0.30, min_oracle_move_pct_effective * 1.10)
+            required_edge = min(required_edge, low_notional_edge_ceiling)
         edge_calibration_profile = context.get("edge_calibration")
         if not isinstance(edge_calibration_profile, dict):
             edge_calibration_profile = {}
@@ -4956,13 +5014,6 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             else "re-entry cooldown disabled"
         )
 
-        trader_context = context.get("trader")
-        risk_limits_context = (
-            trader_context.get("risk_limits")
-            if isinstance(trader_context, dict) and isinstance(trader_context.get("risk_limits"), dict)
-            else {}
-        )
-        max_trade_notional_hint = self._float(risk_limits_context.get("max_trade_notional_usd"))
         edge_bucket_key = "10+"
         if edge_for_gate < 2.0:
             edge_bucket_key = "0-2"
@@ -5031,11 +5082,23 @@ class BtcEthHighFreqStrategy(BaseStrategy):
             if configured_entry_exit_ratio_floor is not None
             else default_entry_exit_ratio_floor
         )
-        required_size_for_exitability = min_order_size_usd / max(0.01, executable_exit_ratio_floor)
+        if low_notional_live_mode and size_cap_for_gates is not None:
+            low_notional_ratio_floor = 0.45
+            if size_cap_for_gates <= 2.5:
+                low_notional_ratio_floor = 0.60
+            executable_exit_ratio_floor = max(executable_exit_ratio_floor, low_notional_ratio_floor)
+        effective_min_order_size_usd = min_order_size_usd
+        if low_notional_live_mode and size_cap_for_gates is not None:
+            effective_min_order_size_usd = min(
+                min_order_size_usd,
+                max(0.50, size_cap_for_gates * 0.35),
+            )
+        required_size_for_exitability = effective_min_order_size_usd / max(0.01, executable_exit_ratio_floor)
         entry_exitability_ok = estimated_size_for_checks + 1e-9 >= required_size_for_exitability
         entry_exitability_detail = (
             f"est_size={estimated_size_for_checks:.2f} required>={required_size_for_exitability:.2f} "
-            f"ratio_floor={executable_exit_ratio_floor:.2f}"
+            f"ratio_floor={executable_exit_ratio_floor:.2f} "
+            f"min_order={effective_min_order_size_usd:.2f}"
         )
 
         directional_entry_price_floor = max(
