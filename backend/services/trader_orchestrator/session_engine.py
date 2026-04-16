@@ -1346,22 +1346,22 @@ class ExecutionSessionEngine:
             rejection_reason = "Bundle cannot be executed safely at the selected size."
             _append_event(
                 event_type="session_rejected",
-                severity="error",
+                severity="warn",
                 message=rejection_reason,
                 payload=preflight_violation,
             )
             _update_session_status(
-                status="failed",
+                status="skipped",
                 error_message=rejection_reason,
                 payload_patch={
                     "orders_written": 0,
                     "bundle_preflight": preflight_violation,
                 },
             )
-            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
+            await _persist_execution_projection_safely(signal_status="skipped", effective_price=None)
             return SessionExecutionResult(
                 session_id=session_row.id,
-                status="failed",
+                status="skipped",
                 effective_price=None,
                 error_message=rejection_reason,
                 orders_written=0,

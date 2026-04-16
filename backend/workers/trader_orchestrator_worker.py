@@ -523,6 +523,7 @@ async def list_unconsumed_trade_signals(
     cursor_runtime_sequence=None,
     cursor_created_at=None,
     cursor_signal_id=None,
+    exclude_market_ids=None,
     limit=200,
 ):
     return await _list_unconsumed_trade_signals_authoritative(
@@ -534,6 +535,7 @@ async def list_unconsumed_trade_signals(
         cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
         cursor_created_at=cursor_created_at,
         cursor_signal_id=cursor_signal_id,
+        exclude_market_ids=list(exclude_market_ids or []),
         limit=int(limit),
     )
 
@@ -543,46 +545,34 @@ async def _ensure_runtime_signal_persisted(session, signal: Any) -> None:
     if not signal_id:
         return
     row = await session.get(TradeSignal, signal_id)
-    row_changed = False
-    if row is None:
-        row = TradeSignal(
-            id=signal_id,
-            source=str(getattr(signal, "source", "") or "").strip(),
-            source_item_id=str(getattr(signal, "source_item_id", "") or "").strip() or None,
-            signal_type=str(getattr(signal, "signal_type", "") or "").strip(),
-            strategy_type=str(getattr(signal, "strategy_type", "") or "").strip() or None,
-            market_id=str(getattr(signal, "market_id", "") or "").strip(),
-            market_question=str(getattr(signal, "market_question", "") or "").strip() or None,
-            direction=str(getattr(signal, "direction", "") or "").strip() or None,
-            entry_price=safe_float(getattr(signal, "entry_price", None), None),
-            edge_percent=safe_float(getattr(signal, "edge_percent", None), None),
-            confidence=safe_float(getattr(signal, "confidence", None), None),
-            liquidity=safe_float(getattr(signal, "liquidity", None), None),
-            expires_at=getattr(signal, "expires_at", None),
-            payload_json=dict(getattr(signal, "payload_json", None) or {}),
-            strategy_context_json=dict(getattr(signal, "strategy_context_json", None) or {}),
-            quality_passed=getattr(signal, "quality_passed", None),
-            quality_rejection_reasons=None,
-            dedupe_key=str(getattr(signal, "dedupe_key", "") or "").strip(),
-            runtime_sequence=safe_int(getattr(signal, "runtime_sequence", None), None),
-            status=str(getattr(signal, "status", "") or "").strip().lower() or "pending",
-            created_at=utcnow(),
-            updated_at=utcnow(),
-        )
-        session.add(row)
-        row_changed = True
-    desired_status = str(getattr(signal, "status", "") or "").strip().lower()
-    if desired_status and str(getattr(row, "status", "") or "").strip().lower() != desired_status:
-        row.status = desired_status
-        row.updated_at = utcnow()
-        row_changed = True
-    desired_runtime_sequence = safe_int(getattr(signal, "runtime_sequence", None), None)
-    if desired_runtime_sequence is not None and desired_runtime_sequence != safe_int(getattr(row, "runtime_sequence", None), None):
-        row.runtime_sequence = desired_runtime_sequence
-        row.updated_at = utcnow()
-        row_changed = True
-    if row_changed:
-        await session.flush()
+    if row is not None:
+        return
+    row = TradeSignal(
+        id=signal_id,
+        source=str(getattr(signal, "source", "") or "").strip(),
+        source_item_id=str(getattr(signal, "source_item_id", "") or "").strip() or None,
+        signal_type=str(getattr(signal, "signal_type", "") or "").strip(),
+        strategy_type=str(getattr(signal, "strategy_type", "") or "").strip() or None,
+        market_id=str(getattr(signal, "market_id", "") or "").strip(),
+        market_question=str(getattr(signal, "market_question", "") or "").strip() or None,
+        direction=str(getattr(signal, "direction", "") or "").strip() or None,
+        entry_price=safe_float(getattr(signal, "entry_price", None), None),
+        edge_percent=safe_float(getattr(signal, "edge_percent", None), None),
+        confidence=safe_float(getattr(signal, "confidence", None), None),
+        liquidity=safe_float(getattr(signal, "liquidity", None), None),
+        expires_at=getattr(signal, "expires_at", None),
+        payload_json=dict(getattr(signal, "payload_json", None) or {}),
+        strategy_context_json=dict(getattr(signal, "strategy_context_json", None) or {}),
+        quality_passed=getattr(signal, "quality_passed", None),
+        quality_rejection_reasons=None,
+        dedupe_key=str(getattr(signal, "dedupe_key", "") or "").strip(),
+        runtime_sequence=safe_int(getattr(signal, "runtime_sequence", None), None),
+        status=str(getattr(signal, "status", "") or "").strip().lower() or "pending",
+        created_at=utcnow(),
+        updated_at=utcnow(),
+    )
+    session.add(row)
+    await session.flush()
 
 
 async def get_open_position_count_for_trader(session, trader_id, mode=None, position_cap_scope=None):
@@ -1148,6 +1138,7 @@ async def _build_triggered_trade_signals(
     cursor_created_at: datetime | None,
     cursor_signal_id: str | None,
     statuses: list[str],
+    exclude_market_ids: list[str] | None,
     limit: int,
 ) -> list[Any]:
     if not signal_ids_by_source or not sources:
@@ -1176,6 +1167,7 @@ async def _build_triggered_trade_signals(
         cursor_created_at=cursor_created_at,
         cursor_signal_id=cursor_signal_id,
         signal_ids=ordered_ids,
+        exclude_market_ids=list(exclude_market_ids or []),
         limit=max(len(ordered_ids), int(limit)),
     )
     eligible_rows_by_id = {
@@ -1194,6 +1186,11 @@ async def _build_triggered_trade_signals(
         str(status or "").strip().lower()
         for status in (statuses or [])
         if str(status or "").strip()
+    }
+    excluded_market_ids = {
+        str(market_id or "").strip()
+        for market_id in (exclude_market_ids or [])
+        if str(market_id or "").strip()
     }
     for source_key in source_order:
         allowed_strategy_types = set(strategy_types_by_source.get(source_key) or [])
@@ -1246,6 +1243,9 @@ async def _build_triggered_trade_signals(
                     continue
             else:
                 row = authoritative_row
+            row_market_id = str(getattr(row, "market_id", "") or "").strip()
+            if row_market_id and row_market_id in excluded_market_ids:
+                continue
             seen_row_ids.add(signal_id)
             rows.append(row)
 
@@ -4001,6 +4001,7 @@ async def _run_trader_once(
                         cursor_created_at=cursor_created_at,
                         cursor_signal_id=cursor_signal_id,
                         statuses=["pending", "selected"],
+                        exclude_market_ids=None,
                         limit=max(
                             _STANDARD_MAX_SIGNALS_PER_CYCLE,
                             _HIGH_FREQUENCY_MAX_SIGNALS_PER_CYCLE,
@@ -4662,6 +4663,18 @@ async def _run_trader_once(
                     payload={"changes": live_risk_clamp_changes},
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
+        excluded_entry_market_ids: set[str] = set()
+        if not allow_averaging:
+            excluded_entry_market_ids |= occupied_market_ids
+            excluded_entry_market_ids |= reentry_cooldown_market_ids
+        if prefetched_signals and excluded_entry_market_ids:
+            prefetched_signals = [
+                signal
+                for signal in prefetched_signals
+                if str(getattr(signal, "market_id", "") or "").strip() not in excluded_entry_market_ids
+            ]
+            if not prefetched_signals:
+                prefetched_signals = None
         # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
@@ -4827,6 +4840,7 @@ async def _run_trader_once(
                     cursor_runtime_sequence=cursor_runtime_sequence,
                     cursor_created_at=cursor_created_at,
                     cursor_signal_id=cursor_signal_id,
+                    exclude_market_ids=list(excluded_entry_market_ids),
                     limit=batch_limit,
                 )
             if not signals:

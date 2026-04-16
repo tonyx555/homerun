@@ -6187,6 +6187,7 @@ async def list_unconsumed_trade_signals(
     cursor_created_at: Optional[datetime] = None,
     cursor_signal_id: Optional[str] = None,
     signal_ids: Optional[list[str]] = None,
+    exclude_market_ids: Optional[list[str]] = None,
     limit: int = 200,
 ) -> list[TradeSignal]:
     now = _now().replace(tzinfo=None)
@@ -6235,6 +6236,19 @@ async def list_unconsumed_trade_signals(
         if not normalized_signal_ids:
             return []
         query = query.where(TradeSignal.id.in_(normalized_signal_ids))
+    normalized_excluded_market_ids = [
+        str(market_id or "").strip()
+        for market_id in (exclude_market_ids or [])
+        if str(market_id or "").strip()
+    ]
+    if normalized_excluded_market_ids:
+        query = query.where(
+            or_(
+                TradeSignal.market_id.is_(None),
+                TradeSignal.market_id == "",
+                TradeSignal.market_id.not_in(normalized_excluded_market_ids),
+            )
+        )
     if normalized_cursor_runtime_sequence is not None:
         query = query.where(
             or_(
