@@ -4940,7 +4940,6 @@ async def reconcile_live_positions(
             next_retry_dt = _parse_iso_utc_naive(next_retry_iso)
             pending_close_trigger = str(pending_exit.get("close_trigger") or "").strip().lower()
             pending_exit_kind = str(pending_exit.get("kind") or "").strip().lower()
-            last_error_text = str(pending_exit.get("last_error") or "")
             force_rapid_retry = _is_rapid_close_trigger(pending_close_trigger)
             if force_rapid_retry:
                 min_retry_seconds = max(0.5, safe_float(pending_exit.get("rapid_retry_seconds"), 1.0) or 1.0)
