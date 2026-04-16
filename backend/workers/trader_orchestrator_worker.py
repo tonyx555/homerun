@@ -1138,7 +1138,7 @@ async def _build_triggered_trade_signals(
     cursor_created_at: datetime | None,
     cursor_signal_id: str | None,
     statuses: list[str],
-    exclude_market_ids: list[str] | None,
+    exclude_market_ids: list[str] | None = None,
     limit: int,
 ) -> list[Any]:
     if not signal_ids_by_source or not sources:
@@ -1312,10 +1312,25 @@ async def submit_order(
     size_usd: float,
     reason: str,
     explicit_strategy_params: dict[str, Any] | None = None,
+    session_engine: Any | None = None,
 ):
-    async with AsyncSessionLocal() as submit_session:
-        session_engine = ExecutionSessionEngine(submit_session)
+    if session_engine is not None:
         return await session_engine.execute_signal(
+            trader_id=trader_id,
+            signal=signal,
+            decision_id=decision_id,
+            strategy_key=strategy_key,
+            strategy_version=strategy_version,
+            strategy_params=strategy_params,
+            explicit_strategy_params=explicit_strategy_params,
+            risk_limits=risk_limits,
+            mode=mode,
+            size_usd=size_usd,
+            reason=reason,
+        )
+    async with AsyncSessionLocal() as submit_session:
+        _engine = ExecutionSessionEngine(submit_session)
+        return await _engine.execute_signal(
             trader_id=trader_id,
             signal=signal,
             decision_id=decision_id,
@@ -4840,7 +4855,6 @@ async def _run_trader_once(
                     cursor_runtime_sequence=cursor_runtime_sequence,
                     cursor_created_at=cursor_created_at,
                     cursor_signal_id=cursor_signal_id,
-                    exclude_market_ids=list(excluded_entry_market_ids),
                     limit=batch_limit,
                 )
             if not signals:
