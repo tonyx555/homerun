@@ -25,6 +25,7 @@ from models.database import (
     TraderEvent,
     TraderOrder,
     TraderOrchestratorSnapshot,
+    TraderPosition,
     TraderSignalCursor,
     TrackedWallet,
     Trader,
@@ -101,7 +102,6 @@ from services.trader_orchestrator_state import (
 from services.signal_bus import (
     expire_stale_signals,
     set_trade_signal_status as _persist_trade_signal_status,
-    upsert_trade_signal as _upsert_trade_signal,
 )
 import services.trader_hot_state as hot_state
 from services.ws_feeds import get_feed_manager
