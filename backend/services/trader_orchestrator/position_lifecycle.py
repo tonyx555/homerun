@@ -2460,6 +2460,10 @@ async def reconcile_paper_positions(
         notional = safe_float(row.notional_usd) or 0.0
         outcome_idx = _direction_outcome_index(row.direction)
         if outcome_idx is None or entry_price is None or entry_price <= 0 or notional <= 0:
+            payload = dict(row.payload_json or {})
+            provider_snapshot_status = _provider_snapshot_status(payload)
+            raw_filled_notional, raw_filled_size, _ = _extract_live_fill_metrics(payload)
+            wallet_position_size = 0.0
             provider_status_key = str(provider_snapshot_status or "").strip().lower()
             if (
                 wallet_position_size <= _WALLET_SIZE_EPSILON
@@ -3123,7 +3127,6 @@ async def reconcile_live_positions(
             fallback=dict(_wallet_positions_cache[1] or {}),
         )
     wallet_positions_loaded = bool(_wallet_positions_last_refresh_succeeded or wallet_positions_by_token)
-    wallet_positions_index_present = bool(wallet_positions_by_token)
     wallet_closed_positions_by_token: dict[str, dict[str, Any]] = {}
     wallet_sell_trades_by_token: dict[str, dict[str, Any]] = {}
     wallet_close_activity_by_token: dict[str, dict[str, Any]] = {}

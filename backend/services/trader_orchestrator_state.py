@@ -56,7 +56,6 @@ from services.worker_state import (
 )
 from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
-from services.polymarket import polymarket_client
 from services.trader_orchestrator.sources.registry import normalize_source_key
 from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,

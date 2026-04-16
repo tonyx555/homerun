@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from utils.utcnow import utcnow, utcfromtimestamp
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from models import Opportunity
 from models.database import (
     AsyncSessionLocal,

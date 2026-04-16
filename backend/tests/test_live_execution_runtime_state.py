@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 import models.database as database_module
-import services.live_execution_service as live_execution_service_module
 import services.polymarket as polymarket_module
 from sqlalchemy import select
 
