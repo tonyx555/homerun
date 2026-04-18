@@ -9,11 +9,19 @@
   <body>
     <script>
       try {
-        var theme = JSON.parse(localStorage.getItem('theme'));
-        if (theme === 'light') document.documentElement.classList.add('theme-light');
-        else document.documentElement.classList.add('theme-dark');
+        var storedTheme = JSON.parse(localStorage.getItem('theme'));
+        var systemTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        var theme = storedTheme === 'light' || storedTheme === 'dark' ? storedTheme : systemTheme;
+        var root = document.documentElement;
+        root.classList.add(theme === 'light' ? 'theme-light' : 'theme-dark');
+        root.classList.toggle('dark', theme === 'dark');
+        root.style.colorScheme = theme;
       } catch (e) {
-        document.documentElement.classList.add('theme-dark');
+        var fallbackTheme = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        var fallbackRoot = document.documentElement;
+        fallbackRoot.classList.add(fallbackTheme === 'light' ? 'theme-light' : 'theme-dark');
+        fallbackRoot.classList.toggle('dark', fallbackTheme === 'dark');
+        fallbackRoot.style.colorScheme = fallbackTheme;
       }
     </script>
     <div id="root"></div>

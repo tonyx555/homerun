@@ -3,7 +3,21 @@ import { atomWithStorage } from 'jotai/utils'
 
 // Theme
 export type Theme = 'dark' | 'light'
-export const themeAtom = atomWithStorage<Theme>('theme', 'dark')
+export type ThemePreference = Theme | 'system'
+
+function getSystemTheme(): Theme {
+  if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
+    return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  }
+  return 'dark'
+}
+
+export const systemThemeAtom = atom<Theme>(getSystemTheme())
+export const themePreferenceAtom = atomWithStorage<ThemePreference>('theme', 'system')
+export const themeAtom = atom<Theme>((get) => {
+  const themePreference = get(themePreferenceAtom)
+  return themePreference === 'system' ? get(systemThemeAtom) : themePreference
+})
 
 // Derive theme class for applying to body
 export const themeClassAtom = atom((get) => {
