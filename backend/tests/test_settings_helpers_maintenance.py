@@ -30,6 +30,7 @@ def test_maintenance_payload_defaults_llm_usage_retention_days():
     settings.llm_usage_retention_days = None
     settings.cleanup_trade_signal_emission_days = None
     settings.cleanup_trade_signal_update_days = None
+    settings.cleanup_trade_signal_days = None
     settings.cleanup_wallet_activity_rollup_days = None
     settings.cleanup_wallet_activity_dedupe_enabled = None
 
@@ -38,6 +39,7 @@ def test_maintenance_payload_defaults_llm_usage_retention_days():
     assert payload["llm_usage_retention_days"] == 30
     assert payload["cleanup_trade_signal_emission_days"] == 3
     assert payload["cleanup_trade_signal_update_days"] == 3
+    assert payload["cleanup_trade_signal_days"] == 30
     assert payload["cleanup_wallet_activity_rollup_days"] == 60
     assert payload["cleanup_wallet_activity_dedupe_enabled"] is True
 
@@ -50,6 +52,7 @@ def test_apply_update_request_sets_llm_usage_retention_days():
         cleanup_resolved_trade_days=20,
         cleanup_trade_signal_emission_days=18,
         cleanup_trade_signal_update_days=2,
+        cleanup_trade_signal_days=21,
         cleanup_wallet_activity_rollup_days=75,
         cleanup_wallet_activity_dedupe_enabled=False,
         llm_usage_retention_days=14,
@@ -67,5 +70,6 @@ def test_apply_update_request_sets_llm_usage_retention_days():
     assert settings.llm_usage_retention_days == 14
     assert settings.cleanup_trade_signal_emission_days == 18
     assert settings.cleanup_trade_signal_update_days == 2
+    assert settings.cleanup_trade_signal_days == 21
     assert settings.cleanup_wallet_activity_rollup_days == 75
     assert settings.cleanup_wallet_activity_dedupe_enabled is False

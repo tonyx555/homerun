@@ -693,6 +693,7 @@ async def lifespan(app: FastAPI):
             "anomaly_days": int(settings.CLEANUP_ANOMALY_DAYS),
             "trade_signal_emission_days": int(settings.CLEANUP_TRADE_SIGNAL_EMISSION_DAYS),
             "trade_signal_update_days": int(settings.CLEANUP_TRADE_SIGNAL_UPDATE_DAYS),
+            "trade_signal_days": int(settings.CLEANUP_TRADE_SIGNAL_DAYS),
             "wallet_activity_rollup_days": int(settings.CLEANUP_WALLET_ACTIVITY_ROLLUP_DAYS),
             "wallet_activity_dedupe_enabled": bool(settings.CLEANUP_WALLET_ACTIVITY_DEDUPE_ENABLED),
         }
@@ -715,6 +716,11 @@ async def lifespan(app: FastAPI):
                         row.cleanup_trade_signal_update_days
                         if row.cleanup_trade_signal_update_days is not None
                         else cleanup_config["trade_signal_update_days"]
+                    )
+                    cleanup_config["trade_signal_days"] = int(
+                        row.cleanup_trade_signal_days
+                        if row.cleanup_trade_signal_days is not None
+                        else cleanup_config["trade_signal_days"]
                     )
                     cleanup_config["wallet_activity_rollup_days"] = int(
                         row.cleanup_wallet_activity_rollup_days or cleanup_config["wallet_activity_rollup_days"]

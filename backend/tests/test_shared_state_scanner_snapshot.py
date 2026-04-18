@@ -11,7 +11,7 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from models.database import OpportunityEvent, OpportunityState, ScannerRun, ScannerSnapshot  # noqa: E402
+from models.database import OpportunityState, ScannerRun, ScannerSnapshot  # noqa: E402
 from models.opportunity import MispricingType, Opportunity  # noqa: E402
 from services import shared_state  # noqa: E402
 from utils.utcnow import utcnow  # noqa: E402
@@ -141,7 +141,6 @@ async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opport
     assert isinstance(session.snapshot_row, ScannerSnapshot)
     assert session.snapshot_row.opportunities_count == 1
     assert list(session.snapshot_row.opportunities_json or []) == []
-    assert not any(isinstance(row, OpportunityEvent) for row in session.added)
     commit_mock.assert_awaited_once()
     schedule_mock.assert_called_once()
     scheduled = schedule_mock.call_args.kwargs["opportunities"]
@@ -174,7 +173,6 @@ async def test_persist_incremental_state_updates_state_and_returns_runtime_event
     added_types = tuple(type(row) for row in session.added)
     assert ScannerRun in added_types
     assert OpportunityState in added_types
-    assert OpportunityEvent not in added_types
     assert len(event_messages) == 1
     assert event_messages[0]["event_type"] == "detected"
     assert event_messages[0]["stable_id"] == opportunity.stable_id
@@ -235,7 +233,6 @@ async def test_persist_incremental_state_marks_missing_opportunities_expired_wit
     assert len(event_messages) == 1
     assert event_messages[0]["event_type"] == "expired"
     assert event_messages[0]["stable_id"] == opportunity.stable_id
-    assert not any(isinstance(row, OpportunityEvent) for row in session.added)
 
 
 @pytest.mark.asyncio

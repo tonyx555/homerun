@@ -487,6 +487,12 @@ class MaintenanceSettings(BaseModel):
         le=3650,
         description="Delete upsert-update emission rows older than this many days (0 disables)",
     )
+    cleanup_trade_signal_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        description="Delete trade signal rows older than this many days (0 disables)",
+    )
     cleanup_wallet_activity_rollup_days: int = Field(
         default=60,
         ge=45,

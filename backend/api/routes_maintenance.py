@@ -23,7 +23,6 @@ from models.database import (
     NewsTradeIntent,
     NewsWorkflowFinding,
     NewsWorkflowSnapshot,
-    OpportunityEvent,
     OpportunityHistory,
     OpportunityLifetime,
     ScannerMarketHistory,
@@ -160,7 +159,6 @@ async def _flush_scanner_data(session: AsyncSession) -> dict[str, int]:
     return {
         "scanner_snapshot_opportunities": snapshot_opportunities,
         "scanner_market_history_rows": await _delete_rows(session, ScannerMarketHistory),
-        "opportunity_events": await _delete_rows(session, OpportunityEvent),
         "opportunity_state": await _delete_rows(session, OpportunityState),
         "scanner_runs": await _delete_rows(session, ScannerRun),
         "opportunity_history": await _delete_rows(session, OpportunityHistory),

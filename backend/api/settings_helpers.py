@@ -364,6 +364,7 @@ def maintenance_payload(settings: AppSettings) -> dict[str, Any]:
         "cleanup_resolved_trade_days": settings.cleanup_resolved_trade_days,
         "cleanup_trade_signal_emission_days": _with_default(settings.cleanup_trade_signal_emission_days, 3),
         "cleanup_trade_signal_update_days": _with_default(settings.cleanup_trade_signal_update_days, 3),
+        "cleanup_trade_signal_days": _with_default(settings.cleanup_trade_signal_days, 30),
         "cleanup_wallet_activity_rollup_days": _with_default(settings.cleanup_wallet_activity_rollup_days, 60),
         "cleanup_wallet_activity_dedupe_enabled": _with_default(settings.cleanup_wallet_activity_dedupe_enabled, True),
         "llm_usage_retention_days": _with_default(settings.llm_usage_retention_days, 30),
@@ -769,6 +770,7 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.cleanup_resolved_trade_days = maint.cleanup_resolved_trade_days
         settings.cleanup_trade_signal_emission_days = maint.cleanup_trade_signal_emission_days
         settings.cleanup_trade_signal_update_days = maint.cleanup_trade_signal_update_days
+        settings.cleanup_trade_signal_days = maint.cleanup_trade_signal_days
         settings.cleanup_wallet_activity_rollup_days = maint.cleanup_wallet_activity_rollup_days
         settings.cleanup_wallet_activity_dedupe_enabled = maint.cleanup_wallet_activity_dedupe_enabled
         settings.llm_usage_retention_days = maint.llm_usage_retention_days

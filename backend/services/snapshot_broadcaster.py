@@ -23,7 +23,6 @@ from sqlalchemy import select
 from api.websocket import manager
 from models.database import (
     AsyncSessionLocal,
-    OpportunityEvent,
     EventsSignal,
     EventsSnapshot,
 )
@@ -78,7 +77,6 @@ class SnapshotBroadcaster:
         self._last_activity: Optional[str] = None
         self._last_status_sig: Optional[tuple] = None
         self._last_opp_sig: Optional[tuple] = None
-        self._last_event_ts: Optional[datetime] = None
         self._last_weather_status_sig: Optional[tuple] = None
         self._last_weather_opp_sig: Optional[tuple] = None
         self._last_news_status_sig: Optional[tuple] = None
@@ -313,7 +311,6 @@ class SnapshotBroadcaster:
         self._last_activity = None
         self._last_status_sig = None
         self._last_opp_sig = None
-        self._last_event_ts = None
         self._last_weather_status_sig = None
         self._last_weather_opp_sig = None
         self._last_news_status_sig = None
@@ -444,52 +441,6 @@ class SnapshotBroadcaster:
                         .scalars()
                         .all()
                     )
-                    event_query = select(OpportunityEvent).order_by(OpportunityEvent.created_at.asc())
-                    if self._last_event_ts is not None:
-                        event_query = event_query.where(OpportunityEvent.created_at > self._last_event_ts)
-                    event_query = event_query.limit(200)
-                    event_rows = (await session.execute(event_query)).scalars().all()
-
-                if event_rows:
-                    self._last_event_ts = event_rows[-1].created_at
-                    await manager.broadcast(
-                        {
-                            "type": "opportunity_events",
-                            "topic": "opportunities.summary",
-                            "data": {
-                                "events": [
-                                    {
-                                        "id": row.id,
-                                        "stable_id": row.stable_id,
-                                        "run_id": row.run_id,
-                                        "event_type": row.event_type,
-                                        "opportunity": row.opportunity_json,
-                                        "created_at": row.created_at.isoformat() if row.created_at else None,
-                                    }
-                                    for row in event_rows
-                                ]
-                            },
-                        }
-                    )
-                    for row in event_rows:
-                        payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
-                        revision = int(payload.get("revision") or 0)
-                        await manager.broadcast(
-                            {
-                                "type": "opportunity_update",
-                                "topic": f"opportunities.detail:{row.stable_id}",
-                                "data": {
-                                    "id": row.id,
-                                    "stable_id": row.stable_id,
-                                    "run_id": row.run_id,
-                                    "event_type": row.event_type,
-                                    "revision": revision,
-                                    "opportunity": payload,
-                                    "created_at": row.created_at.isoformat() if row.created_at else None,
-                                },
-                            }
-                        )
-
                 activity = status.get("current_activity") or "Idle"
                 status_sig = (
                     status.get("running"),
