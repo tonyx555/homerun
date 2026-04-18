@@ -101,11 +101,24 @@ async def commit_with_retry(
     is_retryable: Callable[[Exception], bool] = is_retryable_db_operation_error,
 ) -> None:
     async def _commit(_attempt: int) -> None:
+        # Shield the actual commit so an asyncio.CancelledError hitting
+        # the caller mid-commit does not tear the asyncpg extended-protocol
+        # send sequence in half (Parse sent without Execute/Sync).  When
+        # that happens the server leaves the transaction in "active
+        # Client/ClientRead" state that neither statement_timeout nor
+        # idle_in_transaction_session_timeout will reap, and the connection
+        # stays broken until the worker restarts.  Shielding lets the
+        # commit complete atomically; CancelledError still propagates to
+        # the caller after the shield resolves.
         try:
-            await session.commit()
+            await asyncio.shield(session.commit())
+        except asyncio.CancelledError:
+            # Commit has already succeeded under the shield OR was never
+            # started; in either case there is nothing to roll back.
+            raise
         except Exception:
             try:
-                await session.rollback()
+                await asyncio.shield(session.rollback())
             except Exception:
                 pass
             raise
