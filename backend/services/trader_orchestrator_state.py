@@ -2695,7 +2695,14 @@ async def recover_missing_live_trader_orders(
         row_trader_id = str(row.trader_id or "").strip()
         row_market_id = str(row.market_id or "").strip()
         if row_trader_id and row_market_id and not is_recovered_sell_authority:
-            if row_status in OPEN_ORDER_STATUSES:
+            # "placing" must also occupy the market: if a pre-submit placeholder
+            # exists for (trader, market), the provider-side order it represents
+            # may not yet have its clob_order_id linked back to the row.  Without
+            # this guard, authority recovery sees the unmatched live_trading_order
+            # and creates a *second* trader_order for the same leg, producing
+            # ghost duplicates (one with NULL provider_clob_order_id, one with
+            # the real id).
+            if row_status in OPEN_ORDER_STATUSES or row_status == "placing":
                 existing_occupied_markets.add((row_trader_id, row_market_id))
             # Also block recovery for recently closed/resolved orders to prevent
             # phantom duplicates when a sell exit creates a new LiveTradingOrder
