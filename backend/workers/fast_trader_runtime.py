@@ -218,8 +218,12 @@ class _FastTraderTask:
                         exc_info=exc,
                     )
 
+            # Shield the cycle commit: the surrounding asyncio.wait_for
+            # hard budget can cancel mid-commit and leave asyncpg with a
+            # half-sent extended-protocol INSERT, which poisons the
+            # connection until worker restart.
             try:
-                await session.commit()
+                await asyncio.shield(session.commit())
             except Exception as exc:
                 logger.warning("Fast trader cycle commit failed", trader_id=trader_id, exc_info=exc)
 
