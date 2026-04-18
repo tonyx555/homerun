@@ -279,6 +279,7 @@ async def test_refresh_event_catalog_skips_full_reload_when_catalog_unchanged(mo
 
     monkeypatch.setattr(market_runtime, "AsyncSessionLocal", lambda: _FakeAsyncSessionContext())
     monkeypatch.setattr(market_runtime.shared_state, "read_market_catalog", read_catalog)
+    monkeypatch.setattr(market_runtime, "_CATALOG_REFRESH_SECONDS", 0.0)
 
     await runtime._refresh_event_catalog(force=True)
     assert runtime._event_catalog_updated_at == updated_at.isoformat()
@@ -317,6 +318,7 @@ async def test_run_loop_iteration_schedules_catalog_refresh_without_waiting(monk
     monkeypatch.setattr(runtime, "_refresh_crypto_markets", _refresh_crypto_markets)
     monkeypatch.setattr(market_runtime, "_near_market_boundary", lambda: False)
     monkeypatch.setattr(market_runtime, "_FULL_REFRESH_FLOOR_SECONDS", 0.0)
+    monkeypatch.setattr(market_runtime, "_CATALOG_REFRESH_SECONDS", 0.0)
 
     started_at = time.perf_counter()
     await runtime._run_loop_iteration()
