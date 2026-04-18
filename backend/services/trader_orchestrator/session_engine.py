@@ -1126,11 +1126,15 @@ class ExecutionSessionEngine:
                 self.db.add(leg_row)
             for trader_order in trader_orders:
                 self.db.add(trader_order)
+            await self.db.flush()
             for execution_order in execution_orders:
                 self.db.add(execution_order)
+            if execution_orders:
+                await self.db.flush()
             for execution_event in execution_events:
                 self.db.add(execution_event)
-            await self.db.flush()
+            if execution_events:
+                await self.db.flush()
             if normalized_signal_id:
                 await set_trade_signal_status(
                     self.db,

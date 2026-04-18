@@ -95,6 +95,48 @@ class _FailureProjectionDb:
         self.commit_calls += 1
 
 
+class _ForeignKeyStrictProjectionDb(_FailureProjectionDb):
+    async def flush(self) -> None:
+        self.flush_calls += 1
+        persisted_trader_order_ids_before_flush = set(self.persisted_trader_order_ids)
+        for row in self.pending:
+            if not isinstance(row, session_engine_module.ExecutionSessionOrder):
+                continue
+            trader_order_id = str(row.trader_order_id or "").strip()
+            if trader_order_id:
+                assert trader_order_id in persisted_trader_order_ids_before_flush
+        for row in self.pending:
+            row_type = row.__class__.__name__
+            persisted_rows = self.persisted_rows_by_type.setdefault(row_type, [])
+            row_id = str(getattr(row, "id", "") or "").strip()
+            if row_id:
+                replaced = False
+                for index, existing_row in enumerate(persisted_rows):
+                    if str(getattr(existing_row, "id", "") or "").strip() == row_id:
+                        persisted_rows[index] = row
+                        replaced = True
+                        break
+                if not replaced:
+                    persisted_rows.append(row)
+            else:
+                persisted_rows.append(row)
+            if row_type == "ExecutionSession":
+                self.persisted_session_ids.add(str(getattr(row, "id", "") or ""))
+            elif row_type == "ExecutionSessionLeg":
+                self.persisted_leg_ids.add(str(getattr(row, "id", "") or ""))
+            elif row_type == "TraderOrder":
+                self.persisted_trader_order_ids.add(str(getattr(row, "id", "") or ""))
+        for row in self.pending:
+            if not isinstance(row, session_engine_module.ExecutionSessionOrder):
+                continue
+            assert str(row.session_id or "") in self.persisted_session_ids
+            assert str(row.leg_id or "") in self.persisted_leg_ids
+            trader_order_id = str(row.trader_order_id or "").strip()
+            if trader_order_id:
+                assert trader_order_id in self.persisted_trader_order_ids
+        self.pending.clear()
+
+
 def test_build_execution_session_rows_carries_market_roster_into_session_payload():
     signal = SimpleNamespace(
         id="signal-roster",
@@ -158,6 +200,98 @@ def test_build_execution_session_rows_carries_market_roster_into_session_payload
         "market-draw",
         "market-away",
     }
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_flushes_new_trader_orders_before_execution_orders(monkeypatch):
+    db = _ForeignKeyStrictProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "SINGLE_LEG", "plan_id": "plan-strict-flush-order"}
+    legs = [
+        {
+            "leg_id": "leg-strict-flush-order-1",
+            "market_id": "market-strict-flush-order-1",
+            "market_question": "Will strict flush ordering hold?",
+            "token_id": "token-strict-flush-order-1",
+            "side": "buy",
+            "outcome": "yes",
+            "requested_notional_usd": 10.0,
+            "requested_shares": 20.0,
+            "limit_price": 0.5,
+            "price_policy": "taker_limit",
+            "time_in_force": "IOC",
+            "post_only": False,
+        }
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    monkeypatch.setattr(session_engine_module, "supports_reprice", lambda _policy: False)
+    monkeypatch.setattr(session_engine_module, "execution_waves", lambda _policy, leg_rows: [leg_rows])
+    monkeypatch.setattr(session_engine_module, "requires_pair_lock", lambda _policy, _constraints: False)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module, "sync_trader_position_inventory", AsyncMock(return_value={}))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        session_engine_module,
+        "submit_execution_wave",
+        AsyncMock(
+            return_value=[
+                _leg_result(
+                    leg_id="leg-strict-flush-order-1",
+                    status="executed",
+                    notional_usd=10.0,
+                    shares=20.0,
+                    provider_order_id="provider-strict-flush-order-1",
+                    provider_clob_order_id="clob-strict-flush-order-1",
+                    effective_price=0.5,
+                    payload={
+                        "provider": "test",
+                        "token_id": "token-strict-flush-order-1",
+                        "filled_size": 20.0,
+                        "average_fill_price": 0.5,
+                        "filled_notional_usd": 10.0,
+                    },
+                )
+            ]
+        ),
+    )
+
+    signal = SimpleNamespace(
+        id="signal-strict-flush-order",
+        source="scanner",
+        trace_id="trace-strict-flush-order",
+        strategy_type="tail_end_carry",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-strict-flush-order-1",
+        market_question="Will strict flush ordering hold?",
+        direction="buy_yes",
+        entry_price=0.5,
+        edge_percent=4.0,
+        confidence=0.7,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-strict-flush-order",
+        signal=signal,
+        decision_id="decision-strict-flush-order",
+        strategy_key="tail_end_carry",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="paper",
+        size_usd=10.0,
+        reason="strict-flush-order",
+    )
+
+    assert result.status == "completed"
+    assert result.orders_written == 1
+    trader_rows = db.persisted_rows_by_type.get("TraderOrder") or []
+    execution_rows = db.persisted_rows_by_type.get("ExecutionSessionOrder") or []
+    assert len(trader_rows) == 1
+    assert len(execution_rows) == 1
+    assert str(execution_rows[0].trader_order_id or "") == str(trader_rows[0].id or "")
 
 
 @pytest.mark.asyncio
