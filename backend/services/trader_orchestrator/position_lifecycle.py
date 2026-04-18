@@ -34,6 +34,12 @@ PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open"}
 _FAILED_EXIT_MAX_RETRIES = 5
 _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
+# Absolute ceiling for the soft-bypass path.  Without this, an exit whose
+# provider-side submit keeps timing out can retry indefinitely while the
+# wallet position is still open -- the log has shown orders at attempt=67+.
+# Past this many attempts the exit is marked blocked_retry_exhausted_hard
+# and an operator must intervene.
+_FAILED_EXIT_HARD_RETRY_CEILING = 100
 
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
@@ -292,8 +298,26 @@ def _bump_allowance_error_counter(pending_exit: dict[str, Any], error: Any) -> N
     pending_exit["allowance_error_count"] = 0
 
 
+def _format_exit_error(error: Any) -> str:
+    """Produce a human-readable error string for an exit retry failure.
+
+    ``str(error or "unknown")`` is wrong when error is a truthy exception
+    with an empty message (e.g. ``asyncio.TimeoutError()``) -- it renders
+    as "" and we lose all signal about why the retry failed.  Always return
+    at least the exception class name.
+    """
+    if error is None:
+        return "unknown"
+    if isinstance(error, BaseException):
+        cls = type(error).__name__
+        msg = str(error).strip()
+        return f"{cls}: {msg}" if msg else cls
+    text = str(error).strip()
+    return text or "unknown"
+
+
 def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: datetime, retry_count: int) -> None:
-    error_text = str(error or "unknown")
+    error_text = _format_exit_error(error)
     pending_exit["last_error"] = error_text
     pending_exit["last_attempt_at"] = _iso_utc(now)
     if _is_zero_balance_error(error_text):
@@ -4960,9 +4984,37 @@ async def reconcile_live_positions(
 
             soft_retry_exhausted_bypass = bool(
                 retry_count >= _FAILED_EXIT_MAX_RETRIES
+                and retry_count < _FAILED_EXIT_HARD_RETRY_CEILING
                 and wallet_position_size > _WALLET_SIZE_EPSILON
                 and token_id
             )
+            if retry_count >= _FAILED_EXIT_HARD_RETRY_CEILING and not dry_run:
+                # Hard ceiling reached -- stop burning DB on an exit that has
+                # failed far beyond the soft-bypass threshold.  An operator
+                # must review last_error and either reset retry_count or
+                # close the position out-of-band.
+                logger.error(
+                    "Exit retry HARD CEILING reached for order=%s retry_count=%d wallet_position_size=%.6f last_error=%s",
+                    row.id,
+                    retry_count,
+                    wallet_position_size,
+                    _format_exit_error(pending_exit.get("last_error")),
+                )
+                pending_exit["status"] = "blocked_retry_exhausted_hard"
+                pending_exit["exhausted_at"] = _iso_utc(now)
+                pending_exit["retry_count"] = retry_count
+                pending_exit["last_attempt_at"] = _iso_utc(now)
+                pending_exit["last_error"] = _format_exit_error(
+                    pending_exit.get("last_error") or "hard_ceiling_reached"
+                )
+                pending_exit["next_retry_at"] = None
+                payload["pending_live_exit"] = pending_exit
+                _attach_pending_state(payload)
+                row.payload_json = payload
+                row.updated_at = now
+                state_updates += 1
+                held += 1
+                continue
             if retry_count >= _FAILED_EXIT_MAX_RETRIES and not soft_retry_exhausted_bypass:
                 if not dry_run:
                     pending_exit["status"] = "blocked_retry_exhausted"
@@ -5100,10 +5152,11 @@ async def reconcile_live_positions(
                         held += 1
                         continue
                     logger.warning(
-                        "Exit retry failed for order=%s attempt=%d error=%s",
+                        "Exit retry failed for order=%s attempt=%d status=%s error=%s",
                         row.id,
                         retry_count + 1,
-                        exec_result.error_message,
+                        exec_result.status,
+                        _format_exit_error(exec_result.error_message),
                     )
                     if not dry_run:
                         _apply_failed_exit_state(
@@ -5124,7 +5177,8 @@ async def reconcile_live_positions(
                         "Exit retry exception for order=%s attempt=%d: %s",
                         row.id,
                         retry_count + 1,
-                        exc,
+                        _format_exit_error(exc),
+                        exc_info=exc,
                     )
                     if not dry_run:
                         _apply_failed_exit_state(
