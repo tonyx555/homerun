@@ -1726,7 +1726,41 @@ async def build_live_signal_contexts(
 
 
 class RuntimeTradeSignalView:
-    """Read-only signal wrapper with runtime live-market overrides."""
+    """Read-only signal wrapper with runtime live-market overrides.
+
+    The wrapper eagerly copies every TradeSignal column attribute into
+    its instance dict at construction so the view remains usable after
+    the underlying SQLAlchemy session has been committed, closed, or
+    reset.  The trader cycle calls ``session.reset()`` between commit
+    and submit to release the DB connection during the provider round
+    trip; without this eager snapshot the detached TradeSignal would
+    raise ``DetachedInstanceError`` on every subsequent column access.
+    """
+
+    # Names mirror the columns declared on the TradeSignal ORM.  Keep
+    # in sync with ``backend/models/database.py`` if columns are added.
+    _SIGNAL_ATTRS = (
+        "id",
+        "source",
+        "source_item_id",
+        "signal_type",
+        "strategy_type",
+        "market_id",
+        "market_question",
+        "direction",
+        "effective_price",
+        "confidence",
+        "liquidity",
+        "expires_at",
+        "status",
+        "strategy_context_json",
+        "quality_passed",
+        "quality_rejection_reasons",
+        "dedupe_key",
+        "created_at",
+        "updated_at",
+        "runtime_sequence",
+    )
 
     def __init__(
         self,
@@ -1752,5 +1786,24 @@ class RuntimeTradeSignalView:
             }
         self.payload_json = payload
 
+        # Eagerly snapshot every ORM column so attribute access after the
+        # underlying session is reset/closed does not trigger a refresh
+        # and blow up with DetachedInstanceError.  Only columns the trader
+        # cycle and session_engine actually read are listed in _SIGNAL_ATTRS.
+        for _name in self._SIGNAL_ATTRS:
+            if _name in self.__dict__:
+                continue
+            try:
+                self.__dict__[_name] = getattr(base_signal, _name)
+            except Exception:
+                # Column absent on the base object — leave it unset so the
+                # __getattr__ fallback can still surface an AttributeError
+                # rather than a misleading DetachedInstanceError.
+                pass
+
     def __getattr__(self, name: str) -> Any:
+        # Reached only when the attribute is not cached on the instance.
+        # If the underlying session was reset this still raises, but the
+        # ``_SIGNAL_ATTRS`` snapshot means every routine column access
+        # hits the instance dict instead of falling through to the ORM.
         return getattr(self._base_signal, name)
