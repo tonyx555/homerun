@@ -536,6 +536,47 @@ def apply_platform_decision_gates(
     live_revalidation_gate_recorded = False
 
     if final_decision == "selected":
+        # Signal staleness gate — opt-in per strategy via max_signal_age_seconds.
+        # Edges on fast-decaying markets (weather/temperature/crypto tickers)
+        # are gone by the time a multi-second-old signal reaches submit; FAK
+        # orders then kill without matching, or worse, cross at a price the
+        # strategy never evaluated.  Skip silently when the strategy doesn't
+        # set a cutoff so other strategies are unaffected.
+        max_age_seconds = safe_float(params.get("max_signal_age_seconds"), None)
+        if max_age_seconds is not None and max_age_seconds > 0.0:
+            signal_created_at = getattr(runtime_signal, "created_at", None)
+            if isinstance(signal_created_at, datetime):
+                if signal_created_at.tzinfo is None:
+                    signal_created_at = signal_created_at.replace(tzinfo=timezone.utc)
+                age_seconds = (datetime.now(timezone.utc) - signal_created_at).total_seconds()
+                if age_seconds > max_age_seconds:
+                    final_decision = "blocked"
+                    final_reason = (
+                        f"Signal stale: age={age_seconds:.1f}s > max={max_age_seconds:.1f}s"
+                    )
+                    platform_gates.append(
+                        {
+                            "gate": "signal_staleness",
+                            "status": "blocked",
+                            "detail": final_reason,
+                        }
+                    )
+                    if invoke_hooks and strategy is not None and hasattr(strategy, "on_blocked"):
+                        strategy.on_blocked(
+                            runtime_signal,
+                            BlockReason.STALE_SIGNAL,
+                            {"age_seconds": age_seconds, "max_age_seconds": max_age_seconds},
+                        )
+                else:
+                    platform_gates.append(
+                        {
+                            "gate": "signal_staleness",
+                            "status": "passed",
+                            "detail": f"age={age_seconds:.1f}s <= max={max_age_seconds:.1f}s",
+                        }
+                    )
+
+    if final_decision == "selected":
         if trading_schedule_ok:
             platform_gates.append(
                 {

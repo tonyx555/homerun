@@ -205,6 +205,9 @@ class BlockReason:
     SIGNAL_EXPIRED = "signal_expired"
     """Signal is past its ``expires_at`` timestamp."""
 
+    STALE_SIGNAL = "stale_signal"
+    """Signal age (now - created_at) exceeds the strategy's freshness budget."""
+
     SCANNER_POOL_CAPACITY = "scanner_pool_capacity"
     """Scanner opportunity pool is at capacity."""
 

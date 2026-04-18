@@ -124,10 +124,23 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         "max_risk_score": 0.75,
         "min_family_size": 3,
         "min_deviation_cents": 0.03,
-        "min_liquidity": 500.0,
+        "min_liquidity": 1000.0,
         "max_days_to_resolution": 2.0,
         "max_opportunities": 20,
         "take_profit_pct": 12.0,
+        # Liquidity pre-check gates.  FAK orders kill if they can't cross the
+        # book immediately; the strategy prices on live mid, which is below
+        # the ask on any real book.  Skip markets with wide spreads (thin
+        # books) and reject deviations that are within spread noise rather
+        # than genuine mispricings.
+        "max_spread_cents": 0.04,
+        "min_deviation_spread_multiple": 1.2,
+        "require_live_quote": True,
+        # Signal staleness cutoff at the execution gate.  Temperature/weather
+        # surface-arb edges decay in seconds; by the time a signal >5s old
+        # reaches submit, the book has usually already crossed away and the
+        # FAK rejects (or fills us at a worse price than the strategy thought).
+        "max_signal_age_seconds": 5.0,
     }
 
     pipeline_defaults = {
@@ -163,6 +176,32 @@ class ProbSurfaceArbStrategy(BaseStrategy):
             if no_token in prices:
                 no_price = prices[no_token].get("mid", no_price)
         return no_price
+
+    @staticmethod
+    def _yes_token_spread(market: Market, prices: dict[str, dict]) -> float | None:
+        """Return live (ask - bid) for the YES token, or None if missing/stale.
+
+        A wide spread means FAK orders won't cross — the strategy's mid-based
+        signal is noise relative to the real executable price.  Returns None
+        when we don't have a live quote for the YES leg.
+        """
+        if not market.clob_token_ids:
+            return None
+        yes_token = market.clob_token_ids[0]
+        quote = prices.get(yes_token)
+        if not isinstance(quote, dict):
+            return None
+        bid = quote.get("bid")
+        ask = quote.get("ask")
+        if bid is None or ask is None:
+            return None
+        try:
+            spread = float(ask) - float(bid)
+        except (TypeError, ValueError):
+            return None
+        if spread < 0.0:
+            return None
+        return spread
 
     # ------------------------------------------------------------------
     # Isotonic regression (Pool Adjacent Violators Algorithm)
@@ -227,6 +266,8 @@ class ProbSurfaceArbStrategy(BaseStrategy):
         min_family_size = int(cfg.get("min_family_size", 3))
         min_liquidity = float(cfg.get("min_liquidity", 500.0))
         max_days_to_resolution = float(cfg.get("max_days_to_resolution", 2.0))
+        max_spread = float(cfg.get("max_spread_cents", 0.04))
+        require_live_quote = bool(cfg.get("require_live_quote", True))
 
         # Map market_id -> event for fast lookup
         market_to_event: dict[str, Event] = {}
@@ -260,6 +301,16 @@ class ProbSurfaceArbStrategy(BaseStrategy):
             if yes_price <= 0.01 or yes_price >= 0.99:
                 continue
 
+            # Reject markets whose YES book is too thin to take a FAK cross.
+            # Without a live bid/ask the price is stale or unsubscribed; a
+            # spread wider than max_spread means the mid-based edge is noise.
+            spread = self._yes_token_spread(market, prices)
+            if spread is None:
+                if require_live_quote:
+                    continue
+            elif spread > max_spread:
+                continue
+
             raw_families[event.id].append((threshold, market, yes_price))
 
         # Filter to families meeting min size and sort by threshold
@@ -289,6 +340,7 @@ class ProbSurfaceArbStrategy(BaseStrategy):
 
         min_deviation = float(cfg.get("min_deviation_cents", 0.03))
         max_opportunities = int(cfg.get("max_opportunities", 20))
+        spread_multiple = float(cfg.get("min_deviation_spread_multiple", 1.2))
 
         # Use self.state to cache families; invalidate every 5 minutes
         now = time.time()
@@ -321,12 +373,19 @@ class ProbSurfaceArbStrategy(BaseStrategy):
             # Fit isotonic surface
             fitted = self._isotonic_fit(actual_prices, decreasing=decreasing)
 
-            # Find deviations
+            # Find deviations.  A deviation only counts if it's larger than
+            # the live bid-ask spread on the affected leg; otherwise the
+            # "mispricing" is inside the quoted spread and is just noise —
+            # submitting a FAK to capture it will kill without filling.
             deviations: list[tuple[int, float]] = []  # (index, deviation)
             for i in range(len(actual_prices)):
                 dev = fitted[i] - actual_prices[i]
-                if abs(dev) >= min_deviation:
-                    deviations.append((i, dev))
+                if abs(dev) < min_deviation:
+                    continue
+                leg_spread = self._yes_token_spread(family_markets[i], prices)
+                if leg_spread is not None and abs(dev) < leg_spread * spread_multiple:
+                    continue
+                deviations.append((i, dev))
 
             if not deviations:
                 continue
