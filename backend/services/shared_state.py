@@ -29,6 +29,7 @@ from models.database import (
 )
 from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
+from services.market_tradability import get_market_tradability_map
 from utils.converters import format_iso_utc_z, normalize_market_id, parse_iso_datetime
 from utils.retry import commit_with_retry as _shared_commit_with_retry
 from utils.utcnow import utcnow
@@ -1153,13 +1154,46 @@ async def get_opportunities_from_db(
     # Release the DB connection before price overlays/history fetches,
     # which may perform network or cache I/O.
     try:
-        if session.in_transaction():
+        if session is not None and hasattr(session, "in_transaction") and session.in_transaction():
             await session.rollback()
     except Exception:
         pass
 
     for opp in opportunities:
         opp.title = _normalize_weather_edge_title(opp.title)
+
+    market_ids = sorted(
+        {
+            normalize_market_id(market_id)
+            for opp in opportunities
+            for market_id in [
+                str((market or {}).get("id") or "").strip()
+                for market in list(getattr(opp, "markets", []) or [])
+                if isinstance(market, dict)
+            ]
+            if normalize_market_id(market_id)
+        }
+    )
+    if market_ids:
+        try:
+            tradability = await get_market_tradability_map(market_ids)
+        except Exception:
+            tradability = {}
+        if tradability:
+            filtered_opportunities: list[Opportunity] = []
+            for opp in opportunities:
+                opp_market_ids = [
+                    normalize_market_id(str((market or {}).get("id") or "").strip())
+                    for market in list(getattr(opp, "markets", []) or [])
+                    if isinstance(market, dict)
+                ]
+                if any(
+                    market_id and tradability.get(market_id, True) is False
+                    for market_id in opp_market_ids
+                ):
+                    continue
+                filtered_opportunities.append(opp)
+            opportunities = filtered_opportunities
 
     if opportunities:
         try:

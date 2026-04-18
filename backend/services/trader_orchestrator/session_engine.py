@@ -60,6 +60,7 @@ import services.trader_hot_state as hot_state
 _MIN_BUNDLE_EXECUTION_SHARES = 5.0
 _PRE_SUBMIT_ORDER_STATUS = "placing"
 _STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS = 45.0
+_LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS = 900.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -1351,17 +1352,17 @@ class ExecutionSessionEngine:
                 payload=preflight_violation,
             )
             _update_session_status(
-                status="skipped",
+                status="failed",
                 error_message=rejection_reason,
                 payload_patch={
                     "orders_written": 0,
                     "bundle_preflight": preflight_violation,
                 },
             )
-            await _persist_execution_projection_safely(signal_status="skipped", effective_price=None)
+            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
             return SessionExecutionResult(
                 session_id=session_row.id,
-                status="skipped",
+                status="failed",
                 effective_price=None,
                 error_message=rejection_reason,
                 orders_written=0,
@@ -2604,14 +2605,28 @@ class ExecutionSessionEngine:
                     baseline_ts = baseline_ts.astimezone(timezone.utc)
                 placing_age_seconds = max(0.0, (now - baseline_ts).total_seconds())
                 if placing_age_seconds >= _STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS:
-                    if mode == "live":
-                        await recover_missing_live_trader_orders(
-                            self.db,
-                            trader_ids=[str(row.trader_id or "").strip()],
-                            commit=False,
-                            broadcast=False,
-                        )
-                        refreshed_row = await self.db.get(type(row), row.id)
+                    resolved_trader_id = str(getattr(row, "trader_id", None) or trader_id or "").strip()
+                    if (
+                        mode == "live"
+                        and resolved_trader_id
+                        and hasattr(self.db, "execute")
+                        and placing_age_seconds <= _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS
+                    ):
+                        try:
+                            await recover_missing_live_trader_orders(
+                                self.db,
+                                trader_ids=[resolved_trader_id],
+                                commit=False,
+                                broadcast=False,
+                            )
+                        except Exception:
+                            pass
+                        refreshed_row = None
+                        if hasattr(self.db, "get"):
+                            try:
+                                refreshed_row = await self.db.get(type(row), row.id)
+                            except Exception:
+                                refreshed_row = None
                         refreshed_status = str(getattr(refreshed_row, "status", "") or "").strip().lower()
                         if refreshed_row is not None and refreshed_status != "placing":
                             if refreshed_status == "completed":

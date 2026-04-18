@@ -985,9 +985,6 @@ class TailEndCarryStrategy(BaseStrategy):
         payload["_is_live_game"] = is_live
 
         blocked_keyword = str(strategy_context.get("blocked_keyword") or payload.get("blocked_keyword") or "").strip() or None
-        if blocked_keyword is None:
-            excluded_keywords = self._normalize_excluded_keywords(params.get("exclude_market_keywords"))
-            blocked_keyword = self._first_blocked_keyword(signal_text, excluded_keywords) if excluded_keywords else None
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
         observed_spread = max(
             0.0,
@@ -1019,6 +1016,7 @@ class TailEndCarryStrategy(BaseStrategy):
             is_live=is_live,
             limits=limits,
         )
+        checks = [check for check in checks if check.key not in {"keyword_block", "entry", "upside"}]
         return checks
 
     def compute_score(
