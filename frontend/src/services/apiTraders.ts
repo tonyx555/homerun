@@ -883,11 +883,14 @@ export interface TraderSourceConfig {
   strategy_params: Record<string, any>
 }
 
+export type TraderLatencyClass = 'fast' | 'normal' | 'slow'
+
 export interface Trader {
   id: string
   name: string
   description?: string | null
   mode: 'shadow' | 'live'
+  latency_class: TraderLatencyClass
   source_configs: TraderSourceConfig[]
   risk_limits: Record<string, any>
   metadata: Record<string, any>

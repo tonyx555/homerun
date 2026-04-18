@@ -147,6 +147,7 @@ _TRADER_SCOPE_MODES = set(StrategySDK.TRADER_SCOPE_MODE_CANONICAL)
 _ORCHESTRATOR_SNAPSHOT_STALE_MULTIPLIER = 30.0
 _ORCHESTRATOR_SNAPSHOT_STALE_MIN_SECONDS = 120.0
 _TRADER_MODES = {"shadow", "live"}
+_LATENCY_CLASSES = {"fast", "normal", "slow"}
 _MANUAL_LIVE_POSITION_SOURCE = "manual_wallet_position"
 _LIVE_ORDER_AUTHORITY_RECOVERY_LOCK_KEY = 674021913
 _LEGACY_STRATEGY_ALIASES: dict[str, str] = {
@@ -3538,6 +3539,20 @@ def _normalize_trader_mode(value: Any) -> str:
     return mode
 
 
+def _normalize_trader_latency_class(value: Any) -> str:
+    """Coerce a trader latency_class input to the canonical set.
+
+    Defaults to ``normal`` when absent so pre-existing traders keep their
+    current execution path unchanged.  Raises ValueError on unknown values.
+    """
+    cls = str(value or "").strip().lower()
+    if not cls:
+        return "normal"
+    if cls not in _LATENCY_CLASSES:
+        raise ValueError("latency_class must be 'fast', 'normal', or 'slow'")
+    return cls
+
+
 def _normalize_strategy_for_source(source_key: str, strategy_key: str) -> str:
     del source_key
     return _canonical_strategy_key(strategy_key)
@@ -3813,6 +3828,7 @@ def _serialize_trader(row: Trader) -> dict[str, Any]:
         "name": row.name,
         "description": row.description,
         "mode": _normalize_trader_mode(row.mode),
+        "latency_class": _normalize_trader_latency_class(getattr(row, "latency_class", None)),
         "source_configs": source_configs,
         "risk_limits": row.risk_limits_json or {},
         "metadata": metadata,
@@ -4556,6 +4572,7 @@ async def _normalize_trader_payload(
         "name": str(payload.get("name") or "").strip(),
         "description": payload.get("description"),
         "mode": _normalize_trader_mode(payload.get("mode")),
+        "latency_class": _normalize_trader_latency_class(payload.get("latency_class")),
         "source_configs": source_configs,
         "risk_limits": risk_limits,
         "metadata": metadata,
@@ -4580,6 +4597,22 @@ async def list_traders(session: AsyncSession, mode: Optional[str] = None) -> lis
 async def get_trader(session: AsyncSession, trader_id: str) -> Optional[dict[str, Any]]:
     row = await session.get(Trader, trader_id)
     return _serialize_trader(row) if row else None
+
+
+async def list_fast_traders(session: AsyncSession) -> list[dict[str, Any]]:
+    """Return enabled, unpaused traders on the fast latency tier.
+
+    These traders are owned by ``fast_trader_runtime`` — the shared
+    orchestrator loop skips them.  A trader must be explicitly set to
+    ``latency_class='fast'`` to opt into the fast-tier runtime.
+    """
+    query = (
+        select(Trader)
+        .where(func.lower(func.coalesce(Trader.latency_class, "normal")) == "fast")
+        .order_by(Trader.name.asc())
+    )
+    rows = (await session.execute(query)).scalars().all()
+    return [_serialize_trader(row) for row in rows]
 
 
 async def seed_default_traders(session: AsyncSession) -> None:
@@ -4672,6 +4705,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         risk_limits_json=normalized["risk_limits"],
         metadata_json=normalized["metadata"],
         mode=normalized["mode"],
+        latency_class=normalized["latency_class"],
         is_enabled=normalized["is_enabled"],
         is_paused=normalized["is_paused"],
         interval_seconds=normalized["interval_seconds"],
@@ -4730,6 +4764,8 @@ async def update_trader(
         row.metadata_json = normalized["metadata"]
     if "mode" in payload:
         row.mode = normalized["mode"]
+    if "latency_class" in payload:
+        row.latency_class = normalized["latency_class"]
     if "is_enabled" in payload:
         row.is_enabled = bool(payload.get("is_enabled"))
     if "is_paused" in payload:

@@ -117,6 +117,19 @@ strategy_db_loader = strategy_loader
 _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS = 20.0  # soft budget for live signal-processing cycles
 _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
+
+# Fast-tier traders are owned by ``fast_trader_runtime`` — this shared
+# orchestrator loop skips them entirely so their per-tick budget is not
+# consumed by the 20-30s cycles that "normal" / "slow" traders can incur.
+_FAST_LATENCY_CLASS = "fast"
+
+
+def _is_fast_tier_trader(trader: dict) -> bool:
+    """Return True if the trader is owned by the fast-tier runtime."""
+    if not isinstance(trader, dict):
+        return False
+    cls = str(trader.get("latency_class") or "normal").strip().lower()
+    return cls == _FAST_LATENCY_CLASS
 _SIGNAL_DEADLOCK_MAX_RETRIES = 3
 _SIGNAL_DEADLOCK_BASE_DELAY = 0.1
 _SIGNAL_TRANSIENT_ERROR_MARKERS = (
@@ -7761,7 +7774,7 @@ async def _build_runtime_trigger_specs(
                 session,
                 mode=mode if mode in {"shadow", "live"} else None,
             )
-            if _trader_matches_lane(trader, lane_key)
+            if _trader_matches_lane(trader, lane_key) and not _is_fast_tier_trader(trader)
         ]
     if mode == "live" and not await live_execution_service.ensure_initialized():
         return control, [], 3.0
@@ -8016,7 +8029,7 @@ async def run_worker_loop(
                                 session,
                                 mode=mode if mode in {"shadow", "live"} else None,
                             )
-                            if _trader_matches_lane(trader, lane_key)
+                            if _trader_matches_lane(trader, lane_key) and not _is_fast_tier_trader(trader)
                         ]
                         has_active_traders = any(
                             bool(trader.get("is_enabled", True)) and not bool(trader.get("is_paused", False))
@@ -8125,7 +8138,7 @@ async def run_worker_loop(
                                 session,
                                 mode=mode if mode in {"shadow", "live"} else None,
                             )
-                            if _trader_matches_lane(trader, lane_key)
+                            if _trader_matches_lane(trader, lane_key) and not _is_fast_tier_trader(trader)
                         ]
 
                 if not skip_cycle and needs_live_execution_init and not await live_execution_service.ensure_initialized():

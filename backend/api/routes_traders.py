@@ -140,6 +140,7 @@ class TraderRequest(BaseModel):
     name: str
     description: Optional[str] = None
     mode: Optional[str] = None
+    latency_class: Optional[str] = None
     copy_from_trader_id: Optional[str] = None
     source_configs: list[TraderSourceConfigRequest] = Field(default_factory=list)
     interval_seconds: int = Field(default=60, ge=1, le=86400)
@@ -155,6 +156,7 @@ class TraderPatchRequest(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
     mode: Optional[str] = None
+    latency_class: Optional[str] = None
     source_configs: Optional[list[TraderSourceConfigRequest]] = None
     interval_seconds: Optional[int] = Field(default=None, ge=1, le=86400)
     risk_limits: Optional[dict[str, Any]] = None

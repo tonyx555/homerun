@@ -70,6 +70,7 @@ import {
   type TraderStopPayload,
   type TraderStopLifecycleMode,
   type TraderSourceConfig,
+  type TraderLatencyClass,
   type TraderSource,
   updateTrader,
   type TraderOrchestratorConfig,
@@ -5406,6 +5407,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
   const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
+  const [draftLatencyClass, setDraftLatencyClass] = useState<TraderLatencyClass>('normal')
   const [draftCopyFromTraderId, setDraftCopyFromTraderId] = useState('')
   const [draftCopyFromMode, setDraftCopyFromMode] = useState<'shadow' | 'live'>('shadow')
   const [creatingTraderPreview, setCreatingTraderPreview] = useState<{
@@ -6359,6 +6361,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     if (!options.preserveMode) {
       setDraftMode(trader.mode === 'live' ? 'live' : 'shadow')
     }
+    setDraftLatencyClass((trader.latency_class === 'fast' || trader.latency_class === 'slow') ? trader.latency_class : 'normal')
     setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
     setDraftSourceStrategies(sourceStrategyMap)
     setDraftSourceStrategyVersions(sourceVersionMap)
@@ -6449,6 +6452,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
     setDraftMetadata('{}')
     setDraftMode(selectedAccountMode)
+    setDraftLatencyClass('normal')
     setDraftCopyFromTraderId('')
     setDraftCopyFromMode(selectedAccountMode)
     setDeleteAction('disable')
@@ -7314,6 +7318,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         name: draftName.trim(),
         description: draftDescription.trim() || null,
         mode: draftMode,
+        latency_class: draftLatencyClass,
         interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
@@ -7371,6 +7376,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         name: draftName.trim(),
         description: draftDescription.trim() || null,
         mode: draftMode,
+        latency_class: draftLatencyClass,
         interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
@@ -12793,6 +12799,28 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   <div>
                     <Label>Description</Label>
                     <Input value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} className="mt-1" />
+                  </div>
+
+                  <div>
+                    <Label>Latency Class</Label>
+                    <Select
+                      value={draftLatencyClass}
+                      onValueChange={(value: string) => setDraftLatencyClass((value === 'fast' || value === 'slow') ? (value as TraderLatencyClass) : 'normal')}
+                    >
+                      <SelectTrigger className="mt-1">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="fast">Fast — event-driven, sub-second single-leg</SelectItem>
+                        <SelectItem value="normal">Normal — shared orchestrator loop (default)</SelectItem>
+                        <SelectItem value="slow">Slow — relaxed budgets for multi-leg / recon-heavy strategies</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="mt-1 text-[10px] text-muted-foreground/75 leading-tight">
+                      Fast-tier bots run in the ``fast_trader_runtime`` with an isolated DB pool and sub-second budgets.
+                      They MUST be single-leg strategies (one market per signal).
+                      Pick Normal unless you explicitly need sub-second latency.
+                    </p>
                   </div>
 
                   {traderFlyoutMode === 'create' ? (

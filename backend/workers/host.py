@@ -67,6 +67,7 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
             "workers.news_worker",
             "workers.weather_worker",
             "workers.trader_reconciliation_worker",
+            "workers.fast_trader_runtime",
             "workers.redeemer_worker",
         ),
         "runtime_names": (

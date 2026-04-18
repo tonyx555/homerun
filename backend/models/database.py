@@ -1143,6 +1143,7 @@ class AppSettings(Base):
     cleanup_resolved_trade_days = Column(Integer, default=30)
     cleanup_trade_signal_emission_days = Column(Integer, default=21)
     cleanup_trade_signal_update_days = Column(Integer, default=3)
+    cleanup_trade_signal_days = Column(Integer, default=30)
     cleanup_wallet_activity_rollup_days = Column(Integer, default=60)
     cleanup_wallet_activity_dedupe_enabled = Column(Boolean, default=True)
     llm_usage_retention_days = Column(Integer, default=30)
@@ -2447,26 +2448,6 @@ class OpportunityState(Base):
     )
 
 
-class OpportunityEvent(Base):
-    """Append-only event log of opportunity lifecycle changes."""
-
-    __tablename__ = "opportunity_events"
-
-    id = Column(String, primary_key=True)
-    stable_id = Column(String, nullable=False)
-    run_id = Column(String, ForeignKey("scanner_runs.id"), nullable=False)
-    event_type = Column(String, nullable=False)  # detected | updated | expired | reactivated
-    opportunity_json = Column(JSON, nullable=True)
-    created_at = Column(DateTime, default=_utcnow, nullable=False)
-
-    __table_args__ = (
-        Index("idx_opportunity_events_created", "created_at"),
-        Index("idx_opportunity_events_stable", "stable_id"),
-        Index("idx_opportunity_events_run", "run_id"),
-        Index("idx_opportunity_events_type", "event_type"),
-    )
-
-
 class ScannerControl(Base):
     """Control flags for scanner worker (pause, request one-time scan)."""
 
@@ -2907,6 +2888,7 @@ class Trader(Base):
     risk_limits_json = Column(JSON, default=dict)
     metadata_json = Column(JSON, default=dict)
     mode = Column(String, nullable=False, default="shadow")
+    latency_class = Column(String, nullable=False, default="normal")
     is_enabled = Column(Boolean, default=True)
     is_paused = Column(Boolean, default=False)
     interval_seconds = Column(Integer, default=60)
@@ -3785,6 +3767,98 @@ def _on_invalidate(dbapi_connection, connection_record, exception):
     )
 
 AsyncSessionLocal = sessionmaker(async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
+
+
+# ==================== FAST-TIER ENGINE ====================
+#
+# Dedicated engine + session factory for the fast latency tier.  Traders with
+# ``latency_class='fast'`` run through this pool exclusively; it is isolated
+# from the main pool so a slow reconciliation query (30s statement_timeout on
+# the main engine) cannot starve a sub-second crypto bot of connections.
+#
+# Deliberately small: a fast trader does one short write per trade, on an
+# event-triggered cycle, so a handful of dedicated connections is plenty.  No
+# overflow — we WANT ``pool_timeout`` errors surfaced fast if the pool saturates
+# rather than queueing behind slow work.
+#
+# Statement timeout is aggressive (1500ms): any DB query the fast path makes
+# that runs longer than that is pathological and should fail loud instead of
+# holding a connection.
+
+_FAST_POOL_SIZE = 4
+_FAST_MAX_OVERFLOW = 0
+_FAST_STATEMENT_TIMEOUT_MS = 1500
+_FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS = 3000
+_FAST_POOL_TIMEOUT_SECONDS = 2
+
+_fast_engine_kw: dict = {
+    "echo": False,
+    "pool_pre_ping": True,
+    "pool_size": _FAST_POOL_SIZE,
+    "max_overflow": _FAST_MAX_OVERFLOW,
+    "pool_timeout": _FAST_POOL_TIMEOUT_SECONDS,
+    "pool_recycle": max(30, int(settings.DATABASE_POOL_RECYCLE_SECONDS)),
+    "pool_use_lifo": True,
+}
+_fast_connect_args: dict = {
+    "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
+    "command_timeout": float(max(2.0, (_FAST_STATEMENT_TIMEOUT_MS / 1000.0) + 1.0)),
+    "server_settings": {
+        "timezone": "UTC",
+        "statement_timeout": str(_FAST_STATEMENT_TIMEOUT_MS),
+        "idle_in_transaction_session_timeout": str(_FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+        "tcp_keepalives_idle": "30",
+        "tcp_keepalives_interval": "5",
+        "tcp_keepalives_count": "3",
+    },
+}
+_fast_engine_kw["connect_args"] = _fast_connect_args
+
+fast_async_engine = create_async_engine(settings.DATABASE_URL, **_fast_engine_kw)
+_db_logger.info(
+    "Fast-tier connection pool created (pool_size=%d, max_overflow=%d, statement_timeout_ms=%d)",
+    _FAST_POOL_SIZE,
+    _FAST_MAX_OVERFLOW,
+    _FAST_STATEMENT_TIMEOUT_MS,
+)
+
+
+@_sa_event.listens_for(fast_async_engine.sync_engine, "checkout")
+def _fast_on_checkout(dbapi_connection, connection_record, connection_proxy):  # noqa: ANN001
+    task_name, coro_name = _pool_task_context()
+    connection_record.info["checkout_time"] = _time.monotonic()
+    connection_record.info["checkout_task_name"] = task_name
+    connection_record.info["checkout_task_coro"] = coro_name
+    try:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute(f"SET statement_timeout = '{_FAST_STATEMENT_TIMEOUT_MS}'")
+            cursor.execute(f"SET idle_in_transaction_session_timeout = '{_FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS}'")
+        finally:
+            cursor.close()
+    except Exception:
+        pass
+
+
+@_sa_event.listens_for(fast_async_engine.sync_engine, "checkin")
+def _fast_on_checkin(dbapi_connection, connection_record):  # noqa: ANN001
+    checkout_time = connection_record.info.pop("checkout_time", None)
+    checkout_task_name = connection_record.info.pop("checkout_task_name", "unknown")
+    checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
+    if checkout_time is not None:
+        elapsed = _time.monotonic() - checkout_time
+        # The fast pool is expected to release connections in <100ms.  A held
+        # connection even for a second indicates something is wrong; warn loud.
+        if elapsed > 1.0:
+            _db_logger.warning(
+                "Fast-tier connection held for %.2fs before return to pool (task=%s, coro=%s)",
+                elapsed,
+                checkout_task_name,
+                checkout_task_coro,
+            )
+
+
+FastAsyncSessionLocal = sessionmaker(fast_async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
 
 
 async def recover_pool() -> None:
