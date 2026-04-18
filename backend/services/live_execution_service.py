@@ -59,6 +59,8 @@ _CLOB_READ_TIMEOUT_SECONDS = 3.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening
 _CLOB_READ_CIRCUIT_BREAKER_COOLDOWN = 30.0  # seconds to wait before retrying
 _CLOB_READ_FAILURE_LOG_INTERVAL = 30.0  # seconds between repeated failure logs
+_SNAPSHOT_SINGLE_LOOKUP_BUDGET_SECONDS = 6.0  # cap the per-call single-order fallback loop
+_SNAPSHOT_SINGLE_LOOKUP_MAX = 8  # cap how many single-order fetches we attempt per call
 _OPEN_ORDER_SNAPSHOT_CACHE_TTL_SECONDS = 2.0
 _BALANCE_CACHE_TTL_SECONDS = 5.0  # short-lived cache to deduplicate calls within one order pipeline
 
@@ -2231,12 +2233,10 @@ class LiveExecutionService:
             try:
                 response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                 _ingest_open_orders(response)
+                self._clob_read_record_success("Open order snapshots fetch")
             except Exception as exc:
                 provider_bulk_fetch_failed = True
-                if _is_transient_transport_error(exc):
-                    logger.warning("Failed to fetch open provider orders", exc_info=exc)
-                else:
-                    logger.error("Failed to fetch open provider orders", exc_info=exc)
+                self._clob_read_record_failure(exc, "Open order snapshots fetch")
                 try:
                     reinitialized = await self.ensure_initialized()
                 except Exception as reinit_exc:
@@ -2245,26 +2245,31 @@ class LiveExecutionService:
                         exc_info=reinit_exc,
                     )
                     reinitialized = False
-                if reinitialized and self.is_ready():
+                if reinitialized and self.is_ready() and not self._clob_read_circuit_open():
                     try:
                         response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                         _ingest_open_orders(response)
                         provider_bulk_fetch_failed = False
+                        self._clob_read_record_success("Open order snapshots fetch")
                     except Exception as retry_exc:
-                        if _is_transient_transport_error(retry_exc):
-                            logger.warning(
-                                "Failed to fetch open provider orders after reinitializing trading client",
-                                exc_info=retry_exc,
-                            )
-                        else:
-                            logger.error(
-                                "Failed to fetch open provider orders after reinitializing trading client",
-                                exc_info=retry_exc,
-                            )
+                        self._clob_read_record_failure(retry_exc, "Open order snapshots retry")
 
         missing = requested.difference(snapshots.keys())
-        if missing and hasattr(self._client, "get_order") and not provider_bulk_fetch_failed and not used_recent_open_order_snapshot_cache:
+        if (
+            missing
+            and hasattr(self._client, "get_order")
+            and not provider_bulk_fetch_failed
+            and not used_recent_open_order_snapshot_cache
+            and not self._clob_read_circuit_open()
+        ):
+            single_lookup_deadline = _time.monotonic() + _SNAPSHOT_SINGLE_LOOKUP_BUDGET_SECONDS
+            single_lookup_attempts = 0
             for clob_id in sorted(missing):
+                if single_lookup_attempts >= _SNAPSHOT_SINGLE_LOOKUP_MAX:
+                    break
+                if _time.monotonic() >= single_lookup_deadline:
+                    break
+                single_lookup_attempts += 1
                 try:
                     single_response = await self._run_client_io(
                         self._client.get_order,

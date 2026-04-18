@@ -2768,7 +2768,7 @@ class ExecutionSessionEngine:
             {
                 str(order.get("trader_order_id") or "").strip()
                 for order in detail.get("orders", [])
-                if str(order.get("status") or "").strip().lower() in {"open", "submitted", "placing"}
+                if str(order.get("status") or "").strip().lower() in {"open", "submitted", "placing", "cancelled", "failed"}
                 and str(order.get("trader_order_id") or "").strip()
             }
         )
@@ -2786,14 +2786,19 @@ class ExecutionSessionEngine:
         total_orders_filled = 0
         for order in detail.get("orders", []):
             status_key = str(order.get("status") or "").strip().lower()
-            if status_key not in {"open", "submitted", "placing"}:
+            # Also process session_orders already marked cancelled/failed so we can sync
+            # a still-placing trader_order to its terminal state — otherwise the trader_order
+            # gets stranded when a prior cleanup (e.g. authority recovery) marked the
+            # session_order terminal but did not write the trader_order row.
+            if status_key not in {"open", "submitted", "placing", "cancelled", "failed"}:
                 continue
             trader_order_id = str(order.get("trader_order_id") or "").strip()
             trader_order = trader_orders_by_id.get(trader_order_id) if trader_order_id else None
-            if trader_order is not None:
-                local_status_key = str(trader_order.status or "").strip().lower()
-                if local_status_key not in {"open", "submitted", "executed", "placing"}:
-                    continue
+            if trader_order is None:
+                continue
+            local_status_key = str(trader_order.status or "").strip().lower()
+            if local_status_key not in {"open", "submitted", "placing", "executed"}:
+                continue
 
             provider_order_id = str(order.get("provider_order_id") or "").strip()
             provider_clob_order_id = str(order.get("provider_clob_order_id") or "").strip()

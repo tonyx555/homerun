@@ -620,6 +620,67 @@ async def _run_reconciliation_cycle(
         except Exception as exc:
             logger.warning("Failed to clean up stale live_trading_orders", exc_info=exc)
 
+    # Self-healing: sync 'placing' trader_orders whose execution_session has already
+    # transitioned to a terminal state (authority recovery path skips this write),
+    # and expire execution_sessions that have been stuck in 'placing' >10 minutes.
+    # Gated by a fill-safety check — never sweep a trader_order whose provider
+    # clob_order_id recorded a non-zero filled_size.
+    try:
+        async with AsyncSessionLocal() as sweep_session:
+            from sqlalchemy import text as sa_text
+            expired_count = await sweep_session.execute(
+                sa_text(
+                    """
+                    UPDATE trader_orders tord
+                       SET status = CASE WHEN s.status = 'failed' THEN 'failed' ELSE 'cancelled' END,
+                           notional_usd = 0,
+                           updated_at = now(),
+                           error_message = CASE WHEN s.status = 'failed'
+                                                 THEN coalesce(tord.error_message, 'Session failed, no fills detected')
+                                                 ELSE coalesce(tord.error_message, 'Session ' || s.status || ', no fills detected') END,
+                           reason = CASE WHEN tord.reason IS NULL OR tord.reason = ''
+                                          THEN 'session:' || s.status || ':swept'
+                                          ELSE tord.reason || ' | session:' || s.status || ':swept' END
+                      FROM execution_session_orders so
+                      JOIN execution_sessions s ON s.id = so.session_id
+                     WHERE so.trader_order_id = tord.id
+                       AND tord.mode = 'live'
+                       AND lower(tord.status) = 'placing'
+                       AND lower(s.status) IN ('failed', 'expired', 'cancelled', 'completed')
+                       AND NOT EXISTS (
+                         SELECT 1 FROM live_trading_orders lto
+                          WHERE lto.clob_order_id = so.provider_clob_order_id
+                            AND coalesce(lto.filled_size, 0) > 0
+                       )
+                    """
+                )
+            )
+            stuck_sess_expire = await sweep_session.execute(
+                sa_text(
+                    """
+                    UPDATE execution_sessions
+                       SET status = 'expired',
+                           completed_at = coalesce(completed_at, now()),
+                           updated_at = now(),
+                           error_message = coalesce(error_message, 'Session swept: ack timeout >10m')
+                     WHERE mode = 'live'
+                       AND lower(status) = 'placing'
+                       AND started_at < now() - interval '10 minutes'
+                    """
+                )
+            )
+            await sweep_session.commit()
+            swept_orders = expired_count.rowcount or 0
+            swept_sessions = stuck_sess_expire.rowcount or 0
+            if swept_orders > 0 or swept_sessions > 0:
+                logger.info(
+                    "Self-healed stranded trader_orders/sessions swept_orders=%d swept_sessions=%d",
+                    swept_orders,
+                    swept_sessions,
+                )
+    except Exception as exc:
+        logger.warning("Self-healing sweep failed", exc_info=exc)
+
     async with AsyncSessionLocal() as session:
         traders = await list_traders(session)
 
