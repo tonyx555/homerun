@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from sqlalchemy.exc import DBAPIError
 
-from models.database import FastAsyncSessionLocal
+from models.database import AsyncSessionLocal, FastAsyncSessionLocal
 from services.event_bus import event_bus
 from services.strategy_loader import strategy_loader
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
@@ -367,7 +367,10 @@ class _FastRuntime:
             return
         self._last_heartbeat = now_mono
         try:
-            async with FastAsyncSessionLocal() as session:
+            # Heartbeat uses the MAIN pool — the fast-tier pool is reserved
+            # for the trading hot path, not worker-snapshot writes.  Keeping
+            # it here caused _fast_on_checkin warnings ("held for 7.8s").
+            async with AsyncSessionLocal() as session:
                 await write_worker_snapshot(
                     session,
                     WORKER_NAME,
@@ -388,7 +391,10 @@ class _FastRuntime:
         async with self._refresh_lock:
             if self._stopping:
                 return
-            async with FastAsyncSessionLocal() as session:
+            # Roster refresh is a slow-cadence maintenance read; use the
+            # main pool so we do not touch the tight fast-tier pool for
+            # anything other than the per-trader trading loop.
+            async with AsyncSessionLocal() as session:
                 traders = await list_fast_traders(session)
             seen_ids: set[str] = set()
             for trader in traders:
