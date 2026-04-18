@@ -141,6 +141,25 @@ class RetryableAsyncSession(AsyncSession):
         except Exception:
             pass
 
+    async def commit(self) -> None:
+        """Cancellation-safe commit.
+
+        asyncpg sends the commit over the extended protocol as a
+        Parse/Bind/Execute/Sync sequence.  If a CancelledError hits
+        mid-sequence the server is left in state=active with
+        wait_event=Client/ClientRead and an open transaction that
+        nothing else can reap until the worker restarts.  Shielding
+        the commit lets the whole sequence finish atomically while
+        still re-raising CancelledError to the caller afterwards.
+        """
+        try:
+            await asyncio.shield(super().commit())
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._fire_and_forget(self._do_rollback_or_invalidate())
+            raise
+
     async def execute(self, statement, params=None, **kwargs):
         try:
             return await super().execute(statement, params=params, **kwargs)
