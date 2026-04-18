@@ -4713,18 +4713,6 @@ async def _run_trader_once(
                     payload={"changes": live_risk_clamp_changes},
                 )
         allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
-        excluded_entry_market_ids: set[str] = set()
-        if not allow_averaging:
-            excluded_entry_market_ids |= occupied_market_ids
-            excluded_entry_market_ids |= reentry_cooldown_market_ids
-        if prefetched_signals and excluded_entry_market_ids:
-            prefetched_signals = [
-                signal
-                for signal in prefetched_signals
-                if str(getattr(signal, "market_id", "") or "").strip() not in excluded_entry_market_ids
-            ]
-            if not prefetched_signals:
-                prefetched_signals = None
         # Realized PnL: instant hot-state lookups.
         global_daily_pnl = await get_daily_realized_pnl(session, trader_id=None, mode=run_mode)
         trader_daily_pnl = await get_daily_realized_pnl(session, trader_id=trader_id, mode=run_mode)
@@ -5245,20 +5233,45 @@ async def _run_trader_once(
                                 int((signal_wake_started_at - signal_emitted_at).total_seconds() * 1000),
                             )
                             if signal_release_age_ms > strict_release_age_budget_ms:
-                                await get_intent_runtime().update_signal_status(
-                                    signal_id=signal_id,
-                                    status="expired",
-                                )
-                                await set_trade_signal_status(
-                                    session,
-                                    signal_id=signal_id,
-                                    status="expired",
-                                    commit=False,
-                                )
-                                expired_signals += 1
-                                expired_by_reason["strict_ws_pricing_signal_release_stale"] = (
-                                    expired_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
-                                )
+                                runtime = get_intent_runtime()
+                                if run_mode == "live" and hasattr(runtime, "update_signal_status"):
+                                    await runtime.update_signal_status(
+                                        signal_id=signal_id,
+                                        status="expired",
+                                    )
+                                    await set_trade_signal_status(
+                                        session,
+                                        signal_id=signal_id,
+                                        status="expired",
+                                        commit=False,
+                                    )
+                                    expired_signals += 1
+                                    expired_by_reason["strict_ws_pricing_signal_release_stale"] = (
+                                        expired_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
+                                    )
+                                elif hasattr(runtime, "defer_signal"):
+                                    await runtime.defer_signal(
+                                        signal_id=signal_id,
+                                        required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
+                                        reason="strict_ws_pricing_signal_release_stale",
+                                        min_observed_at=signal_emitted_at,
+                                        required_max_age_ms=strict_release_age_budget_ms,
+                                    )
+                                    deferred_signals += 1
+                                    deferred_by_reason["strict_ws_pricing_signal_release_stale"] = (
+                                        deferred_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
+                                    )
+                                else:
+                                    await set_trade_signal_status(
+                                        session,
+                                        signal_id=signal_id,
+                                        status="expired",
+                                        commit=False,
+                                    )
+                                    expired_signals += 1
+                                    expired_by_reason["strict_ws_pricing_signal_release_stale"] = (
+                                        expired_by_reason.get("strict_ws_pricing_signal_release_stale", 0) + 1
+                                    )
                                 defer_signal_processing = True
                                 continue
                     requested_strategy_version = prefetched_source_runtime.get("requested_strategy_version")
@@ -5483,8 +5496,9 @@ async def _run_trader_once(
                             )
                             live_reason_parts.append(f"max_age_ms={effective_max_age_ms}")
                             live_reason_parts.append(f"required_sources={effective_strict_sources}")
-                            if signal_source == "crypto":
-                                await get_intent_runtime().update_signal_status(
+                            runtime = get_intent_runtime()
+                            if signal_source == "crypto" and run_mode == "live" and hasattr(runtime, "update_signal_status"):
+                                await runtime.update_signal_status(
                                     signal_id=signal_id,
                                     status="expired",
                                 )
@@ -5498,8 +5512,8 @@ async def _run_trader_once(
                                 expired_by_reason["strict_ws_pricing_live_context_unavailable"] = (
                                     expired_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
                                 )
-                            else:
-                                await get_intent_runtime().defer_signal(
+                            elif hasattr(runtime, "defer_signal"):
+                                await runtime.defer_signal(
                                     signal_id=signal_id,
                                     required_token_ids=list(getattr(signal, "required_token_ids", None) or []),
                                     reason="strict_ws_pricing_live_context_unavailable",
@@ -5509,6 +5523,17 @@ async def _run_trader_once(
                                 deferred_signals += 1
                                 deferred_by_reason["strict_ws_pricing_live_context_unavailable"] = (
                                     deferred_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
+                                )
+                            else:
+                                await set_trade_signal_status(
+                                    session,
+                                    signal_id=signal_id,
+                                    status="expired",
+                                    commit=False,
+                                )
+                                expired_signals += 1
+                                expired_by_reason["strict_ws_pricing_live_context_unavailable"] = (
+                                    expired_by_reason.get("strict_ws_pricing_live_context_unavailable", 0) + 1
                                 )
                             defer_signal_processing = True
                             continue
@@ -6433,12 +6458,45 @@ async def _run_trader_once(
                         # spending real money.  The hot-state pre-gate is fast but
                         # can miss entries during reseed or after wallet_absent_close.
                         if _pre_gate_market_id and not allow_averaging and run_mode == "live":
-                            _db_occupied_market_ids = await get_occupied_market_ids_for_trader(
-                                session,
-                                trader_id,
-                                mode=run_mode,
+                            active_order_statuses = (
+                                "pending",
+                                "placing",
+                                "submitted",
+                                "open",
+                                "working",
+                                "partial",
+                                "partially_filled",
+                                "hedging",
+                                "executed",
                             )
-                            if _pre_gate_market_id in _db_occupied_market_ids:
+                            position_occupied = bool(
+                                (
+                                    await session.execute(
+                                        select(func.count())
+                                        .select_from(TraderPosition)
+                                        .where(TraderPosition.trader_id == trader_id)
+                                        .where(func.lower(func.coalesce(TraderPosition.mode, "")) == run_mode)
+                                        .where(func.lower(func.coalesce(TraderPosition.status, "")) == "open")
+                                        .where(TraderPosition.market_id == _pre_gate_market_id)
+                                    )
+                                ).scalar_one()
+                                or 0
+                            ) > 0
+                            order_occupied = bool(
+                                (
+                                    await session.execute(
+                                        select(func.count())
+                                        .select_from(TraderOrder)
+                                        .where(TraderOrder.trader_id == trader_id)
+                                        .where(func.lower(func.coalesce(TraderOrder.mode, "")) == run_mode)
+                                        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(active_order_statuses))
+                                        .where(TraderOrder.market_id == _pre_gate_market_id)
+                                    )
+                                ).scalar_one()
+                                or 0
+                            ) > 0
+                            if position_occupied or order_occupied:
+                                _db_occupied_market_ids = [_pre_gate_market_id]
                                 final_decision = "blocked"
                                 final_reason = "Stacking guard: market already occupied (DB verification)"
                                 checks_payload = list(checks_payload)

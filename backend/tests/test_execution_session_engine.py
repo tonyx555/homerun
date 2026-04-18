@@ -1135,6 +1135,54 @@ async def test_reconcile_active_sessions_fails_stale_pre_submit_placeholders(mon
 
 
 @pytest.mark.asyncio
+async def test_reconcile_active_sessions_skips_authority_recovery_for_ancient_stale_pre_submit_placeholders(
+    monkeypatch,
+):
+    db = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock(), get=AsyncMock(return_value=None))
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    stale_row = SimpleNamespace(
+        id="sess-ancient-stale-submit",
+        trader_id="trader-1",
+        status="placing",
+        expires_at=utcnow() + timedelta(minutes=30),
+        payload_json={},
+        created_at=utcnow() - timedelta(hours=2),
+        updated_at=utcnow() - timedelta(hours=2),
+    )
+
+    monkeypatch.setattr(
+        session_engine_module,
+        "list_active_execution_sessions",
+        AsyncMock(return_value=[stale_row]),
+    )
+    recover_mock = AsyncMock(return_value={"recovered_orders": 0})
+    monkeypatch.setattr(session_engine_module, "recover_missing_live_trader_orders", recover_mock)
+    cancel_session_mock = AsyncMock(return_value=True)
+    monkeypatch.setattr(engine, "cancel_session", cancel_session_mock)
+    leg_rollups_mock = AsyncMock(
+        return_value={
+            "sess-ancient-stale-submit": {
+                "legs_total": 0,
+                "legs_completed": 0,
+                "legs_failed": 0,
+                "legs_open": 0,
+            }
+        }
+    )
+    monkeypatch.setattr(session_engine_module, "get_execution_session_leg_rollups", leg_rollups_mock)
+
+    result = await engine.reconcile_active_sessions(mode="live", trader_id="trader-1")
+
+    assert result["active_seen"] == 1
+    assert result["failed"] == 1
+    assert recover_mock.await_count == 0
+    assert cancel_session_mock.await_count == 1
+    assert cancel_session_mock.await_args.kwargs["terminal_status"] == "failed"
+    assert "did not persist provider acknowledgement" in cancel_session_mock.await_args.kwargs["reason"]
+
+
+@pytest.mark.asyncio
 async def test_cancel_session_skips_already_terminal_trader_orders(monkeypatch):
     db = SimpleNamespace(commit=AsyncMock(), execute=AsyncMock())
     engine = session_engine_module.ExecutionSessionEngine(db)

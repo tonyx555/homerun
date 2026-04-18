@@ -4430,6 +4430,11 @@ async def reconcile_live_positions(
                 or isinstance(latest_wallet_sell_trade, dict)
                 or isinstance(wallet_close_activity, dict)
                 or isinstance(closed_position, dict)
+                or (
+                    wallet_positions_loaded
+                    and not wallet_position_observed
+                    and terminal_provider_status
+                )
             )
             close_fill_threshold_met = (
                 required_exit_size > 0.0
@@ -4953,7 +4958,12 @@ async def reconcile_live_positions(
                 (now_naive - last_attempt_dt).total_seconds() if last_attempt_dt is not None else float("inf")
             )
 
-            if retry_count >= _FAILED_EXIT_MAX_RETRIES:
+            soft_retry_exhausted_bypass = bool(
+                retry_count >= _FAILED_EXIT_MAX_RETRIES
+                and wallet_position_size > _WALLET_SIZE_EPSILON
+                and token_id
+            )
+            if retry_count >= _FAILED_EXIT_MAX_RETRIES and not soft_retry_exhausted_bypass:
                 if not dry_run:
                     pending_exit["status"] = "blocked_retry_exhausted"
                     pending_exit["exhausted_at"] = _iso_utc(now)
@@ -5074,7 +5084,7 @@ async def reconcile_live_positions(
                         )
                         if not dry_run:
                             pending_exit["status"] = "submitted"
-                            pending_exit["retry_count"] = retry_count + 1
+                            pending_exit["retry_count"] = retry_count if soft_retry_exhausted_bypass else retry_count + 1
                             pending_exit["allowance_error_count"] = 0
                             pending_exit["last_attempt_at"] = _iso_utc(now)
                             pending_exit["next_retry_at"] = None

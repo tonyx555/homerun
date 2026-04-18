@@ -21,6 +21,7 @@ from models.database import (
     get_db_session,
     recover_pool,
 )
+from models.opportunity import OpportunityFilter
 from services import polymarket_client
 from services.wallet_tracker import wallet_tracker
 from services.kalshi_client import kalshi_client
@@ -475,6 +476,40 @@ async def _list_filtered_opportunity_payloads(
     source = _resolve_fastapi_param(source) or "markets"
 
     strategies = set(await _resolve_strategy_to_filter(strategy))
+    if not hasattr(session, "execute"):
+        legacy_filter = OpportunityFilter(
+            min_profit=min_profit,
+            max_risk=max_risk,
+            strategies=sorted(strategies),
+            min_liquidity=min_liquidity,
+            category=category,
+        )
+        legacy_opportunities = await shared_state.get_opportunities_from_db(
+            session,
+            legacy_filter,
+            source=source,
+        )
+        payloads = [opportunity.model_dump() for opportunity in legacy_opportunities]
+        if exclude_strategy:
+            exclude_strategy_lower = str(exclude_strategy).strip().lower()
+            payloads = [
+                payload
+                for payload in payloads
+                if str(payload.get("strategy") or "").strip().lower() != exclude_strategy_lower
+            ]
+        if search:
+            search_lower = str(search).strip().lower()
+            payloads = [payload for payload in payloads if _payload_search_matches(payload, search_lower)]
+        normalized_sub = _normalize_sub_strategy(sub_strategy)
+        if normalized_sub:
+            payloads = [
+                payload
+                for payload in payloads
+                if _derive_opportunity_sub_strategy(payload) == normalized_sub
+            ]
+        if sort_results:
+            _sort_opportunity_payloads(payloads, sort_by=sort_by, sort_dir=sort_dir)
+        return payloads
     payloads = await _read_opportunity_payloads(session, source=source)
 
     if min_profit > 0:

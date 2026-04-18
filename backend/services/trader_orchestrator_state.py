@@ -107,6 +107,7 @@ CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
 _LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
 _LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 150
 _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
+_LIVE_ORDER_AUTHORITY_RECOVERY_RECENT_TERMINAL_LOOKBACK_MINUTES = 30
 PENDING_LIVE_EXIT_TERMINAL_STATUSES = {
     "filled",
     "superseded_resolution",
@@ -2476,20 +2477,33 @@ async def recover_missing_live_trader_orders(
 ) -> dict[str, Any]:
     trader_id_filter = {str(value or "").strip() for value in (trader_ids or []) if str(value or "").strip()}
     await _acquire_live_order_authority_recovery_lock(session)
-    # Only recover orders from the last 24 hours.  Older orders are stale
-    # CLOB records that Polymarket still considers "open" but were filled or
-    # cancelled long ago.  Loading all 16K+ rows was causing 30s+ timeouts
-    # and 100MB+ memory spikes every cycle.
-    _recovery_cutoff = _now() - timedelta(hours=_LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS)
+    # Only recover live authority from the last 24 hours, and only keep
+    # terminal venue rows in a short lookback window. Old failed/cancelled
+    # rows are already final and repeatedly rescanning them was starving the
+    # pool without producing any new local authority.
+    now = _now()
+    _recovery_cutoff = now - timedelta(hours=_LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS)
+    _recent_terminal_cutoff = now - timedelta(
+        minutes=_LIVE_ORDER_AUTHORITY_RECOVERY_RECENT_TERMINAL_LOOKBACK_MINUTES
+    )
+    _live_row_timestamp = func.coalesce(LiveTradingOrder.updated_at, LiveTradingOrder.created_at)
     live_rows_query = (
         select(LiveTradingOrder)
         .where(
-            func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
-                ("open", "filled", "pending", "partially_filled", "failed", "cancelled", "expired")
+            or_(
+                func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
+                    ("open", "filled", "pending", "partially_filled")
+                ),
+                and_(
+                    func.lower(func.coalesce(LiveTradingOrder.status, "")).in_(
+                        ("failed", "cancelled", "expired")
+                    ),
+                    _live_row_timestamp >= _recent_terminal_cutoff,
+                ),
             )
         )
-        .where(LiveTradingOrder.created_at >= _recovery_cutoff)
-        .order_by(desc(LiveTradingOrder.created_at))
+        .where(_live_row_timestamp >= _recovery_cutoff)
+        .order_by(desc(_live_row_timestamp))
     )
     if not trader_id_filter:
         live_rows_query = live_rows_query.limit(_LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS)
@@ -2623,7 +2637,6 @@ async def recover_missing_live_trader_orders(
             for row in trader_rows
             if str(row.id or "").strip()
         }
-    now = _now()
     existing_provider_rows_by_clob_id: dict[str, TraderOrder] = {}
     existing_rows_by_live_order_id: dict[str, TraderOrder] = {}
     pending_exit_rows_by_clob_id: dict[str, TraderOrder] = {}
@@ -6210,6 +6223,19 @@ async def list_unconsumed_trade_signals(
     if isinstance(normalized_cursor_created_at, datetime) and normalized_cursor_created_at.tzinfo is not None:
         normalized_cursor_created_at = normalized_cursor_created_at.astimezone(timezone.utc).replace(tzinfo=None)
     normalized_cursor_signal_id = str(cursor_signal_id or "").strip()
+    cursor_signal_consumed = False
+    if normalized_cursor_signal_id:
+        cursor_signal_consumed = bool(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(TraderSignalConsumption)
+                    .where(TraderSignalConsumption.trader_id == trader_id)
+                    .where(TraderSignalConsumption.signal_id == normalized_cursor_signal_id)
+                )
+            ).scalar_one()
+            or 0
+        ) > 0
     signal_sort_ts = func.coalesce(TradeSignal.updated_at, TradeSignal.created_at)
     max_consumed_subq = (
         select(
@@ -6227,6 +6253,10 @@ async def list_unconsumed_trade_signals(
     pending_unconsumed_clause = and_(
         max_consumed_subq.c.max_consumed_at.is_(None),
         func.lower(func.coalesce(TradeSignal.status, "")) == "pending",
+    )
+    pending_unconsumed_cursor_bypass_clause = and_(
+        pending_unconsumed_clause,
+        cursor_signal_consumed,
     )
     query = (
         select(TradeSignal)
@@ -6262,7 +6292,7 @@ async def list_unconsumed_trade_signals(
     if normalized_cursor_runtime_sequence is not None:
         query = query.where(
             or_(
-                pending_unconsumed_clause,
+                pending_unconsumed_cursor_bypass_clause,
                 reactivated_after_consumption_clause,
                 TradeSignal.runtime_sequence.is_(None),
                 TradeSignal.runtime_sequence > normalized_cursor_runtime_sequence,
@@ -6272,7 +6302,7 @@ async def list_unconsumed_trade_signals(
         if normalized_cursor_signal_id:
             query = query.where(
                 or_(
-                    pending_unconsumed_clause,
+                    pending_unconsumed_cursor_bypass_clause,
                     reactivated_after_consumption_clause,
                     signal_sort_ts > normalized_cursor_created_at,
                     and_(signal_sort_ts == normalized_cursor_created_at, TradeSignal.id > normalized_cursor_signal_id),
@@ -6281,7 +6311,7 @@ async def list_unconsumed_trade_signals(
         else:
             query = query.where(
                 or_(
-                    pending_unconsumed_clause,
+                    pending_unconsumed_cursor_bypass_clause,
                     reactivated_after_consumption_clause,
                     signal_sort_ts > normalized_cursor_created_at,
                 )
@@ -6364,20 +6394,24 @@ async def upsert_trader_signal_cursor(
     trader_id: str,
     last_signal_created_at: Optional[datetime],
     last_signal_id: Optional[str],
+    last_runtime_sequence: Optional[int] = None,
     commit: bool = True,
 ) -> None:
+    normalized_runtime_sequence = safe_int(last_runtime_sequence, None)
     row = await session.get(TraderSignalCursor, trader_id)
     if row is None:
         row = TraderSignalCursor(
             trader_id=trader_id,
             last_signal_created_at=last_signal_created_at,
             last_signal_id=last_signal_id,
+            last_runtime_sequence=normalized_runtime_sequence,
             updated_at=_now(),
         )
         session.add(row)
     else:
         row.last_signal_created_at = last_signal_created_at
         row.last_signal_id = str(last_signal_id or "") or None
+        row.last_runtime_sequence = normalized_runtime_sequence
         row.updated_at = _now()
 
     if commit:
@@ -9249,6 +9283,35 @@ async def get_trader_orders_summary(
         resolved_statuses=resolved_statuses,
         failed_statuses=failed_statuses,
     )
+    active_position_query = (
+        select(TraderPosition.trader_id, func.count().label("open_trades"))
+        .where(func.lower(func.coalesce(TraderPosition.status, "")) == ACTIVE_POSITION_STATUS)
+        .group_by(TraderPosition.trader_id)
+    )
+    if mode:
+        active_position_query = active_position_query.where(
+            func.lower(func.coalesce(TraderPosition.mode, "")) == mode.strip().lower()
+        )
+    active_position_rows = (await session.execute(active_position_query)).all()
+    active_position_counts_by_trader = {
+        str(row.trader_id or ""): int(row.open_trades or 0)
+        for row in active_position_rows
+    }
+    active_position_open_trades = sum(active_position_counts_by_trader.values())
+    if active_position_open_trades > 0:
+        trade_totals["open_trades"] = active_position_open_trades
+        for trader_id_key, open_trade_count in active_position_counts_by_trader.items():
+            trade_counts = trade_counts_by_trader.setdefault(
+                trader_id_key,
+                {
+                    "trade_count": 0,
+                    "open_trades": 0,
+                    "resolved_trades": 0,
+                    "failed_trades": 0,
+                    "partial_open_bundles": 0,
+                },
+            )
+            trade_counts["open_trades"] = int(open_trade_count or 0)
     by_source_query = select(
         TraderOrder.source,
         func.count().label("orders"),

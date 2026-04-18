@@ -1674,6 +1674,60 @@ async def test_recover_missing_live_trader_orders_finalizes_unfilled_existing_en
 
 
 @pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_ignores_old_terminal_live_orders(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-ignore-old-terminal-authority"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-ignore-old-terminal-authority",
+                signal_id="signal-ignore-old-terminal-authority",
+                market_id="market-old-terminal-authority",
+                market_question="Will Example Corp close above $50?",
+                direction="buy_yes",
+            )
+            stale_terminal_at = utcnow() - timedelta(hours=2)
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-old-terminal-authority",
+                    wallet_address="0xwallet",
+                    clob_order_id=None,
+                    token_id="token-old-terminal-authority",
+                    side="BUY",
+                    price=0.86,
+                    size=10.0,
+                    order_type="IOC",
+                    status="failed",
+                    filled_size=0.0,
+                    average_fill_price=0.0,
+                    market_question="Will Example Corp close above $50?",
+                    error_message="stale terminal venue row",
+                    created_at=stale_terminal_at,
+                    updated_at=stale_terminal_at,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            recovered_rows = (
+                await session.execute(select(TraderOrder).where(TraderOrder.trader_id == trader_id))
+            ).scalars().all()
+            assert recovered_rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_recover_missing_live_trader_orders_carries_full_bundle_signal_metadata(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-bundle-authority"
