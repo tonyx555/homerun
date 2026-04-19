@@ -7090,6 +7090,26 @@ async def _run_trader_once(
                             status=signal_status,
                             commit=False,
                         )
+                        # If the block reason is signal staleness, also mark
+                        # the signal as expired so the scanner's continuous
+                        # re-publishes cannot reactivate it through
+                        # list_unconsumed_trade_signals' updated_at>consumed_at
+                        # clause.  Without this the orchestrator re-evaluates
+                        # the same stale signal every scanner tick and spams
+                        # the decision log with "Signal stale" blocks.
+                        if isinstance(final_reason, str) and final_reason.startswith("Signal stale:"):
+                            try:
+                                await session.execute(
+                                    sa_update(TradeSignal)
+                                    .where(TradeSignal.id == signal_id)
+                                    .values(expires_at=utcnow().replace(tzinfo=None))
+                                )
+                            except Exception as _exp_exc:
+                                logger.debug(
+                                    "Failed to expire stale signal",
+                                    signal_id=signal_id,
+                                    exc_info=_exp_exc,
+                                )
 
                     await record_signal_consumption(
                         session,
