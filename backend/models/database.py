@@ -183,6 +183,30 @@ class RetryableAsyncSession(AsyncSession):
                 pass
             raise
 
+    async def flush(self, objects=None) -> None:
+        """Cancellation-safe flush.
+
+        flush() is where session.add() rows actually get sent to the
+        server as INSERT/UPDATE statements over the asyncpg extended
+        protocol.  Same tear-in-the-middle hazard as commit: a
+        CancelledError between Parse/Bind and Execute/Sync leaves the
+        backend in state=active wait_event=Client/ClientRead with an
+        open transaction that neither statement_timeout nor
+        idle_in_transaction_session_timeout can reap.  Zombies
+        observed lasting 10-15+ hours until the worker process was
+        restarted or a supervisor killed the backend.
+
+        Shield the flush so the extended-protocol sequence completes
+        atomically; CancelledError still propagates to the caller.
+        """
+        try:
+            await asyncio.shield(super().flush(objects))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self._fire_and_forget(self._do_rollback_or_invalidate())
+            raise
+
     # ------------------------------------------------------------------
     # Internal helpers (run inside fire-and-forget tasks)
     # ------------------------------------------------------------------
@@ -3902,6 +3926,25 @@ async def recover_pool() -> None:
 _CHECKOUT_HARD_LIMIT_SECONDS = 45.0   # 45 seconds — no single checkout should take this long; previous 120s allowed cascading exhaustion
 _REAPER_SCAN_INTERVAL_SECONDS = 5.0   # check more frequently to catch exhaustion earlier
 _POOL_EXHAUSTION_THRESHOLD = 0.85     # trigger recovery when 85% of slots are checked out
+
+# ==================== ZOMBIE BACKEND SWEEPER ====================
+#
+# Postgres backends stuck in state=active wait_event=ClientRead hold
+# row-level locks indefinitely and are NOT reaped by either
+# statement_timeout (the statement is already sent) or
+# idle_in_transaction_session_timeout (state is not idle).  This
+# happens when asyncpg is cancelled mid extended-query protocol
+# (Parse/Bind without Execute/Sync).  We have seen these linger for
+# 10-15+ hours, blocking every downstream write on the same rows.
+#
+# The client-side pool reaper cannot fix this -- the connection may
+# already have been GCd on the Python side, but the server backend
+# is still alive waiting for more protocol messages.  We query
+# pg_stat_activity directly and pg_terminate_backend() the zombies.
+
+_ZOMBIE_BACKEND_AGE_SECONDS = 180  # 3 minutes - generous, must not catch legit slow writes
+_ZOMBIE_SWEEPER_INTERVAL_SECONDS = 30.0
+
 _reaper_task: asyncio.Task | None = None
 
 
@@ -4015,6 +4058,66 @@ async def _reap_stale_checkouts() -> None:
     return reaped
 
 
+async def _sweep_zombie_backends() -> int:
+    """Terminate Postgres backends stuck in active Client/ClientRead.
+
+    Returns the number of backends terminated.  These are DB-side zombies
+    that the client-side pool reaper cannot see -- cancelled asyncpg
+    sessions that left the server waiting for extended-protocol Execute.
+    """
+    # Use a short-lived raw asyncpg connection separate from the SQLAlchemy
+    # pool so we never compete with the work we are trying to unblock.
+    try:
+        import asyncpg
+        dsn = str(settings.DATABASE_URL).replace("+asyncpg", "")
+        probe_conn = await asyncio.wait_for(asyncpg.connect(dsn=dsn, timeout=5), timeout=6)
+    except Exception as exc:
+        _db_logger.debug("Zombie sweeper probe connect failed: %s", exc)
+        return 0
+    terminated = 0
+    try:
+        rows = await asyncio.wait_for(
+            probe_conn.fetch(
+                """
+                SELECT pid, now()-xact_start AS age, left(query, 140) AS q
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND state = 'active'
+                  AND wait_event_type = 'Client'
+                  AND wait_event = 'ClientRead'
+                  AND xact_start < now() - make_interval(secs => $1)
+                """,
+                _ZOMBIE_BACKEND_AGE_SECONDS,
+            ),
+            timeout=5,
+        )
+        for row in rows:
+            pid = int(row["pid"])
+            try:
+                ok = await asyncio.wait_for(
+                    probe_conn.fetchval("SELECT pg_terminate_backend($1)", pid),
+                    timeout=3,
+                )
+                if ok:
+                    terminated += 1
+                    _db_logger.error(
+                        "ZOMBIE SWEEPER: terminated pid=%s age=%s query=%s",
+                        pid,
+                        row["age"],
+                        row["q"],
+                    )
+            except Exception as kill_exc:
+                _db_logger.warning("ZOMBIE SWEEPER: pg_terminate_backend(%s) failed: %s", pid, kill_exc)
+    except Exception as query_exc:
+        _db_logger.debug("ZOMBIE SWEEPER: probe query failed: %s", query_exc)
+    finally:
+        try:
+            await asyncio.wait_for(probe_conn.close(), timeout=3)
+        except Exception:
+            pass
+    return terminated
+
+
 async def _pool_watchdog_loop() -> None:
     """Background loop: reap stale checkouts and recover exhausted pools."""
     _db_logger.info(
@@ -4033,6 +4136,20 @@ async def _pool_watchdog_loop() -> None:
             reaped = await _reap_stale_checkouts()
             if reaped:
                 _db_logger.warning("REAPER: Invalidated %d stale connection(s)", reaped)
+
+            # Phase 1b: sweep Postgres-side zombie backends (cancelled
+            # extended-protocol sessions stuck in active Client/ClientRead).
+            # These hold row locks indefinitely and are invisible to the
+            # SQLAlchemy-side reaper.
+            try:
+                zombies = await _sweep_zombie_backends()
+                if zombies:
+                    _db_logger.error(
+                        "ZOMBIE SWEEPER: terminated %d zombie backend(s)",
+                        zombies,
+                    )
+            except Exception as sweep_exc:
+                _db_logger.debug("Zombie sweeper error (non-fatal): %s", sweep_exc)
 
             # Phase 2: check pool utilization
             stats = _get_pool_stats()
