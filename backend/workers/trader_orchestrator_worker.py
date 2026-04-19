@@ -3254,11 +3254,16 @@ async def _live_provider_failure_snapshot(
         pending_live_exit = pending_live_exit if isinstance(pending_live_exit, dict) else {}
         provider_reconcile = payload.get("provider_reconciliation")
         provider_reconcile = provider_reconcile if isinstance(provider_reconcile, dict) else {}
+        # Deliberately NOT including pending_live_exit.last_error here.
+        # Exit-side timeouts are market-specific (thin book, FAK no-match,
+        # stop-loss chasing a moving price) - they are NOT provider
+        # infrastructure failures and should not pause new entries for
+        # every market.  Entry-side timeouts still count via
+        # row.error_message and provider_reconciliation.error.
         candidates = [
             row.error_message,
             payload.get("error_message"),
             payload.get("error"),
-            pending_live_exit.get("last_error"),
             provider_reconcile.get("error"),
         ]
         matched_error = next((text for text in candidates if _is_live_provider_infra_error(text)), None)
