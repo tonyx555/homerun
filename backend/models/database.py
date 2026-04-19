@@ -142,7 +142,7 @@ class RetryableAsyncSession(AsyncSession):
             pass
 
     async def commit(self) -> None:
-        """Cancellation-safe commit.
+        """Cancellation-safe commit with retry on transient errors.
 
         asyncpg sends the commit over the extended protocol as a
         Parse/Bind/Execute/Sync sequence.  If a CancelledError hits
@@ -152,13 +152,23 @@ class RetryableAsyncSession(AsyncSession):
         the commit lets the whole sequence finish atomically while
         still re-raising CancelledError to the caller afterwards.
         """
-        try:
-            await asyncio.shield(super().commit())
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._fire_and_forget(self._do_rollback_or_invalidate())
-            raise
+        for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
+            try:
+                await asyncio.shield(super().commit())
+                return
+            except asyncio.CancelledError:
+                raise
+            except DBAPIError as exc:
+                message = str(getattr(exc, "orig", exc)).lower()
+                retryable = any(marker in message for marker in self._COMMIT_RETRYABLE_MESSAGES)
+                if not retryable or attempt >= self._COMMIT_RETRY_ATTEMPTS:
+                    raise
+                await self._reset_after_failed_commit()
+                delay = min(self._COMMIT_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), 0.4)
+                await asyncio.sleep(delay)
+            except Exception:
+                self._fire_and_forget(self._do_rollback_or_invalidate())
+                raise
 
     async def execute(self, statement, params=None, **kwargs):
         try:
@@ -265,19 +275,6 @@ class RetryableAsyncSession(AsyncSession):
             except Exception:
                 pass
 
-    async def commit(self) -> None:
-        for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
-            try:
-                await super().commit()
-                return
-            except DBAPIError as exc:
-                message = str(getattr(exc, "orig", exc)).lower()
-                retryable = any(marker in message for marker in self._COMMIT_RETRYABLE_MESSAGES)
-                if not retryable or attempt >= self._COMMIT_RETRY_ATTEMPTS:
-                    raise
-                await self._reset_after_failed_commit()
-                delay = min(self._COMMIT_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), 0.4)
-                await asyncio.sleep(delay)
 
 class TradeStatus(enum.Enum):
     PENDING = "pending"
