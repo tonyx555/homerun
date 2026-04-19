@@ -1275,6 +1275,18 @@ async def _build_triggered_trade_signals(
             row_market_id = str(getattr(row, "market_id", "") or "").strip()
             if row_market_id and row_market_id in excluded_market_ids:
                 continue
+            # Honor signal expiry even on the snapshot-only path.  When
+            # list_unconsumed filters out an expired signal, authoritative_row
+            # is None but the snapshot still contains its data; without this
+            # check the orchestrator re-evaluates the same expired signal on
+            # every scanner re-publish, wasting cycle budget indefinitely.
+            row_expires_at = getattr(row, "expires_at", None)
+            if isinstance(row_expires_at, datetime):
+                _exp = row_expires_at
+                if _exp.tzinfo is not None:
+                    _exp = _exp.astimezone(timezone.utc).replace(tzinfo=None)
+                if _exp <= utcnow().replace(tzinfo=None):
+                    continue
             seen_row_ids.add(signal_id)
             rows.append(row)
 
