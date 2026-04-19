@@ -4784,7 +4784,9 @@ async def reconcile_live_positions(
                             else:
                                 pending_exit["status"] = "failed"
                                 pending_exit["retry_count"] = int(pending_exit.get("retry_count", 0) or 0) + 1
-                                pending_exit["last_error"] = str(exec_result.error_message or "exit_requote_failed")
+                                pending_exit["last_error"] = _format_exit_error(
+                                    exec_result.error_message
+                                ) if exec_result.error_message else "exit_requote_failed"
                                 _bump_allowance_error_counter(pending_exit, pending_exit["last_error"])
                                 pending_exit["next_retry_at"] = _iso_utc(
                                     now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
@@ -4792,7 +4794,10 @@ async def reconcile_live_positions(
                         except Exception as exc:
                             pending_exit["status"] = "failed"
                             pending_exit["retry_count"] = int(pending_exit.get("retry_count", 0) or 0) + 1
-                            pending_exit["last_error"] = str(exc)
+                            # Use _format_exit_error so an empty-message
+                            # exception (TimeoutError()) still produces
+                            # a useful last_error instead of "".
+                            pending_exit["last_error"] = _format_exit_error(exc)
                             _bump_allowance_error_counter(pending_exit, pending_exit["last_error"])
                             pending_exit["next_retry_at"] = _iso_utc(
                                 now + timedelta(seconds=_failed_exit_retry_delay_seconds(pending_exit["last_error"]))
