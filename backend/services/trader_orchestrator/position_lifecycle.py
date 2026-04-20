@@ -64,7 +64,18 @@ _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
-_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 3.0
+# Retries specifically exist because the provider is slow/flaky; giving them
+# a tighter budget than the primary path guaranteed TimeoutErrors whenever
+# Polymarket took >3s to acknowledge a sell.  Match the primary's budget so
+# retries actually complete instead of burning retry_count on timeouts that
+# the provider would have answered in 5-8s.
+_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 10.0
+# Cap the number of exits we submit per reconcile pass.  With 20+ stuck
+# retry candidates each taking up to 10s sequentially, a single pass can
+# burn 200+ seconds — blowing the reconciliation worker's 30s per-trader
+# timeout and starving the fast-tier pool.  Processing the N oldest per
+# pass keeps each pass bounded; the rest pick up on the next cycle.
+_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS = 4
 _MARKET_INFO_LOAD_TIMEOUT_SECONDS = 2.5
 _ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 2.0
 _RECONCILE_TIMING_WARN_SECONDS = 20.0
@@ -3645,6 +3656,14 @@ async def reconcile_live_positions(
             if clob_order_id and clob_order_id not in pending_exit_snapshots:
                 pending_exit_snapshot_fallbacks[clob_order_id] = snapshot
 
+    # Per-pass exit-submission budget.  Each execute_live_order call can take
+    # up to _LIVE_EXIT_ORDER_TIMEOUT_SECONDS (12s); serial submits over 20+
+    # candidates would blow the 30s per-trader reconciliation window and
+    # starve the fast-tier pool.  We cap submissions per pass; the rest are
+    # held and picked up on the next cycle in age-priority order.  Counter
+    # is wrapped in a list so the per-row closures can mutate it.
+    exit_submissions_this_pass: list[int] = [0]
+
     for row in candidates:
         payload = dict(row.payload_json or {})
         _exit_instance = None
@@ -4670,6 +4689,15 @@ async def reconcile_live_positions(
                     wallet_position_size=wallet_position_size,
                 )
                 if token_id and remaining_exit_size > 0.0:
+                    if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                        # Budget blown — defer requote.  Do NOT cancel the
+                        # working provider order: cancelling here without
+                        # resubmitting would leave the position without an
+                        # active exit.  The existing provider order keeps
+                        # working until we can requote on a later pass.
+                        held += 1
+                        continue
+                    exit_submissions_this_pass[0] += 1
                     cancel_target = provider_clob_order_id
                     cancel_ok = True
                     if cancel_target:
@@ -5108,6 +5136,14 @@ async def reconcile_live_positions(
                         state_updates += 1
                     held += 1
                     continue
+                if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                    # Defer: this pass already submitted the per-pass cap.
+                    # Leave pending_live_exit unchanged so the row picks up on
+                    # the next reconcile cycle.  Prevents a 20-order retry
+                    # wave from blowing the 30s per-trader budget.
+                    held += 1
+                    continue
+                exit_submissions_this_pass[0] += 1
                 try:
                     from services.live_execution_adapter import execute_live_order
 
@@ -6065,6 +6101,25 @@ async def reconcile_live_positions(
                         state_updates += 1
                         held += 1
                         continue
+                    if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                        # Defer: persist the exit_record as status="pending"
+                        # (no provider id yet); the failed-exit retry branch
+                        # will pick it up on the next cycle.  But first convert
+                        # to status="failed" with retry_count=0 + a marker
+                        # last_error so the retry path actually reaches it
+                        # (status="pending" with no provider id is the stuck
+                        # state we fixed in the grouped-exit commit).
+                        exit_record["status"] = "failed"
+                        exit_record["retry_count"] = 0
+                        exit_record["last_error"] = "deferred_per_pass_cap"
+                        exit_record["next_retry_at"] = None
+                        payload["pending_live_exit"] = exit_record
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                        held += 1
+                        continue
+                    exit_submissions_this_pass[0] += 1
                     try:
                         from services.live_execution_adapter import execute_live_order
 
