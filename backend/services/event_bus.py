@@ -20,14 +20,34 @@ class EventBus:
         self._dispatch_tasks: set[asyncio.Task] = set()
 
     def subscribe(self, event_type: str, callback: EventCallback) -> None:
-        self._subscribers.setdefault(event_type, []).append(callback)
-        logger.debug("Subscribed to event_type=%s", event_type)
+        # Deduplicate: adding the same callback twice would fire it twice per
+        # publish AND retain two closures over whatever state the callback
+        # captures.  When a worker is restarted without a clean shutdown (e.g.
+        # the host lag-watchdog re-spawns the task), the old subscription can
+        # remain registered; without this guard a 24h uptime with a dozen
+        # restarts holds a dozen orphan runtime instances alive through
+        # closure references.  This is the primary leak vector for the
+        # fast_trader_runtime 9GB RSS growth.
+        existing = self._subscribers.setdefault(event_type, [])
+        for cb in existing:
+            # Bound methods compare equal when they share __self__ and __func__
+            # even though the bound-method objects themselves are freshly
+            # created each lookup (so `is` would miss).  Using == catches
+            # duplicate subscriptions from the same runtime instance.
+            if cb == callback:
+                logger.debug("Skipping duplicate subscribe for event_type=%s", event_type)
+                return
+        existing.append(callback)
+        logger.debug("Subscribed to event_type=%s (count=%d)", event_type, len(existing))
 
     def unsubscribe(self, event_type: str, callback: EventCallback) -> None:
         callbacks = self._subscribers.get(event_type)
         if not callbacks:
             return
-        self._subscribers[event_type] = [existing for existing in callbacks if existing is not callback]
+        # Match by equality (bound-method aware) so stale subscriptions from
+        # a previous runtime instance can be removed even though the caller
+        # passes a freshly-bound method object.
+        self._subscribers[event_type] = [existing for existing in callbacks if existing != callback]
         if not self._subscribers[event_type]:
             self._subscribers.pop(event_type, None)
         logger.debug("Unsubscribed from event_type=%s", event_type)

@@ -6235,14 +6235,42 @@ async def reconcile_live_positions(
                     continue
                 payload = dict(row.payload_json or {})
                 existing_pe = payload.get("pending_live_exit")
-                if isinstance(existing_pe, dict) and existing_pe.get("status") in ("pending", "submitted", "filled"):
+                # Skip if the sibling already has any exit state the standard
+                # reconcile paths are handling.  Previously we only skipped
+                # "pending"/"submitted"/"filled", which caused grouped-exit to
+                # overwrite a sibling that was mid-retry ("failed" with
+                # retry_count>0), resetting its progress on every cycle.
+                if isinstance(existing_pe, dict) and existing_pe.get("status") in (
+                    "pending",
+                    "submitted",
+                    "filled",
+                    "failed",
+                    "blocked_min_notional",
+                    "blocked_retry_exhausted",
+                    "blocked_retry_exhausted_hard",
+                    "superseded_resolution",
+                    "superseded_manual_sell",
+                ):
                     continue
                 token_id = _extract_live_token_id(payload)
                 _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
                 exit_size = _fill_sz if _fill_sz > 0 else ((_fill_not / _fill_px) if _fill_px and _fill_px > 0 else 0.0)
+                if exit_size <= 0.0:
+                    # Zero-fill sibling (entry was cancelled before any fill).
+                    # Do not stamp a phantom pending_live_exit that can never be
+                    # submitted — it would leave the row stuck at status=pending
+                    # with retry_count=0 forever.  Reconciliation will settle the
+                    # row's terminal status through its own path.
+                    continue
                 source_trigger = str(trigger_source.get("close_trigger") or "grouped_exit")
+                # Write as status="failed" with retry_count=0 so the failed-exit
+                # retry block picks this up on the next cycle and actually submits
+                # via execute_live_order.  The original bug was stamping status=
+                # "pending" without submitting, which left the row orphaned (the
+                # pending/submitted reconciliation branch assumes a provider order
+                # id already exists).
                 payload["pending_live_exit"] = {
-                    "status": "pending",
+                    "status": "failed",
                     "close_trigger": f"grouped:{source_trigger}" if not source_trigger.startswith("grouped:") else source_trigger,
                     "close_price": trigger_source.get("close_price"),
                     "price_source": trigger_source.get("price_source"),
@@ -6251,6 +6279,7 @@ async def reconcile_live_positions(
                     "triggered_at": _iso_utc(now),
                     "reason": "Grouped exit: sibling order in same market exited",
                     "retry_count": 0,
+                    "last_error": "grouped_exit_pending_submit",
                 }
                 row.payload_json = payload
                 row.updated_at = now

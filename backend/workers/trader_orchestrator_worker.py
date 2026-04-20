@@ -5310,47 +5310,16 @@ async def _run_trader_once(
                     )
                     signal_market_id = str(getattr(signal, "market_id", "") or "").strip()
                     if signal_id in occupied_signal_ids:
-                        runtime_signal = RuntimeTradeSignalView(signal, live_context={})
-                        runtime_signal.source = signal_source
+                        # Stacking-guard short-circuit: the heavy write path
+                        # (trader_decision + decision_checks + trader_event) is
+                        # pure noise for occupied markets — the scanner publishes
+                        # the same markets repeatedly and we block them repeatedly.
+                        # Previously this burned 6 DB writes per occupied signal;
+                        # under load it dominates the cycle budget.  Keep the two
+                        # writes that matter for dedup (signal status + cursor)
+                        # plus the consumption row so the audit trail is still
+                        # recoverable via trader_signal_consumption.
                         blocked_reason = "Stacking guard: market already occupied"
-                        checks_payload = [
-                            {
-                                "check_key": "stacking_guard_occupied_market",
-                                "check_label": "Stacking guard",
-                                "passed": False,
-                                "score": None,
-                                "detail": "Market already occupied by an open position or active order.",
-                                "payload": {
-                                    "market_id": signal_market_id,
-                                    "allow_averaging": False,
-                                },
-                            }
-                        ]
-                        decision_row = await create_trader_decision(
-                            session,
-                            trader_id=trader_id,
-                            signal=runtime_signal,
-                            strategy_key=strategy_key_for_output,
-                            strategy_version=requested_strategy_version,
-                            decision="blocked",
-                            reason=blocked_reason,
-                            score=0.0,
-                            checks_summary={"count": len(checks_payload)},
-                            risk_snapshot={},
-                            payload={
-                                "source_key": signal_source,
-                                "source_config": source_config,
-                                "prefilter": "occupied_market",
-                            },
-                            commit=False,
-                        )
-                        decisions_written += 1
-                        await create_trader_decision_checks(
-                            session,
-                            decision_id=decision_row.id,
-                            checks=checks_payload,
-                            commit=False,
-                        )
                         await set_trade_signal_status(
                             session,
                             signal_id=signal_id,
@@ -5361,26 +5330,10 @@ async def _run_trader_once(
                             session,
                             trader_id=trader_id,
                             signal_id=signal_id,
-                            decision_id=decision_row.id,
+                            decision_id=None,
                             outcome="blocked",
                             reason=blocked_reason,
-                            commit=False,
-                        )
-                        await create_trader_event(
-                            session,
-                            trader_id=trader_id,
-                            event_type="decision",
-                            severity="info",
-                            source=signal_source,
-                            message=blocked_reason,
-                            payload={
-                                "decision_id": decision_row.id,
-                                "signal_id": signal.id,
-                                "decision": "blocked",
-                                "market_id": getattr(runtime_signal, "market_id", None),
-                                "market_question": getattr(runtime_signal, "market_question", None),
-                                "direction": getattr(runtime_signal, "direction", None),
-                            },
+                            payload={"prefilter": "occupied_market", "market_id": signal_market_id},
                             commit=False,
                         )
                         await upsert_trader_signal_cursor(
@@ -5398,47 +5351,10 @@ async def _run_trader_once(
                         prefiltered_by_reason["occupied_market"] = prefiltered_by_reason.get("occupied_market", 0) + 1
                         continue
                     if signal_id in cooldown_signal_ids:
-                        runtime_signal = RuntimeTradeSignalView(signal, live_context={})
-                        runtime_signal.source = signal_source
+                        # Same short-circuit as the stacking-guard branch above:
+                        # skip the heavy decision/checks/event writes — keep only
+                        # signal_status + consumption + cursor.
                         blocked_reason = "Reentry cooldown: market recently closed"
-                        checks_payload = [
-                            {
-                                "check_key": "reentry_cooldown_market",
-                                "check_label": "Reentry cooldown",
-                                "passed": False,
-                                "score": None,
-                                "detail": "Market is in trader reentry cooldown after a recent close.",
-                                "payload": {
-                                    "market_id": signal_market_id,
-                                    "allow_averaging": allow_averaging,
-                                },
-                            }
-                        ]
-                        decision_row = await create_trader_decision(
-                            session,
-                            trader_id=trader_id,
-                            signal=runtime_signal,
-                            strategy_key=strategy_key_for_output,
-                            strategy_version=requested_strategy_version,
-                            decision="blocked",
-                            reason=blocked_reason,
-                            score=0.0,
-                            checks_summary={"count": len(checks_payload)},
-                            risk_snapshot={},
-                            payload={
-                                "source_key": signal_source,
-                                "source_config": source_config,
-                                "prefilter": "reentry_cooldown",
-                            },
-                            commit=False,
-                        )
-                        decisions_written += 1
-                        await create_trader_decision_checks(
-                            session,
-                            decision_id=decision_row.id,
-                            checks=checks_payload,
-                            commit=False,
-                        )
                         await set_trade_signal_status(
                             session,
                             signal_id=signal_id,
@@ -5449,26 +5365,10 @@ async def _run_trader_once(
                             session,
                             trader_id=trader_id,
                             signal_id=signal_id,
-                            decision_id=decision_row.id,
+                            decision_id=None,
                             outcome="blocked",
                             reason=blocked_reason,
-                            commit=False,
-                        )
-                        await create_trader_event(
-                            session,
-                            trader_id=trader_id,
-                            event_type="decision",
-                            severity="info",
-                            source=signal_source,
-                            message=blocked_reason,
-                            payload={
-                                "decision_id": decision_row.id,
-                                "signal_id": signal.id,
-                                "decision": "blocked",
-                                "market_id": getattr(runtime_signal, "market_id", None),
-                                "market_question": getattr(runtime_signal, "market_question", None),
-                                "direction": getattr(runtime_signal, "direction", None),
-                            },
+                            payload={"prefilter": "reentry_cooldown", "market_id": signal_market_id},
                             commit=False,
                         )
                         await upsert_trader_signal_cursor(

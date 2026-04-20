@@ -347,6 +347,24 @@ class _FastTraderTask:
         )
 
 
+# Module-level reference to the currently-active _FastRuntime instance.
+# The event-bus subscriber is a module-level function (_dispatch_wake) that
+# forwards to whichever runtime is current.  This indirection lets a
+# restarted worker replace the previous runtime without leaving a
+# closure-capturing callback alive in the EventBus — which was the primary
+# path by which old _FastRuntime instances (with all their per-trader
+# task dicts and trader config copies) stayed resident in memory.
+_current_runtime: Optional["_FastRuntime"] = None
+
+
+async def _dispatch_wake(event_type: str, data: dict[str, Any]) -> None:
+    runtime = _current_runtime
+    if runtime is None or runtime._stopping:
+        return
+    for wake in runtime._wake_events.values():
+        wake.set()
+
+
 class _FastRuntime:
     """Supervises the per-trader tasks + event bus subscription."""
 
@@ -359,7 +377,7 @@ class _FastRuntime:
         self._last_heartbeat: float = 0.0
 
     async def _on_signal_event(self, event_type: str, data: dict[str, Any]) -> None:
-        """Wake every fast trader on any new-signal event."""
+        """Kept for test compatibility — production path goes through _dispatch_wake."""
         if self._stopping:
             return
         for wake in self._wake_events.values():
@@ -433,9 +451,17 @@ class _FastRuntime:
                         logger.debug("Fast trader stopped with error", trader_id=tid, exc_info=exc)
 
     async def run(self) -> None:
+        global _current_runtime
         logger.info("Fast-tier runtime supervisor started")
+        # Install ourselves as the active runtime BEFORE subscribing so the
+        # dispatcher has a target to forward to.  The dedup in EventBus.subscribe
+        # plus the module-level _dispatch_wake indirection guarantees the
+        # callback list stays at length 1 per event across arbitrarily many
+        # restarts (the old runtime instance becomes unreachable as soon as
+        # _current_runtime is overwritten).
+        _current_runtime = self
         for evt in _WAKE_EVENTS:
-            event_bus.subscribe(evt, self._on_signal_event)
+            event_bus.subscribe(evt, _dispatch_wake)
 
         try:
             await self._refresh_roster()
@@ -461,11 +487,22 @@ class _FastRuntime:
                     task.cancel()
                 except Exception:  # noqa: BLE001
                     pass
-            for evt in _WAKE_EVENTS:
-                try:
-                    event_bus.unsubscribe(evt, self._on_signal_event)
-                except Exception:
-                    pass
+            # Only clear the module pointer if we are still the current
+            # runtime — a rapid restart may have already installed the next
+            # instance by the time we reach finally.
+            if _current_runtime is self:
+                _current_runtime = None
+                for evt in _WAKE_EVENTS:
+                    try:
+                        event_bus.unsubscribe(evt, _dispatch_wake)
+                    except Exception:
+                        pass
+            # Proactively drop references so garbage collection can reclaim
+            # per-trader state even if something else briefly holds a pointer
+            # to this _FastRuntime.
+            self._tasks.clear()
+            self._wake_events.clear()
+            self._task_objs.clear()
             logger.info("Fast-tier runtime supervisor stopped")
 
 

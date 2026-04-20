@@ -1126,7 +1126,55 @@ async def upsert_trade_signal(
             )
             row = result.scalar_one_or_none()
 
+    # Guard: if the incoming signal is already past its expires_at, do not
+    # publish it downstream.  The scanner emits signals with a short TTL
+    # (seconds) and re-emits them on every scan; without this check a slow
+    # scanner loop will publish already-dead signals that the orchestrator
+    # then has to decide-and-reject per trader per cycle.  This kills a
+    # large source of decision-pipeline noise at the source.
+    incoming_expires_naive = _to_utc_naive(expires_at) if expires_at is not None else None
+    now_naive_guard = _to_utc_naive(_utc_now())
+    incoming_already_expired = (
+        incoming_expires_naive is not None and incoming_expires_naive <= now_naive_guard
+    )
+
     if row is None:
+        if incoming_already_expired:
+            # Persist the row as expired so the orchestrator never picks it up,
+            # but skip the event-bus emission — there is nothing to act on.
+            row = TradeSignal(
+                id=str(signal_id or uuid.uuid4().hex),
+                source=source,
+                source_item_id=source_item_id,
+                signal_type=signal_type,
+                strategy_type=strategy_type,
+                market_id=market_id,
+                market_question=market_question,
+                direction=direction,
+                entry_price=entry_price,
+                edge_percent=edge_percent,
+                confidence=confidence,
+                liquidity=liquidity,
+                expires_at=incoming_expires_naive,
+                payload_json=_safe_json(normalized_payload_json),
+                strategy_context_json=_safe_json(strategy_context_json),
+                quality_passed=quality_passed,
+                quality_rejection_reasons=quality_rejection_reasons if quality_rejection_reasons else None,
+                dedupe_key=dedupe_key,
+                runtime_sequence=(
+                    int(runtime_sequence)
+                    if runtime_sequence is not _RUNTIME_SEQUENCE_UNSET and runtime_sequence is not None
+                    else None
+                ),
+                status="expired",
+                created_at=_utc_now(),
+                updated_at=_utc_now(),
+            )
+            session.add(row)
+            publish_signal_emission = False
+            if commit:
+                await session.commit()
+            return row
         row = TradeSignal(
             id=str(signal_id or uuid.uuid4().hex),
             source=source,
@@ -1140,7 +1188,7 @@ async def upsert_trade_signal(
             edge_percent=edge_percent,
             confidence=confidence,
             liquidity=liquidity,
-            expires_at=_to_utc_naive(expires_at),
+            expires_at=incoming_expires_naive,
             payload_json=_safe_json(normalized_payload_json),
             strategy_context_json=_safe_json(strategy_context_json),
             quality_passed=quality_passed,
@@ -1218,6 +1266,22 @@ async def upsert_trade_signal(
                 emission_event_type = "upsert_active_unchanged"
                 emission_reason = "suppressed:active_unchanged"
                 publish_signal_emission = False
+            elif incoming_already_expired:
+                # Guard: the scanner is re-emitting an already-expired signal.
+                # Mark the existing row expired in-place and do NOT reactivate
+                # or emit — the orchestrator would just block it as stale.
+                row.status = "expired"
+                row.expires_at = incoming_expires_naive
+                row.updated_at = _utc_now()
+                emission_event_type = "upsert_expired_on_reemit"
+                emission_reason = "incoming_already_expired"
+                publish_signal_emission = False
+                await _record_signal_emission(
+                    session,
+                    row,
+                    event_type=emission_event_type,
+                    reason=emission_reason,
+                )
             else:
                 should_reactivate = previous_status in SIGNAL_REACTIVATABLE_STATUSES
                 if previous_status == "skipped":
