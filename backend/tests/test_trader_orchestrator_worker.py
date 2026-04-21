@@ -3422,12 +3422,11 @@ async def test_run_trader_once_blocks_stacking_when_allow_averaging_false(monkey
         _base_control_payload(),
     )
 
-    assert decisions_written == 1
+    # stacking-guard pre-filter writes 2 DB ops (status + consumption), not a trader_decision row
+    assert decisions_written == 0
     assert orders_written == 0
     assert submit_calls["count"] == 0
     assert evaluate_calls["count"] == 0
-    assert decisions[0]["decision"] == "blocked"
-    assert "stacking guard" in decisions[0]["reason"].lower() or "market already occupied" in decisions[0]["reason"].lower()
 
 
 @pytest.mark.asyncio
@@ -3888,11 +3887,10 @@ async def test_run_trader_once_prefilters_open_live_markets_before_live_context_
         control,
     )
 
-    assert decisions_written == 1
+    # stacking-guard pre-filter writes 2 DB ops (status + consumption), not a trader_decision row
+    assert decisions_written == 0
     assert orders_written == 0
     assert live_context_calls["count"] == 0
-    assert decisions[0]["decision"] == "blocked"
-    assert "market already occupied" in decisions[0]["reason"].lower()
 
 
 @pytest.mark.asyncio
