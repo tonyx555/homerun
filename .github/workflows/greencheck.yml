@@ -20,11 +20,10 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
-          token: ${{ secrets.GREENCHECK_TOKEN }}
 
       - uses: braedonsaunders/greencheck@v0
         with:
