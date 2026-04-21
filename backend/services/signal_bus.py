@@ -1266,10 +1266,12 @@ async def upsert_trade_signal(
                 emission_event_type = "upsert_active_unchanged"
                 emission_reason = "suppressed:active_unchanged"
                 publish_signal_emission = False
-            elif incoming_already_expired:
+            elif incoming_already_expired and previous_status in SIGNAL_ACTIVE_STATUSES:
                 # Guard: the scanner is re-emitting an already-expired signal.
                 # Mark the existing row expired in-place and do NOT reactivate
                 # or emit — the orchestrator would just block it as stale.
+                # Only applies to active signals; terminal signals (expired/executed/etc.)
+                # still proceed to normal reactivation logic below.
                 row.status = "expired"
                 row.expires_at = incoming_expires_naive
                 row.updated_at = _utc_now()
