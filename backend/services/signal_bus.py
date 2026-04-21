@@ -1225,21 +1225,48 @@ async def upsert_trade_signal(
                         row,
                         source=source,
                     )
+            # Respect the existing row's expires_at: if the decision-path has
+            # already forced it to the past (staleness gate, expired_on_block,
+            # etc.), do not let the scanner's re-emit resurrect it with a new
+            # far-future TTL.  Without this check, PSA was caught in an
+            # infinite loop: decision rejects signal for staleness, sets
+            # expires_at=now, scanner re-emits 30s later with a fresh TTL,
+            # trader rejects again for staleness (age from created_at is 30h),
+            # and so on — 106000s+ old signals re-decided every cycle.
+            existing_expires_naive = (
+                _to_utc_naive(row.expires_at) if row.expires_at is not None else None
+            )
+            existing_already_expired = (
+                existing_expires_naive is not None
+                and existing_expires_naive <= now_naive_guard
+            )
             if previous_status in SIGNAL_ACTIVE_STATUSES and not has_material_change:
                 emission_event_type = "upsert_active_unchanged"
                 emission_reason = "suppressed:active_unchanged"
                 publish_signal_emission = False
             elif incoming_already_expired and previous_status in SIGNAL_ACTIVE_STATUSES:
-                # Guard: the scanner is re-emitting an already-expired signal.
-                # Mark the existing row expired in-place and do NOT reactivate
-                # or emit — the orchestrator would just block it as stale.
-                # Only applies to active signals; terminal signals (expired/executed/etc.)
-                # still proceed to normal reactivation logic below.
+                # Scanner sent a fresh emit with an already-past expires_at.
+                # Mark the existing row expired; do not reactivate or emit.
                 row.status = "expired"
                 row.expires_at = incoming_expires_naive
                 row.updated_at = _utc_now()
                 emission_event_type = "upsert_expired_on_reemit"
                 emission_reason = "incoming_already_expired"
+                publish_signal_emission = False
+                await _record_signal_emission(
+                    session,
+                    row,
+                    event_type=emission_event_type,
+                    reason=emission_reason,
+                )
+            elif existing_already_expired and previous_status in ("skipped", "pending"):
+                # Existing row's expires_at was previously forced into the past
+                # (by the decision-gate staleness path or similar).  Keep it
+                # expired; do not let a fresh scanner emit override it.
+                row.status = "expired"
+                row.updated_at = _utc_now()
+                emission_event_type = "upsert_existing_expires_at_past"
+                emission_reason = "existing_already_expired"
                 publish_signal_emission = False
                 await _record_signal_emission(
                     session,
