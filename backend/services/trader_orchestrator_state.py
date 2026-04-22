@@ -1961,12 +1961,16 @@ def _build_live_order_authority_payload(
     position_row: LiveTradingPosition | None,
     now: datetime,
 ) -> dict[str, Any]:
+    live_status_key = _normalize_status_key(live_row.status)
     fill_size = max(0.0, safe_float(live_row.filled_size, 0.0) or 0.0)
+    order_size = max(0.0, safe_float(live_row.size, 0.0) or 0.0)
     average_fill_price = safe_float(live_row.average_fill_price, None)
+    if fill_size <= 0.0 and live_status_key == "filled" and order_size > 0.0:
+        fill_size = order_size
     if position_row is not None:
         wallet_position_size = max(0.0, safe_float(position_row.size, 0.0) or 0.0)
         wallet_average_cost = safe_float(position_row.average_cost, None)
-        if fill_size <= 0.0 and wallet_position_size > 0.0:
+        if fill_size <= 0.0 and live_status_key == "filled" and wallet_position_size > 0.0:
             fill_size = wallet_position_size
         if (
             (average_fill_price is None or average_fill_price <= 0.0)
@@ -2871,7 +2875,9 @@ async def recover_missing_live_trader_orders(
                 placeholder_market_id = str(placeholder_row.market_id or placeholder_payload.get("market_id") or "").strip()
                 placeholder_condition_id = _normalize_condition_id(placeholder_market_id)
                 if live_market_id and placeholder_market_id and placeholder_market_id != live_market_id:
-                    if not live_condition_id or not placeholder_condition_id or placeholder_condition_id != live_condition_id:
+                    # Token identity is stricter than market_id formatting; allow
+                    # numeric trader market ids to match condition-id wallet rows.
+                    if placeholder_condition_id and live_condition_id and placeholder_condition_id != live_condition_id:
                         continue
                 placeholder_created_at = placeholder_row.created_at or placeholder_row.updated_at or now
                 if placeholder_created_at.tzinfo is None:
@@ -2896,6 +2902,20 @@ async def recover_missing_live_trader_orders(
                 existing_payload,
                 recovered_payload_json,
             )
+            recovered_provider_reconciliation = recovered_payload_json.get("provider_reconciliation")
+            if isinstance(recovered_provider_reconciliation, dict):
+                next_provider_reconciliation = dict(merged_payload.get("provider_reconciliation") or {})
+                next_provider_reconciliation.update(copy.deepcopy(recovered_provider_reconciliation))
+                if merged_payload.get("provider_reconciliation") != next_provider_reconciliation:
+                    merged_payload["provider_reconciliation"] = next_provider_reconciliation
+                    payload_changed = True
+            recovered_live_wallet_authority = recovered_payload_json.get("live_wallet_authority")
+            if isinstance(recovered_live_wallet_authority, dict):
+                next_live_wallet_authority = dict(merged_payload.get("live_wallet_authority") or {})
+                next_live_wallet_authority.update(copy.deepcopy(recovered_live_wallet_authority))
+                if merged_payload.get("live_wallet_authority") != next_live_wallet_authority:
+                    merged_payload["live_wallet_authority"] = next_live_wallet_authority
+                    payload_changed = True
             if matched_pre_submit_placeholder:
                 submission_intent = dict(merged_payload.get("submission_intent") or {})
                 submission_intent["state"] = "recovered_from_live_authority"
@@ -2985,9 +3005,11 @@ async def recover_missing_live_trader_orders(
                 if safe_float(existing_row.effective_price, 0.0) <= 0.0:
                     existing_row.effective_price = float(recovered_entry_price)
                     field_changed = True
-            if recovered_notional > 0.0 and safe_float(existing_row.notional_usd, 0.0) <= 0.0:
-                existing_row.notional_usd = float(recovered_notional)
-                field_changed = True
+            if recovered_notional > 0.0:
+                existing_notional = safe_float(existing_row.notional_usd, 0.0) or 0.0
+                if abs(existing_notional - recovered_notional) > 1e-9:
+                    existing_row.notional_usd = float(recovered_notional)
+                    field_changed = True
             elif recovered_notional <= 0.0 and _normalize_status_key(existing_row.status) in {"cancelled", "failed", "rejected", "error"}:
                 if safe_float(existing_row.notional_usd, 0.0) != 0.0:
                     existing_row.notional_usd = 0.0

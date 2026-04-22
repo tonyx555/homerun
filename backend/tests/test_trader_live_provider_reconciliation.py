@@ -815,6 +815,131 @@ async def test_recover_missing_live_trader_orders_adopts_pre_submit_placeholder_
 
 
 @pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_adopts_pre_submit_placeholder_when_live_position_market_id_uses_condition_id(
+    tmp_path,
+):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-adopt-placeholder-condition-id-market"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-placeholder-condition-id-market",
+                signal_id="signal-placeholder-condition-id-market",
+                market_id="2034715",
+                market_question="Will Placeholder Condition-ID Market settle YES?",
+                direction="buy_no",
+                strategy_key="generic_strategy",
+            )
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="placeholder-condition-id-market-order",
+                    trader_id=trader_id,
+                    signal_id="signal-placeholder-condition-id-market",
+                    decision_id="decision-placeholder-condition-id-market",
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    market_id="2034715",
+                    market_question="Will Placeholder Condition-ID Market settle YES?",
+                    direction="buy_no",
+                    mode="live",
+                    status="placing",
+                    notional_usd=None,
+                    entry_price=0.87,
+                    effective_price=None,
+                    reason="Signal selected",
+                    payload_json={
+                        "token_id": "token-placeholder-condition-id-market",
+                        "market_id": "2034715",
+                        "direction": "buy_no",
+                        "submission_intent": {
+                            "state": "pre_submit_persisted",
+                            "persisted_at": now.isoformat(),
+                            "requested_notional_usd": 9.57,
+                            "requested_shares": 11.0,
+                            "time_in_force": "IOC",
+                            "post_only": False,
+                            "price_policy": "taker_limit",
+                        },
+                    },
+                    created_at=now,
+                    updated_at=now,
+                    verification_status="local",
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-placeholder-condition-id-market",
+                    wallet_address="0xwallet",
+                    market_id=None,
+                    clob_order_id="clob-placeholder-condition-id-market",
+                    token_id="token-placeholder-condition-id-market",
+                    side="BUY",
+                    price=0.87,
+                    size=11.0,
+                    order_type="IOC",
+                    status="filled",
+                    filled_size=11.0,
+                    average_fill_price=0.87,
+                    market_question="Will Placeholder Condition-ID Market settle YES?",
+                    created_at=now + timedelta(seconds=2),
+                    updated_at=now + timedelta(seconds=2),
+                )
+            )
+            session.add(
+                LiveTradingPosition(
+                    id="0xwallet:token-placeholder-condition-id-market",
+                    wallet_address="0xwallet",
+                    token_id="token-placeholder-condition-id-market",
+                    market_id="0x747a380bab6e04278667e1e881cc62bd2a6a6090d295678f426249d06ca79712",
+                    market_question="Will Placeholder Condition-ID Market settle YES?",
+                    outcome="No",
+                    size=11.0,
+                    average_cost=0.87,
+                    current_price=0.86,
+                    unrealized_pnl=-0.11,
+                    redeemable=False,
+                    counts_as_open=True,
+                    end_date=None,
+                    created_at=now + timedelta(seconds=2),
+                    updated_at=now + timedelta(seconds=2),
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            trader_rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.created_at.asc(), TraderOrder.id.asc())
+                )
+            ).scalars().all()
+            assert [row.id for row in trader_rows] == ["placeholder-condition-id-market-order"]
+            placeholder_order = trader_rows[0]
+            assert placeholder_order.status == "executed"
+            assert placeholder_order.provider_clob_order_id == "clob-placeholder-condition-id-market"
+            assert placeholder_order.notional_usd == pytest.approx(9.57)
+            placeholder_payload = dict(placeholder_order.payload_json or {})
+            assert placeholder_payload["submission_intent"]["state"] == "recovered_from_live_authority"
+            assert placeholder_payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-placeholder-condition-id-market"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_recover_missing_live_trader_orders_adopts_timed_out_pre_submit_placeholder_without_creating_recovered_row(
     tmp_path,
 ):
@@ -1582,6 +1707,160 @@ async def test_recover_missing_live_trader_orders_promotes_failed_existing_entry
             open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
             assert open_orders == 0
             assert open_positions == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_refreshes_existing_authority_fill_metrics_from_order_size(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-refresh-authority-fill-metrics"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            await _seed_decision(
+                session,
+                trader_id=trader_id,
+                decision_id="decision-refresh-authority-fill-metrics",
+                signal_id="signal-refresh-authority-fill-metrics",
+                market_id="market-refresh-authority-fill-metrics",
+                market_question="Will Example City reach 70F?",
+                direction="buy_yes",
+            )
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="existing-recovered-order",
+                    trader_id=trader_id,
+                    signal_id="signal-refresh-authority-fill-metrics",
+                    decision_id="decision-refresh-authority-fill-metrics",
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    market_id="market-refresh-authority-fill-metrics",
+                    market_question="Will Example City reach 70F?",
+                    direction="buy_yes",
+                    mode="live",
+                    status="executed",
+                    notional_usd=28.71,
+                    entry_price=0.86,
+                    effective_price=0.87,
+                    reason="Recovered from live venue authority",
+                    payload_json={
+                        "token_id": "token-refresh-authority-fill-metrics",
+                        "provider_clob_order_id": "clob-refresh-authority-fill-metrics",
+                        "provider_reconciliation": {
+                            "source": "live_trading_orders_recovery",
+                            "snapshot_status": "filled",
+                            "mapped_status": "executed",
+                            "reconciled_at": now.isoformat(),
+                            "filled_size": 33.0,
+                            "average_fill_price": 0.87,
+                            "filled_notional_usd": 28.71,
+                            "snapshot": {
+                                "normalized_status": "filled",
+                                "status": "filled",
+                                "side": "BUY",
+                                "clob_order_id": "clob-refresh-authority-fill-metrics",
+                                "asset_id": "token-refresh-authority-fill-metrics",
+                                "filled_size": 33.0,
+                                "average_fill_price": 0.87,
+                                "filled_notional_usd": 28.71,
+                                "limit_price": 0.86,
+                                "size": 11.0,
+                                "updated_at": now.isoformat(),
+                            },
+                        },
+                        "live_wallet_authority": {
+                            "source": "live_trading_orders",
+                            "live_trading_order_id": "venue-order-refresh-authority-fill-metrics",
+                            "wallet_address": "0xwallet",
+                            "token_id": "token-refresh-authority-fill-metrics",
+                            "recovered_at": now.isoformat(),
+                        },
+                    },
+                    provider_clob_order_id="clob-refresh-authority-fill-metrics",
+                    created_at=now,
+                    executed_at=now,
+                    updated_at=now,
+                    verification_status="venue_fill",
+                    verification_source="live_wallet_authority",
+                    verification_reason="Recovered from live venue authority",
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-refresh-authority-fill-metrics",
+                    wallet_address="0xwallet",
+                    market_id="market-refresh-authority-fill-metrics",
+                    clob_order_id="clob-refresh-authority-fill-metrics",
+                    token_id="token-refresh-authority-fill-metrics",
+                    side="BUY",
+                    price=0.86,
+                    size=11.0,
+                    order_type="IOC",
+                    status="filled",
+                    filled_size=0.0,
+                    average_fill_price=0.87,
+                    market_question="Will Example City reach 70F?",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                LiveTradingPosition(
+                    id="0xwallet:token-refresh-authority-fill-metrics",
+                    wallet_address="0xwallet",
+                    token_id="token-refresh-authority-fill-metrics",
+                    market_id="market-refresh-authority-fill-metrics",
+                    market_question="Will Example City reach 70F?",
+                    outcome="Yes",
+                    size=33.0,
+                    average_cost=0.87,
+                    current_price=0.84,
+                    unrealized_pnl=-0.99,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            refreshed = await session.get(TraderOrder, "existing-recovered-order")
+            assert refreshed is not None
+            assert refreshed.status == "executed"
+            assert refreshed.notional_usd == pytest.approx(9.57)
+            payload = dict(refreshed.payload_json or {})
+            provider_reconciliation = payload.get("provider_reconciliation")
+            provider_reconciliation = provider_reconciliation if isinstance(provider_reconciliation, dict) else {}
+            snapshot = provider_reconciliation.get("snapshot")
+            snapshot = snapshot if isinstance(snapshot, dict) else {}
+            assert provider_reconciliation.get("filled_size") == pytest.approx(11.0)
+            assert provider_reconciliation.get("filled_notional_usd") == pytest.approx(9.57)
+            assert snapshot.get("filled_size") == pytest.approx(11.0)
+            assert snapshot.get("filled_notional_usd") == pytest.approx(9.57)
+            assert dict(payload.get("live_wallet_authority") or {}).get("live_trading_order_id") == "venue-order-refresh-authority-fill-metrics"
+
+            await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+            position = (
+                await session.execute(
+                    select(TraderPosition).where(
+                        TraderPosition.trader_id == trader_id,
+                        TraderPosition.market_id == "market-refresh-authority-fill-metrics",
+                        TraderPosition.status == "open",
+                    )
+                )
+            ).scalar_one()
+            assert position.total_notional_usd == pytest.approx(9.57)
+            assert position.open_order_count == 1
     finally:
         await engine.dispose()
 
