@@ -133,11 +133,13 @@ def test_fallback_market_info_for_orders_uses_payload_live_market():
 
     assert result == {
         "market-1": {
+            "id": "market-1",
             "market_id": "market-1",
             "selected_token_id": "token-1",
             "closed": False,
             "accepting_orders": True,
             "outcome_prices": [0.4, 0.6],
+            "token_ids": ["token-1"],
         }
     }
 
@@ -823,7 +825,7 @@ async def test_load_market_info_prefers_force_refreshed_condition_lookup(monkeyp
 
     result = await position_lifecycle.load_market_info_for_orders([SimpleNamespace(market_id=market_id)])
 
-    assert result[market_id] == fresh_info
+    assert result[market_id] == {**fresh_info, "id": market_id, "market_id": market_id}
     condition_mock.assert_awaited_once_with(market_id, force_refresh=True)
     assert token_mock.await_count == 0
 
@@ -851,7 +853,7 @@ async def test_load_market_info_falls_back_to_cached_condition_lookup_when_refre
 
     result = await position_lifecycle.load_market_info_for_orders([SimpleNamespace(market_id=market_id)])
 
-    assert result[market_id] == cached_info
+    assert result[market_id] == {**cached_info, "id": market_id, "market_id": market_id}
     assert condition_mock.await_count == 2
     first_call, second_call = condition_mock.await_args_list
     assert first_call.args == (market_id,)
