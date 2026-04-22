@@ -21,7 +21,6 @@ if str(BACKEND_ROOT) not in sys.path:
 import pytest
 import asyncio
 import numpy as np
-from unittest.mock import patch
 
 
 # =============================================================================
