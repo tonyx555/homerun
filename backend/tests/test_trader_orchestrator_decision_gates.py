@@ -367,6 +367,76 @@ def test_pending_live_exit_guard_blocks_when_positive_cap_is_exceeded():
     assert any(g["gate"] == "pending_live_exit_guard" and g["status"] == "blocked" for g in result["platform_gates"])
 
 
+def test_signal_staleness_gate_prefers_signal_emitted_at_over_row_created_at():
+    now = datetime.now(timezone.utc)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=SimpleNamespace(
+            market_id="market-1",
+            created_at=now - timedelta(hours=10),
+            updated_at=now - timedelta(hours=10),
+            payload_json={
+                "signal_emitted_at": (now - timedelta(seconds=2)).isoformat().replace("+00:00", "Z"),
+                "execution_armed_at": (now - timedelta(seconds=3)).isoformat().replace("+00:00", "Z"),
+                "ingested_at": (now - timedelta(seconds=4)).isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_signal_age_seconds": 5.0, "enforce_min_exit_notional": False},
+        execution_mode="backtest",
+    )
+
+    assert result["final_decision"] == "selected"
+    staleness_gate = next(gate for gate in result["platform_gates"] if gate["gate"] == "signal_staleness")
+    assert staleness_gate["status"] == "passed"
+    assert "max=5.0s" in staleness_gate["detail"]
+
+
+def test_signal_staleness_gate_blocks_on_signal_emitted_at_age():
+    now = datetime.now(timezone.utc)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=SimpleNamespace(
+            market_id="market-1",
+            created_at=now,
+            updated_at=now,
+            payload_json={
+                "signal_emitted_at": (now - timedelta(seconds=20)).isoformat().replace("+00:00", "Z"),
+                "execution_armed_at": (now - timedelta(seconds=25)).isoformat().replace("+00:00", "Z"),
+                "ingested_at": (now - timedelta(seconds=30)).isoformat().replace("+00:00", "Z"),
+            },
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"max_signal_age_seconds": 5.0, "enforce_min_exit_notional": False},
+        execution_mode="backtest",
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert result["final_reason"].startswith("Signal stale:")
+    staleness_gate = next(gate for gate in result["platform_gates"] if gate["gate"] == "signal_staleness")
+    assert staleness_gate["status"] == "blocked"
+
+
 def test_pending_live_exit_identity_guard_blocks_matching_market_direction_signal():
     runtime_signal = SimpleNamespace(
         id="signal-1",

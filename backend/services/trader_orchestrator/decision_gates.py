@@ -283,6 +283,23 @@ def _runtime_signal_market_data_context(runtime_signal: Any) -> dict[str, Any]:
     }
 
 
+def _runtime_signal_staleness_anchor(runtime_signal: Any) -> datetime | None:
+    payload = getattr(runtime_signal, "payload_json", None)
+    payload = payload if isinstance(payload, dict) else {}
+
+    for candidate in (
+        payload.get("signal_emitted_at"),
+        payload.get("execution_armed_at"),
+        payload.get("ingested_at"),
+        getattr(runtime_signal, "updated_at", None),
+        getattr(runtime_signal, "created_at", None),
+    ):
+        parsed = _parse_datetime_utc(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _runtime_signal_risk_score(runtime_signal: Any) -> float | None:
     direct = safe_float(getattr(runtime_signal, "risk_score", None), None)
     if direct is not None:
@@ -544,11 +561,9 @@ def apply_platform_decision_gates(
         # set a cutoff so other strategies are unaffected.
         max_age_seconds = safe_float(params.get("max_signal_age_seconds"), None)
         if max_age_seconds is not None and max_age_seconds > 0.0:
-            signal_created_at = getattr(runtime_signal, "created_at", None)
-            if isinstance(signal_created_at, datetime):
-                if signal_created_at.tzinfo is None:
-                    signal_created_at = signal_created_at.replace(tzinfo=timezone.utc)
-                age_seconds = (datetime.now(timezone.utc) - signal_created_at).total_seconds()
+            signal_observed_at = _runtime_signal_staleness_anchor(runtime_signal)
+            if signal_observed_at is not None:
+                age_seconds = (datetime.now(timezone.utc) - signal_observed_at).total_seconds()
                 if age_seconds > max_age_seconds:
                     final_decision = "blocked"
                     final_reason = (
