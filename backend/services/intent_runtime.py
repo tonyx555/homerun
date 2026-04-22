@@ -37,6 +37,7 @@ _STATUS_PROJECTION_BATCH_MAX = 64
 _PROJECTION_RETRY_MAX_ATTEMPTS = 3
 _PROJECTION_RETRY_BASE_DELAY_SECONDS = 0.25
 _PROJECTION_STATEMENT_TIMEOUT_MS = 5000
+_PROJECTION_LOCK_TIMEOUT_MS = 1000
 _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
 _PREWARM_SOURCES = {"scanner"}
 _PREWARM_WAIT_TIMEOUT_SECONDS = 0.5
@@ -2155,6 +2156,10 @@ class IntentRuntime:
                     await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
                 except Exception:
                     pass
+                try:
+                    await session.execute(text(f"SET LOCAL lock_timeout = '{_PROJECTION_LOCK_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
                 chunk_dedupe_keys = [
                     str(snapshot.get("dedupe_key") or "").strip()
                     for snapshot in chunk
@@ -2222,6 +2227,14 @@ class IntentRuntime:
 
         if sweep_missing:
             async with AsyncSessionLocal() as session:
+                try:
+                    await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
+                try:
+                    await session.execute(text(f"SET LOCAL lock_timeout = '{_PROJECTION_LOCK_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
                 await expire_source_signals_except(
                     session,
                     source=source,
@@ -2258,6 +2271,10 @@ class IntentRuntime:
             async with AsyncSessionLocal() as session:
                 try:
                     await session.execute(text(f"SET LOCAL statement_timeout = '{_PROJECTION_STATEMENT_TIMEOUT_MS}'"))
+                except Exception:
+                    pass
+                try:
+                    await session.execute(text(f"SET LOCAL lock_timeout = '{_PROJECTION_LOCK_TIMEOUT_MS}'"))
                 except Exception:
                     pass
                 signal_ids = [str(item.get("signal_id") or "").strip() for item in chunk if str(item.get("signal_id") or "").strip()]

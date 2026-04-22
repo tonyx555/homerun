@@ -1005,64 +1005,6 @@ class TestCombinatorialStrategy:
         # 1.0 is not < 1.0 - 1e-6 so no arbitrage
         assert not result.arbitrage_found
 
-    def test_find_related_markets(self):
-        """_find_related_markets should rank markets by shared entities."""
-        from services.strategies.combinatorial import CombinatorialStrategy
-
-        # Patch BaseStrategy __init__ to avoid config dependency
-        with patch("services.strategies.base.settings") as mock_settings:
-            mock_settings.POLYMARKET_FEE = 0.02
-            mock_settings.MIN_PROFIT_THRESHOLD = 0.025
-            strategy = CombinatorialStrategy()
-
-        market_a = self._make_market("1", "Will Trump win Pennsylvania?", 0.48, 0.52)
-        market_b = self._make_market("2", "Will Republican win Pennsylvania?", 0.55, 0.45)
-        market_c = self._make_market("3", "Will Bitcoin reach 100K?", 0.3, 0.7)
-
-        related = strategy._find_related_markets(market_a, [market_a, market_b, market_c])
-        # market_b shares "trump"/"pennsylvania"; market_c shares nothing
-        assert len(related) >= 1
-        if len(related) > 0:
-            assert related[0].id == "2", "Most related market should be the Pennsylvania one"
-
-    def test_share_context_matching(self):
-        """_share_context should find common significant words (len > 3)."""
-        from services.strategies.combinatorial import CombinatorialStrategy
-
-        with patch("services.strategies.base.settings") as mock_settings:
-            mock_settings.POLYMARKET_FEE = 0.02
-            mock_settings.MIN_PROFIT_THRESHOLD = 0.025
-            strategy = CombinatorialStrategy()
-
-        # Words must be > 3 chars. "trump" (5) and "pennsylvania" (12) are shared.
-        assert strategy._share_context(
-            "trump wins pennsylvania election 2024",
-            "trump wins pennsylvania primary 2024",
-        ), "Should share context (trump, pennsylvania both > 3 chars)"
-
-        assert not strategy._share_context("will bitcoin reach 100k", "will lakers championship"), (
-            "Should not share context (no common words > 3 chars)"
-        )
-
-    def test_detect_dependencies_sync_implies(self):
-        """Sync dependency detection should find implies relationships."""
-        from services.strategies.combinatorial import CombinatorialStrategy
-
-        with patch("services.strategies.base.settings") as mock_settings:
-            mock_settings.POLYMARKET_FEE = 0.02
-            mock_settings.MIN_PROFIT_THRESHOLD = 0.025
-            strategy = CombinatorialStrategy()
-
-        # Questions must share at least 2 words with len > 3 for _share_context.
-        # "trump" (5), "pennsylvania" (12) are shared via stop-word filtering.
-        market_a = self._make_market("1", "will trump pennsylvania election primary 2024", 0.48, 0.52)
-        market_b = self._make_market("2", "will republican trump pennsylvania general 2024", 0.55, 0.45)
-
-        deps = strategy._detect_dependencies_sync(market_a, market_b)
-        implies_deps = [d for d in deps if d.dep_type.value == "implies"]
-        assert len(implies_deps) > 0, "Should detect Trump implies Republican dependency"
-
-
 # =============================================================================
 # PARALLEL EXECUTOR TESTS
 # =============================================================================

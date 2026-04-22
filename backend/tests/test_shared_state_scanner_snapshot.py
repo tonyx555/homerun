@@ -18,9 +18,10 @@ from utils.utcnow import utcnow  # noqa: E402
 
 
 class _FakeScalarResult:
-    def __init__(self, scalar_value=None, scalars_list=None):
+    def __init__(self, scalar_value=None, scalars_list=None, rowcount=None):
         self._scalar_value = scalar_value
         self._scalars_list = list(scalars_list or [])
+        self.rowcount = rowcount
 
     def scalar_one_or_none(self):
         return self._scalar_value
@@ -45,9 +46,13 @@ class _FakeSession:
         self.execute_results = list(execute_results or [])
         self.added = []
         self.execute_calls = 0
+        self.statements = []
 
-    async def execute(self, statement):
-        del statement
+    async def execute(self, statement, params=None):
+        self.statements.append((statement, params))
+        sql_text = str(statement)
+        if "SET LOCAL statement_timeout" in sql_text or "SET LOCAL lock_timeout" in sql_text:
+            return _FakeScalarResult()
         if self.execute_results:
             result = self.execute_results.pop(0)
             if isinstance(result, _FakeScalarResult):
@@ -55,6 +60,7 @@ class _FakeSession:
             return _FakeScalarResult(
                 scalar_value=result.get("scalar_value"),
                 scalars_list=result.get("scalars_list"),
+                rowcount=result.get("rowcount"),
             )
         self.execute_calls += 1
         if self.execute_calls == 1:
@@ -70,8 +76,8 @@ class _FakeSession:
 def _build_opportunity(*, market_id: str) -> Opportunity:
     now = utcnow().replace(tzinfo=timezone.utc)
     return Opportunity(
-        strategy="tail_end_carry",
-        title=f"Tail carry {market_id}",
+        strategy="generic_strategy",
+        title=f"Opportunity {market_id}",
         description="scanner opportunity",
         total_cost=0.91,
         expected_payout=1.0,
@@ -132,7 +138,7 @@ async def test_write_scanner_snapshot_publishes_runtime_events_without_db_opport
         "interval_seconds": 60,
         "current_activity": "Fast scan complete - 1 found, 1 total",
         "last_scan": utcnow(),
-        "strategies": [{"name": "Tail End Carry", "type": "tail_end_carry"}],
+        "strategies": [{"name": "Generic Strategy", "type": "generic_strategy"}],
     }
 
     await shared_state.write_scanner_snapshot(session, [opportunity], status)
@@ -192,7 +198,7 @@ async def test_persist_incremental_state_fetches_missing_current_ids_without_loa
         is_active=False,
         last_run_id=None,
     )
-    session = _FakeSession(execute_results=[{"scalars_list": []}, {"scalars_list": [existing_row]}])
+    session = _FakeSession(execute_results=[{"scalars_list": [existing_row]}, {"scalars_list": []}])
 
     event_messages = await shared_state._persist_incremental_state(
         session,
@@ -219,7 +225,7 @@ async def test_persist_incremental_state_marks_missing_opportunities_expired_wit
         is_active=True,
         last_run_id=None,
     )
-    session = _FakeSession(execute_results=[{"scalars_list": [existing_row]}])
+    session = _FakeSession(execute_results=[{"scalars_list": [opportunity.stable_id]}, {"scalars_list": [existing_row]}])
     completed_at = utcnow().replace(tzinfo=None)
 
     event_messages = await shared_state._persist_incremental_state(
@@ -236,6 +242,75 @@ async def test_persist_incremental_state_marks_missing_opportunities_expired_wit
 
 
 @pytest.mark.asyncio
+async def test_write_market_catalog_serializes_before_db_checkout(monkeypatch):
+    commit_mock = AsyncMock()
+    monkeypatch.setattr(shared_state, "_commit_with_retry", commit_mock)
+    session = _FakeSession(execute_results=[{"rowcount": 1}])
+
+    class _ProbeEvent:
+        def model_dump(self, *, mode="json", exclude=None):
+            assert session.statements == []
+            payload = {
+                "id": "event-1",
+                "slug": "event-1",
+                "title": "Event One",
+                "markets": [{"id": "market-1"}],
+            }
+            for key in list(exclude or set()):
+                payload.pop(key, None)
+            return payload
+
+    class _ProbeMarket:
+        def model_dump(self, *, mode="json"):
+            assert session.statements == []
+            return {
+                "id": "market-1",
+                "condition_id": "condition-1",
+                "question": "Will team A win?",
+            }
+
+    await shared_state.write_market_catalog(
+        session,
+        [_ProbeEvent()],
+        [_ProbeMarket()],
+        duration_seconds=1.5,
+    )
+
+    commit_mock.assert_awaited_once()
+    assert any("UPDATE" in str(statement) for statement, _ in session.statements)
+
+
+@pytest.mark.asyncio
+async def test_write_traders_snapshot_serializes_before_db_checkout(monkeypatch):
+    commit_mock = AsyncMock()
+    monkeypatch.setattr(shared_state, "_commit_with_retry", commit_mock)
+    session = _FakeSession()
+
+    class _ProbeOpportunity:
+        stable_id = "opp-1"
+
+        def model_dump(self, *, mode="json"):
+            assert session.statements == []
+            return {
+                "id": "opp-1",
+                "stable_id": "opp-1",
+                "strategy": "generic_strategy",
+                "title": "Opportunity",
+                "strategy_context": {},
+            }
+
+    await shared_state.write_traders_snapshot(
+        session,
+        [_ProbeOpportunity()],
+        {"running": True, "enabled": True, "current_activity": "Testing"},
+    )
+
+    commit_mock.assert_awaited_once()
+    assert isinstance(session.snapshot_row, ScannerSnapshot)
+    assert session.snapshot_row.opportunities_json[0]["strategy_context"]["source_key"] == "traders"
+
+
+@pytest.mark.asyncio
 async def test_read_scanner_snapshot_reads_active_opportunities_from_state_rows():
     opportunity = _build_opportunity(market_id="market-9")
     payload = opportunity.model_dump(mode="json")
@@ -245,7 +320,7 @@ async def test_read_scanner_snapshot_reads_active_opportunities_from_state_rows(
         interval_seconds=60,
         last_scan_at=utcnow(),
         current_activity="Fast scan complete - 1 found, 1 total",
-        strategies_json=[{"name": "Tail End Carry", "type": "tail_end_carry"}],
+        strategies_json=[{"name": "Generic Strategy", "type": "generic_strategy"}],
         strategy_diagnostics_json={},
         tiered_scanning_json={},
         ws_feeds_json={},

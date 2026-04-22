@@ -19,11 +19,11 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from itertools import combinations
+from types import SimpleNamespace
 from utils.utcnow import as_utc, as_utc_naive, utcnow
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import and_, select, text, update, func, or_, tuple_
-from sqlalchemy.orm import load_only
 
 from models.database import (
     DiscoveredWallet,
@@ -1440,10 +1440,14 @@ class WalletTagger:
         """Run auto-tagging on all discovered wallets."""
         logger.info("Starting wallet auto-tagging...")
 
-        async with AsyncSessionLocal() as session:
-            result = await session.execute(
-                select(DiscoveredWallet).options(
-                    load_only(
+        wallet_load_batch_size = max(WALLET_TAG_UPDATE_BATCH_SIZE, 500)
+        total_wallets = 0
+        tagged_count = 0
+        last_address = ""
+        while True:
+            async with AsyncSessionLocal() as session:
+                stmt = (
+                    select(
                         DiscoveredWallet.address,
                         DiscoveredWallet.tags,
                         DiscoveredWallet.total_trades,
@@ -1463,37 +1467,46 @@ class WalletTagger:
                         DiscoveredWallet.insider_confidence,
                         DiscoveredWallet.insider_sample_size,
                     )
+                    .order_by(DiscoveredWallet.address.asc())
+                    .limit(wallet_load_batch_size)
                 )
-            )
-            wallets = list(result.scalars().all())
+                if last_address:
+                    stmt = stmt.where(DiscoveredWallet.address > last_address)
+                rows = (await session.execute(stmt)).all()
 
-        dirty: list[tuple[str, list]] = []
-        for wallet in wallets:
-            try:
-                tags = await self.auto_tag_wallet(wallet)
-                if tags != (wallet.tags or []):
-                    dirty.append((wallet.address, tags))
-            except Exception as e:
-                logger.debug(
-                    "Failed to tag wallet",
-                    wallet=wallet.address,
-                    error=str(e),
-                )
+            if not rows:
+                break
 
-        tagged_count = 0
-        for i in range(0, len(dirty), WALLET_TAG_UPDATE_BATCH_SIZE):
-            batch = dirty[i : i + WALLET_TAG_UPDATE_BATCH_SIZE]
-            async with AsyncSessionLocal() as session:
-                await session.execute(
-                    update(DiscoveredWallet),
-                    [{"address": address, "tags": tags} for address, tags in batch],
-                )
-                await session.commit()
-                tagged_count += len(batch)
+            total_wallets += len(rows)
+            dirty: list[tuple[str, list[str]]] = []
+            for row in rows:
+                wallet = SimpleNamespace(**row._mapping)
+                try:
+                    tags = await self.auto_tag_wallet(wallet)
+                    if tags != (wallet.tags or []):
+                        dirty.append((wallet.address, tags))
+                except Exception as e:
+                    logger.debug(
+                        "Failed to tag wallet",
+                        wallet=wallet.address,
+                        error=str(e),
+                    )
+
+            for i in range(0, len(dirty), WALLET_TAG_UPDATE_BATCH_SIZE):
+                batch = dirty[i : i + WALLET_TAG_UPDATE_BATCH_SIZE]
+                async with AsyncSessionLocal() as session:
+                    await session.execute(
+                        update(DiscoveredWallet),
+                        [{"address": address, "tags": tags} for address, tags in batch],
+                    )
+                    await session.commit()
+                    tagged_count += len(batch)
+
+            last_address = str(rows[-1].address or "")
 
         logger.info(
             "Wallet auto-tagging complete",
-            total_wallets=len(wallets),
+            total_wallets=total_wallets,
             wallets_updated=tagged_count,
         )
 
@@ -1911,7 +1924,7 @@ class WhaleCohortAnalyzer:
     async def _get_smart_wallets(self) -> List[dict]:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                select(DiscoveredWallet)
+                select(DiscoveredWallet.address)
                 .where(
                     or_(
                         DiscoveredWallet.rank_score >= 0.20,
@@ -1921,11 +1934,9 @@ class WhaleCohortAnalyzer:
                 .order_by(DiscoveredWallet.composite_score.desc())
                 .limit(self.MAX_WALLETS)
             )
-            discovered = list(result.scalars().all())
-
             wallet_map: Dict[str, dict] = {}
-            for w in discovered:
-                address = str(w.address or "").strip().lower()
+            for address_raw in result.scalars().all():
+                address = str(address_raw or "").strip().lower()
                 if not address:
                     continue
                 wallet_map[address] = {"address": address}
@@ -1939,18 +1950,23 @@ class WhaleCohortAnalyzer:
 
         return list(wallet_map.values())[: self.MAX_WALLETS]
 
-    async def _fetch_rollups(self, addresses: List[str]) -> List[WalletActivityRollup]:
+    async def _fetch_rollups(self, addresses: List[str]) -> List[Any]:
         cutoff = utcnow() - timedelta(days=self.LOOKBACK_DAYS)
-        rollups: List[WalletActivityRollup] = []
+        rollups: List[Any] = []
         for chunk in _iter_chunks(addresses):
             async with AsyncSessionLocal() as session:
                 result = await session.execute(
-                    select(WalletActivityRollup).where(
+                    select(
+                        WalletActivityRollup.wallet_address,
+                        WalletActivityRollup.market_id,
+                        WalletActivityRollup.side,
+                        WalletActivityRollup.traded_at,
+                    ).where(
                         WalletActivityRollup.wallet_address.in_(chunk),
                         WalletActivityRollup.traded_at >= cutoff,
                     )
                 )
-                rollups.extend(result.scalars().all())
+                rollups.extend(SimpleNamespace(**row._mapping) for row in result.all())
         return rollups
 
     def _normalize_side(self, raw: Optional[str]) -> str:

@@ -517,6 +517,7 @@ class TailEndCarryStrategy(BaseStrategy):
             "panic_window_points": panic_window_points,
             "panic_recovery_ratio_max": panic_recovery_ratio_max,
             "block_spread_markets": block_spread_markets,
+            "exclude_market_keywords": self._normalize_excluded_keywords(cfg.get("exclude_market_keywords")),
             "skip_live_games": skip_live_games,
             "live_game_buffer_minutes": live_game_buffer_minutes,
             "allow_taker_limit_buy_above_signal": allow_taker_limit_buy_above_signal,
@@ -984,7 +985,11 @@ class TailEndCarryStrategy(BaseStrategy):
         payload["_market_category"] = category
         payload["_is_live_game"] = is_live
 
-        blocked_keyword = str(strategy_context.get("blocked_keyword") or payload.get("blocked_keyword") or "").strip() or None
+        blocked_keyword = self._first_blocked_keyword(signal_text, list(limits.get("exclude_market_keywords") or []))
+        if blocked_keyword is None:
+            blocked_keyword = str(strategy_context.get("blocked_keyword") or payload.get("blocked_keyword") or "").strip() or None
+        if blocked_keyword is not None:
+            payload["blocked_keyword"] = blocked_keyword
         liquidity = max(0.0, to_float(getattr(signal, "liquidity", 0.0), 0.0))
         observed_spread = max(
             0.0,
@@ -1016,7 +1021,6 @@ class TailEndCarryStrategy(BaseStrategy):
             is_live=is_live,
             limits=limits,
         )
-        checks = [check for check in checks if check.key not in {"keyword_block", "entry", "upside"}]
         return checks
 
     def compute_score(
@@ -1212,7 +1216,7 @@ class TailEndCarryStrategy(BaseStrategy):
         if resolution_hold_enabled and seconds_left is not None:
             minutes_left = seconds_left / 60.0
             if minutes_left <= resolution_hold_minutes:
-                # Check max loss override before holding
+                is_underwater = False
                 if entry_price > 0.0:
                     unrealized_loss_pct = ((entry_price - current_price) / entry_price) * 100.0
                     if unrealized_loss_pct >= resolution_hold_max_loss_pct:
@@ -1225,15 +1229,16 @@ class TailEndCarryStrategy(BaseStrategy):
                             ),
                             close_price=current_price,
                         )
-                # Still hold — skip all stops, let it resolve
-                return ExitDecision(
-                    "hold",
-                    (
-                        f"Resolution proximity hold ({minutes_left:.0f}m left <= {resolution_hold_minutes:.0f}m; "
-                        f"category={category}, price={current_price:.4f})"
-                    ),
-                    payload={"skip_default_exit": True},
-                )
+                    is_underwater = current_price < entry_price
+                if not is_underwater:
+                    return ExitDecision(
+                        "hold",
+                        (
+                            f"Resolution proximity hold ({minutes_left:.0f}m left <= {resolution_hold_minutes:.0f}m; "
+                            f"category={category}, price={current_price:.4f})"
+                        ),
+                        payload={"skip_default_exit": True},
+                    )
 
         # -- Fix #1: category-specific inversion stop --
         if is_sports:

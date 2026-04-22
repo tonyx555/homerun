@@ -114,6 +114,37 @@ async def test_execute_live_order_uses_fallback_when_live_quote_notional_below_s
 
 
 @pytest.mark.asyncio
+async def test_execute_live_order_clamps_explicit_limit_before_submission(monkeypatch):
+    ensure_mock = AsyncMock(return_value=True)
+    place_mock = AsyncMock(
+        return_value=SimpleNamespace(
+            status=OrderStatus.OPEN,
+            error_message=None,
+            average_fill_price=0.0,
+            id="order-clamped",
+            clob_order_id="clob-clamped",
+            filled_size=0.0,
+        )
+    )
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "ensure_initialized", ensure_mock)
+    monkeypatch.setattr(live_execution_adapter.live_execution_service, "place_order", place_mock)
+
+    result = await live_execution_adapter.execute_live_order(
+        token_id="123456789012345678901",
+        side="SELL",
+        size=5.0,
+        fallback_price=0.9995,
+        resolve_live_price=False,
+    )
+
+    assert result.status == "open"
+    assert "binary_price_clamped" in str(result.payload.get("price_resolution") or "")
+    assert result.payload["resolved_price"] == pytest.approx(0.99)
+    _, kwargs = place_mock.await_args
+    assert kwargs["price"] == pytest.approx(0.99)
+
+
+@pytest.mark.asyncio
 async def test_execute_live_order_aggressive_quote_respects_max_execution_price(monkeypatch):
     ensure_mock = AsyncMock(return_value=True)
     place_mock = AsyncMock(

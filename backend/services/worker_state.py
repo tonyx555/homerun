@@ -15,7 +15,9 @@ from typing import Any, Iterable, Optional
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
+from sqlalchemy import text
 from sqlalchemy import update as sa_update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,6 +67,8 @@ DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.05
 DB_RETRY_MAX_DELAY_SECONDS = 0.3
 _SCALAR_STATUS_TYPES = (str, int, float, bool, type(None))
+_WORKER_SNAPSHOT_STATEMENT_TIMEOUT_MS = 3000
+_WORKER_SNAPSHOT_LOCK_TIMEOUT_MS = 500
 
 
 def _is_retryable_db_error(exc: Exception) -> bool:
@@ -82,6 +86,17 @@ def _db_retry_delay(
 
 def _is_status_scalar(value: Any) -> bool:
     return isinstance(value, _SCALAR_STATUS_TYPES)
+
+
+async def _apply_snapshot_write_timeouts(session: AsyncSession) -> None:
+    try:
+        await session.execute(text(f"SET LOCAL statement_timeout = '{_WORKER_SNAPSHOT_STATEMENT_TIMEOUT_MS}ms'"))
+    except Exception:
+        pass
+    try:
+        await session.execute(text(f"SET LOCAL lock_timeout = '{_WORKER_SNAPSHOT_LOCK_TIMEOUT_MS}ms'"))
+    except Exception:
+        pass
 
 
 def _summarize_execution_latency(payload: dict[str, Any]) -> dict[str, Any]:
@@ -447,30 +462,49 @@ async def write_worker_snapshot(
     stats: Optional[dict[str, Any]] = None,
     publish_event: bool = True,
 ) -> None:
-    result = await session.execute(select(WorkerSnapshot).where(WorkerSnapshot.worker_name == worker_name))
-    row = result.scalar_one_or_none()
-    if row is None:
-        row = WorkerSnapshot(worker_name=worker_name)
-        session.add(row)
-
-    row.updated_at = _now()
-    if last_run_at is not None:
-        row.last_run_at = last_run_at
-    row.running = bool(running)
-    row.enabled = bool(enabled)
-    row.current_activity = current_activity
-    if interval_seconds is not None:
-        row.interval_seconds = max(1, int(interval_seconds))
-    row.lag_seconds = lag_seconds
-    row.last_error = last_error
+    await _apply_snapshot_write_timeouts(session)
+    updated_at = _now()
+    resolved_interval = (
+        max(1, int(interval_seconds))
+        if interval_seconds is not None
+        else _default_interval(worker_name)
+    )
     stats_payload = _with_runtime_process_stats(stats)
-    row.stats_json = stats_payload
+    values = {
+        "worker_name": worker_name,
+        "updated_at": updated_at,
+        "last_run_at": last_run_at,
+        "running": bool(running),
+        "enabled": bool(enabled),
+        "current_activity": current_activity,
+        "interval_seconds": resolved_interval,
+        "lag_seconds": lag_seconds,
+        "last_error": last_error,
+        "stats_json": stats_payload,
+    }
+    insert_stmt = pg_insert(WorkerSnapshot).values(**values)
+    await session.execute(
+        insert_stmt.on_conflict_do_update(
+            index_elements=[WorkerSnapshot.worker_name],
+            set_={
+                "updated_at": insert_stmt.excluded.updated_at,
+                "last_run_at": insert_stmt.excluded.last_run_at,
+                "running": insert_stmt.excluded.running,
+                "enabled": insert_stmt.excluded.enabled,
+                "current_activity": insert_stmt.excluded.current_activity,
+                "interval_seconds": insert_stmt.excluded.interval_seconds,
+                "lag_seconds": insert_stmt.excluded.lag_seconds,
+                "last_error": insert_stmt.excluded.last_error,
+                "stats_json": insert_stmt.excluded.stats_json,
+            },
+        )
+    )
     await _commit_with_retry(session)
 
     # Publish worker status update event (fire-and-forget, don't hold DB conn).
     if publish_event:
-        _updated_at_iso = to_iso(row.updated_at)
-        _interval = int(row.interval_seconds or _default_interval(worker_name))
+        _updated_at_iso = to_iso(updated_at)
+        _interval = int(resolved_interval)
 
         async def _publish_event() -> None:
             try:

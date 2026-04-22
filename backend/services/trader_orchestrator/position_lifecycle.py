@@ -30,8 +30,8 @@ import services.trader_hot_state as hot_state
 
 logger = logging.getLogger("position_lifecycle")
 
-PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open"}
-LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open"}
+PAPER_ACTIVE_STATUSES = {"submitted", "executed", "open", "pending", "placing", "queued"}
+LIVE_ACTIVE_STATUSES = {"submitted", "executed", "open", "pending", "placing", "queued"}
 _FAILED_EXIT_MAX_RETRIES = 5
 _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 # Absolute ceiling for the soft-bypass path.  Without this, an exit whose
@@ -46,7 +46,7 @@ _FAILED_EXIT_HARD_RETRY_CEILING = 100
 _WALLET_CACHE_TTL_SECONDS = 15.0
 _WALLET_HISTORY_CACHE_TTL_SECONDS = 180.0
 _WALLET_HISTORY_GRACE_SECONDS = 120.0
-_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS = 4.0
+_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS = 6.0
 _WALLET_HISTORY_LOAD_TIMEOUT_SECONDS = 6.0
 _WALLET_HISTORY_MAX_CLOSED_POSITIONS = 300
 _WALLET_HISTORY_MAX_TRADES = 300
@@ -63,6 +63,8 @@ _wallet_activity_last_refresh_succeeded = False
 _WALLET_SIZE_EPSILON = 1e-9
 _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
+_POST_END_EXTREME_MARK_GRACE_SECONDS = 900.0
+_TERMINAL_EXTREME_MARK_THRESHOLD = 0.001
 _LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
 # Retries specifically exist because the provider is slow/flaky; giving them
 # a tighter budget than the primary path guaranteed TimeoutErrors whenever
@@ -1082,6 +1084,112 @@ def _extract_winning_outcome_index_from_prices(
     return None
 
 
+def _missing_market_info_value(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
+def _normalize_market_info_aliases(market_info: Optional[dict[str, Any]]) -> dict[str, Any]:
+    if not isinstance(market_info, dict):
+        return {}
+
+    normalized = dict(market_info)
+    if _missing_market_info_value(normalized.get("id")) and not _missing_market_info_value(normalized.get("market_id")):
+        normalized["id"] = normalized.get("market_id")
+    if _missing_market_info_value(normalized.get("market_id")) and not _missing_market_info_value(normalized.get("id")):
+        normalized["market_id"] = normalized.get("id")
+
+    if _missing_market_info_value(normalized.get("yes_price")):
+        live_yes_price = safe_float(normalized.get("live_yes_price"))
+        if live_yes_price is not None:
+            normalized["yes_price"] = live_yes_price
+    if _missing_market_info_value(normalized.get("no_price")):
+        live_no_price = safe_float(normalized.get("live_no_price"))
+        if live_no_price is not None:
+            normalized["no_price"] = live_no_price
+
+    selected_price = safe_float(normalized.get("live_selected_price"))
+    selected_outcome = str(normalized.get("selected_outcome") or "").strip().lower()
+    if selected_price is not None:
+        if selected_outcome == "yes" and _missing_market_info_value(normalized.get("yes_price")):
+            normalized["yes_price"] = selected_price
+        elif selected_outcome == "no" and _missing_market_info_value(normalized.get("no_price")):
+            normalized["no_price"] = selected_price
+
+    if _missing_market_info_value(normalized.get("end_date")) and not _missing_market_info_value(
+        normalized.get("market_end_time")
+    ):
+        normalized["end_date"] = normalized.get("market_end_time")
+    if _missing_market_info_value(normalized.get("resolved")) and not _missing_market_info_value(
+        normalized.get("market_resolved")
+    ):
+        normalized["resolved"] = normalized.get("market_resolved")
+    if _missing_market_info_value(normalized.get("closed")) and not _missing_market_info_value(
+        normalized.get("market_closed")
+    ):
+        normalized["closed"] = normalized.get("market_closed")
+
+    return normalized
+
+
+def _merge_market_info(primary: Optional[dict[str, Any]], fallback: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    if not isinstance(primary, dict):
+        normalized_fallback = _normalize_market_info_aliases(fallback)
+        return normalized_fallback or None
+
+    merged = _normalize_market_info_aliases(fallback)
+    normalized_primary = _normalize_market_info_aliases(primary)
+    for key, value in normalized_primary.items():
+        if not _missing_market_info_value(value) or key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _terminal_extreme_selected_price(price: Optional[float]) -> Optional[float]:
+    normalized = _state_price_floor(price)
+    if normalized is None:
+        return None
+    if normalized <= _TERMINAL_EXTREME_MARK_THRESHOLD:
+        return 0.0
+    if normalized >= (1.0 - _TERMINAL_EXTREME_MARK_THRESHOLD):
+        return 1.0
+    return None
+
+
+def _infer_post_end_terminal_price(
+    *,
+    market_info: Optional[dict[str, Any]],
+    current_price: Optional[float],
+    current_price_source: Optional[str],
+    previous_mark_price: Optional[float],
+    wallet_mark_price: Optional[float],
+    now: datetime,
+) -> tuple[Optional[float], Optional[str]]:
+    end_time = _extract_market_end_time_naive(market_info)
+    if end_time is None:
+        return None, None
+
+    now_naive = now.astimezone(timezone.utc).replace(tzinfo=None) if now.tzinfo is not None else now
+    if (now_naive - end_time).total_seconds() < _POST_END_EXTREME_MARK_GRACE_SECONDS:
+        return None, None
+
+    live_price_source = str(current_price_source or "").strip().lower()
+    if current_price is not None and live_price_source in {"ws_mid", "clob_midpoint", "wallet_mark"}:
+        terminal_price = _terminal_extreme_selected_price(current_price)
+        if terminal_price is not None:
+            return terminal_price, live_price_source
+        return None, None
+
+    for source, price in (
+        (live_price_source or "market_mark", current_price),
+        ("wallet_mark", wallet_mark_price),
+        ("position_state_mark", previous_mark_price),
+    ):
+        terminal_price = _terminal_extreme_selected_price(price)
+        if terminal_price is not None:
+            return terminal_price, source
+    return None, None
+
+
 def _state_price_floor(value: Optional[float]) -> Optional[float]:
     if value is None:
         return None
@@ -1095,7 +1203,7 @@ def _state_price_floor(value: Optional[float]) -> Optional[float]:
 def _status_for_close(*, pnl: float, close_trigger: Optional[str]) -> str:
     normalized_pnl = 0.0 if abs(float(pnl or 0.0)) <= 1e-9 else float(pnl)
     trigger = str(close_trigger or "").strip().lower()
-    is_resolution = trigger in {"resolution", "resolution_inferred"}
+    is_resolution = trigger in {"resolution", "resolution_inferred", "resolution_extreme_mark"}
     if is_resolution:
         return "resolved_win" if normalized_pnl >= 0 else "resolved_loss"
     return "closed_win" if normalized_pnl >= 0 else "closed_loss"
@@ -1183,24 +1291,58 @@ def _provider_reconciliation_parts(payload: dict[str, Any]) -> tuple[dict[str, A
     return provider_reconciliation, snapshot
 
 
+def _normalize_provider_status(value: Any) -> str:
+    status = str(value or "").strip().lower()
+    if not status:
+        return ""
+    if status in {"live", "active", "working", "partially_filled", "partially_matched"}:
+        return "open"
+    if status in {"matched", "executed"}:
+        return "filled"
+    if status in {"pending", "placing", "queued", "submitted"}:
+        return "pending"
+    if status == "canceled":
+        return "cancelled"
+    return status
+
+
+def _raw_snapshot_status(snapshot: dict[str, Any]) -> str:
+    raw_snapshot = snapshot.get("raw")
+    raw_status = snapshot.get("status") or snapshot.get("raw_status")
+    if not raw_status and isinstance(raw_snapshot, dict):
+        raw_status = raw_snapshot.get("status") or raw_snapshot.get("raw_status")
+    return _normalize_provider_status(raw_status)
+
+
+def _resolved_snapshot_status(snapshot: Optional[dict[str, Any]], *status_candidates: Any) -> str:
+    snapshot_dict = snapshot if isinstance(snapshot, dict) else {}
+    raw_status = _raw_snapshot_status(snapshot_dict)
+    resolved_status = ""
+    for candidate in status_candidates:
+        normalized_status = _normalize_provider_status(candidate)
+        if normalized_status:
+            resolved_status = normalized_status
+            break
+    if resolved_status in {"open", "pending"} and raw_status in {
+        "filled",
+        "cancelled",
+        "expired",
+        "failed",
+        "rejected",
+        "error",
+    }:
+        return raw_status
+    return resolved_status or raw_status
+
+
 def _provider_snapshot_status(payload: dict[str, Any]) -> str:
     provider_reconciliation, snapshot = _provider_reconciliation_parts(payload)
-    for candidate in (
+    return _resolved_snapshot_status(
+        snapshot,
         snapshot.get("normalized_status"),
         provider_reconciliation.get("snapshot_status"),
         provider_reconciliation.get("mapped_status"),
-        snapshot.get("status"),
-        snapshot.get("raw_status"),
-    ):
-        status = str(candidate or "").strip().lower()
-        if not status:
-            continue
-        if status in {"live", "active", "working", "partially_filled", "partially_matched"}:
-            return "open"
-        if status in {"matched", "executed"}:
-            return "filled"
-        return status
-    return ""
+    )
 
 
 def _live_trading_order_snapshot(row: LiveTradingOrder) -> dict[str, Any]:
@@ -1343,6 +1485,8 @@ def _extract_wallet_settlement_price(wallet_position: Optional[dict[str, Any]]) 
     if mark is None:
         mark = safe_float(wallet_position.get("currentPrice"))
     if mark is None:
+        if not _safe_bool(wallet_position.get("counts_as_open"), True):
+            return 1.0
         return None
     if mark <= 0.001:
         return 0.0
@@ -1557,12 +1701,11 @@ def _pending_exit_fill_evidence(pending_exit: dict[str, Any]) -> tuple[str, floa
     if not isinstance(snapshot, dict):
         snapshot = {}
     candidates: list[Any] = [snapshot, pending_exit]
-    provider_status = str(
-        snapshot.get("normalized_status")
-        or snapshot.get("status")
-        or pending_exit.get("provider_status")
-        or ""
-    ).strip().lower()
+    provider_status = _resolved_snapshot_status(
+        snapshot,
+        snapshot.get("normalized_status"),
+        pending_exit.get("provider_status"),
+    )
     filled_size = max(
         0.0,
         _first_float_from_candidates(
@@ -1831,10 +1974,29 @@ def _provider_failure_terminal_status(row: TraderOrder, payload: dict[str, Any])
 
 
 def _failed_terminal_row_can_reopen_from_wallet_position(row: TraderOrder, payload: dict[str, Any]) -> bool:
-    if _active_row_has_unfilled_terminal_provider_failure(row, payload):
-        return False
-
     filled_notional, filled_size, _average_fill_price = _extract_live_fill_metrics(payload)
+    live_wallet_authority = payload.get("live_wallet_authority")
+    authority_source = ""
+    authority_token_id = ""
+    authority_live_order_id = ""
+    if isinstance(live_wallet_authority, dict):
+        authority_source = str(live_wallet_authority.get("source") or "").strip().lower()
+        authority_token_id = str(
+            live_wallet_authority.get("token_id")
+            or live_wallet_authority.get("asset_id")
+            or live_wallet_authority.get("asset")
+            or ""
+        ).strip()
+        authority_live_order_id = str(live_wallet_authority.get("live_trading_order_id") or "").strip()
+    payload_token_id = _extract_live_token_id(payload)
+    if _active_row_has_unfilled_terminal_provider_failure(row, payload):
+        return (
+            authority_source == "live_trading_orders"
+            and bool(authority_live_order_id)
+            and bool(authority_token_id)
+            and authority_token_id == payload_token_id
+        )
+
     if filled_notional > 0.0 or filled_size > _WALLET_SIZE_EPSILON:
         return True
 
@@ -1842,11 +2004,9 @@ def _failed_terminal_row_can_reopen_from_wallet_position(row: TraderOrder, paylo
     if verification_status in {"venue_fill", "wallet_position"}:
         return True
 
-    live_wallet_authority = payload.get("live_wallet_authority")
     if not isinstance(live_wallet_authority, dict):
         return False
 
-    authority_source = str(live_wallet_authority.get("source") or "").strip().lower()
     if authority_source == "wallet_positions_api":
         return True
 
@@ -2230,6 +2390,140 @@ async def _load_mapping_with_timeout(
         return dict(fallback or {})
 
 
+def _payload_market_info_for_order(order: Any, market_id: str, live_market: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(getattr(order, "payload_json", {}) or {})
+    fallback = _normalize_market_info_aliases(live_market)
+
+    matched_market: dict[str, Any] = {}
+    raw_markets = payload.get("markets")
+    if isinstance(raw_markets, list):
+        for market in raw_markets:
+            if not isinstance(market, dict):
+                continue
+            candidate_market_id = str(market.get("market_id") or market.get("id") or "").strip()
+            if candidate_market_id == market_id:
+                matched_market = dict(market)
+                break
+    if matched_market:
+        fallback = _merge_market_info(matched_market, fallback) or {}
+
+    direction = str(getattr(order, "direction", "") or payload.get("direction") or "").strip().lower()
+    preferred_outcome = "yes" if direction.endswith("yes") else ("no" if direction.endswith("no") else "")
+    matched_position: dict[str, Any] = {}
+    first_position: dict[str, Any] = {}
+    raw_positions = payload.get("positions_to_take")
+    if isinstance(raw_positions, list):
+        for position in raw_positions:
+            if not isinstance(position, dict):
+                continue
+            candidate_market_id = str(position.get("market_id") or "").strip()
+            if candidate_market_id != market_id:
+                continue
+            if not first_position:
+                first_position = dict(position)
+            outcome = str(position.get("outcome") or "").strip().lower()
+            if preferred_outcome and outcome == preferred_outcome:
+                matched_position = dict(position)
+                break
+        if not matched_position and first_position:
+            matched_position = first_position
+
+    derived: dict[str, Any] = {"market_id": market_id, "id": market_id}
+
+    question = (
+        payload.get("market_question")
+        or matched_market.get("question")
+        or matched_market.get("market_question")
+        or fallback.get("question")
+        or fallback.get("market_question")
+    )
+    if not _missing_market_info_value(question):
+        derived["question"] = question
+        derived["market_question"] = question
+
+    condition_id = payload.get("condition_id") or matched_market.get("condition_id") or fallback.get("condition_id")
+    if not _missing_market_info_value(condition_id):
+        derived["condition_id"] = condition_id
+
+    selected_outcome = str(
+        fallback.get("selected_outcome")
+        or matched_position.get("outcome")
+        or preferred_outcome
+        or ""
+    ).strip().lower()
+    if selected_outcome in {"yes", "no"}:
+        derived["selected_outcome"] = selected_outcome
+
+    matched_market_token_ids = matched_market.get("token_ids")
+    if not isinstance(matched_market_token_ids, list):
+        matched_market_token_ids = matched_market.get("clob_token_ids")
+    matched_market_token_ids = matched_market_token_ids if isinstance(matched_market_token_ids, list) else []
+
+    selected_token_id = (
+        payload.get("selected_token_id")
+        or payload.get("token_id")
+        or matched_position.get("token_id")
+        or fallback.get("selected_token_id")
+    )
+    if not _missing_market_info_value(selected_token_id):
+        derived["selected_token_id"] = str(selected_token_id)
+
+    yes_token_id = payload.get("yes_token_id") or fallback.get("yes_token_id")
+    no_token_id = payload.get("no_token_id") or fallback.get("no_token_id")
+    if _missing_market_info_value(yes_token_id) and len(matched_market_token_ids) >= 1:
+        yes_token_id = matched_market_token_ids[0]
+    if _missing_market_info_value(no_token_id) and len(matched_market_token_ids) >= 2:
+        no_token_id = matched_market_token_ids[1]
+    if not _missing_market_info_value(yes_token_id):
+        derived["yes_token_id"] = str(yes_token_id)
+    if not _missing_market_info_value(no_token_id):
+        derived["no_token_id"] = str(no_token_id)
+
+    token_ids: list[str] = []
+
+    def _append_token(value: Any) -> None:
+        token = str(value or "").strip()
+        if token and token not in token_ids:
+            token_ids.append(token)
+
+    for key in ("token_ids", "clob_token_ids"):
+        raw_tokens = fallback.get(key)
+        if isinstance(raw_tokens, list):
+            for token in raw_tokens:
+                _append_token(token)
+    for token in matched_market_token_ids:
+        _append_token(token)
+    _append_token(derived.get("yes_token_id"))
+    _append_token(derived.get("no_token_id"))
+    _append_token(derived.get("selected_token_id"))
+    _append_token(matched_position.get("token_id"))
+    if token_ids:
+        derived["token_ids"] = token_ids
+
+    selected_price = safe_float(matched_position.get("current_price"))
+    if selected_price is None:
+        selected_price = safe_float(matched_position.get("price"))
+    if selected_price is None:
+        selected_price = safe_float(payload.get("entry_price"))
+    if selected_price is not None:
+        derived["live_selected_price"] = float(selected_price)
+
+    resolution_time = (
+        payload.get("resolution_date")
+        or payload.get("market_end_time")
+        or matched_market.get("resolution_date")
+        or matched_market.get("end_date")
+        or matched_market.get("market_end_time")
+        or fallback.get("end_date")
+        or fallback.get("market_end_time")
+    )
+    if not _missing_market_info_value(resolution_time):
+        derived["end_date"] = resolution_time
+        derived["market_end_time"] = resolution_time
+
+    return _normalize_market_info_aliases(_merge_market_info(derived, fallback) or derived)
+
+
 def _market_lookup_candidates_for_order(order: Any) -> tuple[str, list[str], dict[str, Any]]:
     def _append_lookup_candidate(target: list[str], value: Any) -> None:
         candidate = str(value or "").strip()
@@ -2241,6 +2535,7 @@ def _market_lookup_candidates_for_order(order: Any) -> tuple[str, list[str], dic
         return "", [], {}
     payload = dict(getattr(order, "payload_json", {}) or {})
     live_market = payload.get("live_market") if isinstance(payload.get("live_market"), dict) else {}
+    payload_market_info = _payload_market_info_for_order(order, market_id, live_market)
     candidates: list[str] = []
     _append_lookup_candidate(candidates, market_id)
     _append_lookup_candidate(candidates, payload.get("condition_id"))
@@ -2248,27 +2543,28 @@ def _market_lookup_candidates_for_order(order: Any) -> tuple[str, list[str], dic
     _append_lookup_candidate(candidates, payload.get("selected_token_id"))
     _append_lookup_candidate(candidates, payload.get("yes_token_id"))
     _append_lookup_candidate(candidates, payload.get("no_token_id"))
-    if live_market:
-        _append_lookup_candidate(candidates, live_market.get("market_id"))
-        _append_lookup_candidate(candidates, live_market.get("condition_id"))
-        _append_lookup_candidate(candidates, live_market.get("selected_token_id"))
-        _append_lookup_candidate(candidates, live_market.get("yes_token_id"))
-        _append_lookup_candidate(candidates, live_market.get("no_token_id"))
-        token_ids = live_market.get("token_ids")
+    if payload_market_info:
+        _append_lookup_candidate(candidates, payload_market_info.get("id"))
+        _append_lookup_candidate(candidates, payload_market_info.get("market_id"))
+        _append_lookup_candidate(candidates, payload_market_info.get("condition_id"))
+        _append_lookup_candidate(candidates, payload_market_info.get("selected_token_id"))
+        _append_lookup_candidate(candidates, payload_market_info.get("yes_token_id"))
+        _append_lookup_candidate(candidates, payload_market_info.get("no_token_id"))
+        token_ids = payload_market_info.get("token_ids")
         if isinstance(token_ids, list):
             for token_id in token_ids:
                 _append_lookup_candidate(candidates, token_id)
-    return market_id, candidates, dict(live_market or {})
+    return market_id, candidates, payload_market_info
 
 
 def _fallback_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, dict[str, Any]]:
     fallback: dict[str, dict[str, Any]] = {}
     for order in orders:
-        market_id, candidates, live_market = _market_lookup_candidates_for_order(order)
+        market_id, candidates, payload_market_info = _market_lookup_candidates_for_order(order)
         if not market_id:
             continue
-        if live_market:
-            fallback[market_id] = live_market
+        if payload_market_info:
+            fallback[market_id] = payload_market_info
             continue
         for candidate in candidates:
             cached_entry = _market_info_cache.get(candidate)
@@ -2394,11 +2690,11 @@ async def load_market_info_for_orders(orders: list[TraderOrder]) -> dict[str, Op
 
     out: dict[str, Optional[dict[str, Any]]] = {}
     for market_id, candidates in lookup_candidates_by_market_id.items():
-        info = fallback_info_by_market_id.get(market_id)
+        info = _normalize_market_info_aliases(fallback_info_by_market_id.get(market_id))
         for candidate in candidates:
             candidate_info = info_by_lookup_id.get(candidate)
             if candidate_info is not None:
-                info = candidate_info
+                info = _merge_market_info(candidate_info, info)
                 break
         out[market_id] = info
     return out
@@ -3708,7 +4004,10 @@ async def reconcile_live_positions(
             str(row.reason or "").strip().lower() == "recovered from live venue authority"
             and provider_side == "SELL"
         )
-        if _active_row_has_unfilled_terminal_provider_failure(row, payload):
+        if _active_row_has_unfilled_terminal_provider_failure(
+            row,
+            payload,
+        ) and not _failed_terminal_row_can_reopen_from_wallet_position(row, payload):
             terminal_status = _provider_failure_terminal_status(row, payload)
             details.append(
                 {
@@ -4424,13 +4723,15 @@ async def reconcile_live_positions(
             snapshot = pending_exit_snapshots.get(provider_clob_order_id) if provider_clob_order_id else None
             if snapshot is None and provider_clob_order_id:
                 snapshot = pending_exit_snapshot_fallbacks.get(provider_clob_order_id)
-            snapshot_status = str((snapshot or {}).get("normalized_status") or "").strip().lower()
+            snapshot_status = _resolved_snapshot_status(
+                snapshot,
+                (snapshot or {}).get("normalized_status"),
+                pending_exit.get("provider_status"),
+            )
             snapshot_filled_size = max(0.0, safe_float((snapshot or {}).get("filled_size"), 0.0) or 0.0)
             snapshot_fill_price = safe_float((snapshot or {}).get("average_fill_price"))
             if snapshot_fill_price is None or snapshot_fill_price <= 0:
                 snapshot_fill_price = safe_float((snapshot or {}).get("limit_price"))
-            if not snapshot_status:
-                snapshot_status = str(pending_exit.get("provider_status") or "").strip().lower()
             if snapshot_filled_size <= 0.0:
                 snapshot_filled_size = max(0.0, safe_float(pending_exit.get("filled_size"), 0.0) or 0.0)
             if snapshot_fill_price is None or snapshot_fill_price <= 0.0:
@@ -4475,6 +4776,7 @@ async def reconcile_live_positions(
                 or isinstance(closed_position, dict)
                 or (
                     wallet_positions_loaded
+                    and bool(wallet_positions_by_token)
                     and not wallet_position_observed
                     and terminal_provider_status
                 )
@@ -5258,6 +5560,7 @@ async def reconcile_live_positions(
             "blocked_no_inventory",
             "blocked_min_notional",
             "blocked_retry_exhausted",
+            "blocked_retry_exhausted_hard",
         }:
             pending_wallet_resolution_confirmed = wallet_settlement_price is not None
             if pending_winning_idx is not None and pending_outcome_idx is not None and pending_wallet_resolution_confirmed:
@@ -5361,6 +5664,68 @@ async def reconcile_live_positions(
                         "order_id": row.id,
                         "market_id": row.market_id,
                         "close_trigger": "resolution",
+                        "close_price": cp,
+                        "realized_pnl": _pnl,
+                        "next_status": ns,
+                    }
+                )
+                continue
+            pending_expired_terminal_price, pending_expired_terminal_source = _infer_post_end_terminal_price(
+                market_info=pending_market_info,
+                current_price=pending_current_price,
+                current_price_source=pending_current_price_source,
+                previous_mark_price=pending_prev_last_mark,
+                wallet_mark_price=wallet_mark_price,
+                now=now,
+            )
+            if pending_expired_terminal_price is not None:
+                _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                _ep = _fill_px if _fill_px and _fill_px > 0 else safe_float(row.effective_price)
+                if _ep is None or _ep <= 0:
+                    _ep = safe_float(row.entry_price)
+                _not = _fill_not if _fill_not > 0 else (safe_float(row.notional_usd) or 0.0)
+                _qty = _fill_sz if _fill_sz > 0 else (_not / _ep if _ep and _ep > 0 else 0.0)
+                cp = pending_expired_terminal_price
+                close_trigger = "resolution_extreme_mark"
+                _pnl = (_qty * cp) - _not if _qty > 0 and _not > 0 else 0.0
+                ns = _status_for_close(pnl=_pnl, close_trigger=close_trigger)
+                if not dry_run:
+                    row.status = ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    pending_exit["status"] = "superseded_resolution"
+                    pending_exit["resolved_at"] = _iso_utc(now)
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": cp,
+                        "price_source": pending_expired_terminal_source,
+                        "close_trigger": close_trigger,
+                        "realized_pnl": _pnl,
+                        "closed_at": _iso_utc(now),
+                        "reason": reason,
+                    }
+                    row.payload_json = payload
+                    hot_state.record_order_resolved(
+                        trader_id=trader_id,
+                        mode=str(row.mode or ""),
+                        order_id=str(row.id or ""),
+                        market_id=str(row.market_id or ""),
+                        direction=str(row.direction or ""),
+                        source=str(row.source or ""),
+                        status=ns,
+                        actual_profit=_pnl,
+                        payload=payload,
+                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                    )
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[ns] = int(by_status.get(ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": close_trigger,
                         "close_price": cp,
                         "realized_pnl": _pnl,
                         "next_status": ns,
@@ -5521,7 +5886,7 @@ async def reconcile_live_positions(
         raw_filled_notional, raw_filled_size, _raw_fill_price = _extract_live_fill_metrics(payload)
         provider_snapshot_status = _provider_snapshot_status(payload)
         if (
-            status_key in {"open", "submitted"}
+            status_key in {"open", "submitted", "pending", "placing", "queued"}
             and raw_filled_notional <= 0.0
             and raw_filled_size <= 0.0
             and wallet_position_size <= _WALLET_SIZE_EPSILON
@@ -5752,204 +6117,217 @@ async def reconcile_live_positions(
             close_trigger = "resolution"
             price_source = "wallet_redeemable_mark"
         else:
-            bundle_position_shortfall = _bundle_position_shortfall(
-                token_id=token_id,
-                payload=payload,
-                signal_payload=signal_payload,
-                wallet_positions_by_token=wallet_positions_by_token,
+            expired_terminal_price, expired_terminal_source = _infer_post_end_terminal_price(
+                market_info=market_info,
+                current_price=exit_eval_price,
+                current_price_source=exit_eval_price_source,
+                previous_mark_price=prev_last_mark,
+                wallet_mark_price=wallet_mark_price,
+                now=now,
             )
-            pnl_pct = None
-            if exit_eval_price is not None and entry_price > 0:
-                pnl_pct = ((exit_eval_price - entry_price) / entry_price) * 100.0
-
-            if bundle_position_shortfall is not None:
-                close_price = exit_eval_price
-                if close_price is None or close_price <= 0.0:
-                    close_price = _state_price_floor(entry_price)
-                close_trigger = "force_flatten_bundle_residual"
-                price_source = exit_eval_price_source or ("entry_price" if close_price is not None else None)
-                if not dry_run:
-                    payload["bundle_execution_state"] = {
-                        "status": "incomplete_live_wallet_bundle",
-                        "required_token_ids": list(bundle_position_shortfall["required_token_ids"]),
-                        "observed_token_ids": list(bundle_position_shortfall["observed_token_ids"]),
-                        "missing_token_ids": list(bundle_position_shortfall["missing_token_ids"]),
-                        "full_bundle_execution_mode": bundle_position_shortfall.get("full_bundle_execution_mode"),
-                        "plan_id": bundle_position_shortfall.get("plan_id"),
-                        "detected_at": _iso_utc(now),
-                    }
-            elif force_mark_to_market and exit_eval_price is not None:
-                close_price = exit_eval_price
-                close_trigger = "manual_mark_to_market"
-                price_source = exit_eval_price_source
+            if expired_terminal_price is not None:
+                close_price = expired_terminal_price
+                close_trigger = "resolution_extreme_mark"
+                price_source = expired_terminal_source
             else:
-                # ── Strategy-based exit check ──────────────────────────
-                # If the strategy that opened this position has a
-                # should_exit() method, call it first and respect its
-                # decision before falling through to default TP/SL/etc.
-                strategy_slug = (payload.get("strategy_type") or "").strip().lower()
-                strategy_exit = None
-                _exit_instance = await _strategy_exit_instance(session, strategy_slug) if strategy_slug else None
-                if _exit_instance is not None:
-                    try:
-
-                        class _LivePositionView:
-                            pass
-
-                        pos_view = _LivePositionView()
-                        pos_view.entry_price = entry_price
-                        pos_view.current_price = exit_eval_price
-                        pos_view.highest_price = highest_price
-                        pos_view.lowest_price = lowest_price
-                        pos_view.age_minutes = age_minutes
-                        pos_view.pnl_percent = pnl_pct
-                        pos_view.filled_size = (
-                            filled_size
-                            if filled_size > 0.0
-                            else (notional / entry_price if entry_price > 0 else 0.0)
-                        )
-                        pos_view.notional_usd = notional
-                        if "strategy_context" not in payload:
-                            payload["strategy_context"] = {}
-                        strategy_context_payload = (
-                            payload["strategy_context"] if isinstance(payload.get("strategy_context"), dict) else {}
-                        )
-                        pos_view.strategy_context = payload["strategy_context"]
-                        pos_view.config = payload.get("strategy_exit_config", {})
-                        pos_view.outcome_idx = outcome_idx
-
-                        min_order_size_usd = _resolve_position_min_order_size_usd(
-                            trader_params=params,
-                            payload=payload,
-                            mode="live",
-                        )
-                        market_state_dict = {
-                            "current_price": exit_eval_price,
-                            "market_tradable": market_tradable,
-                            "is_resolved": False,
-                            "winning_outcome": None,
-                            "seconds_left": market_seconds_left,
-                            "end_time": market_end_time,
-                            "token_id": token_id,
-                            "mark_source": exit_eval_price_source,
-                            "min_order_size_usd": min_order_size_usd,
-                            "notional_usd": notional,
-                            "oracle_price": strategy_context_payload.get("oracle_price"),
-                            "price_to_beat": strategy_context_payload.get("price_to_beat"),
-                            "oracle_age_seconds": strategy_context_payload.get("oracle_age_seconds"),
-                            "confirmed_stage_triggered": strategy_context_payload.get("confirmed_stage_triggered"),
-                            "strategy_stage": strategy_context_payload.get("stage"),
-                        }
-
-                        exit_decision = _exit_instance.should_exit(pos_view, market_state_dict)
-                        exit_action = getattr(exit_decision, "action", None) if exit_decision is not None else None
-                        if exit_action == "close":
-                            strategy_exit = exit_decision
-                        elif exit_action == "reduce":
-                            strategy_exit = exit_decision
-                        elif _strategy_hold_blocks_default_exit(exit_decision):
-                            strategy_exit = exit_decision
-                    except Exception as exc:
-                        logger.warning(
-                            "Strategy should_exit() error for %s: %s",
-                            strategy_slug,
-                            exc,
-                        )
-
-                if strategy_exit is not None and getattr(strategy_exit, "action", None) == "reduce":
-                    if not dry_run:
-                        payload["position_state"] = next_state
-                        row.payload_json = payload
-                        row.updated_at = now
-                        state_updates += 1
-                    held += 1
-                    continue
-
-                if _strategy_hold_blocks_default_exit(strategy_exit):
-                    if not dry_run:
-                        payload["position_state"] = next_state
-                        row.payload_json = payload
-                        row.updated_at = now
-                        state_updates += 1
-                    held += 1
-                    continue
-
-                active_take_profit_limit = (
-                    isinstance(pending_exit, dict)
-                    and str(pending_exit.get("kind") or "").strip().lower() == "take_profit_limit"
-                    and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
+                bundle_position_shortfall = _bundle_position_shortfall(
+                    token_id=token_id,
+                    payload=payload,
+                    signal_payload=signal_payload,
+                    wallet_positions_by_token=wallet_positions_by_token,
                 )
-                if strategy_exit is not None:
-                    _arm_reverse_entry_from_exit(
-                        row=row,
-                        payload=payload,
-                        strategy_exit=strategy_exit,
-                        market_info=market_info,
-                        market_seconds_left=market_seconds_left,
-                        current_price=exit_eval_price,
-                        now=now,
-                    )
-                    close_price = (
-                        strategy_exit.close_price if strategy_exit.close_price is not None else exit_eval_price
-                    )
-                    close_trigger = f"strategy:{strategy_exit.reason}"
-                    price_source = exit_eval_price_source
-                elif (
-                    not resolve_only
-                    and take_profit_pct is not None
-                    and pnl_pct is not None
-                    and min_hold_passed
-                    and not active_take_profit_limit
-                    and pnl_pct >= take_profit_pct
-                ):
-                    close_price = exit_eval_price
-                    close_trigger = "take_profit"
-                    price_source = exit_eval_price_source
-                elif (
-                    not resolve_only
-                    and stop_loss_pct is not None
-                    and pnl_pct is not None
-                    and min_hold_passed
-                    and pnl_pct <= -abs(stop_loss_pct)
-                ):
-                    close_price = exit_eval_price
-                    close_trigger = "stop_loss"
-                    price_source = exit_eval_price_source
-                elif (
-                    not resolve_only
-                    and trailing_stop_pct is not None
-                    and trailing_stop_pct > 0
-                    and exit_eval_price is not None
-                    and highest_price is not None
-                    and min_hold_passed
-                ):
-                    trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
-                    if highest_price > entry_price and exit_eval_price <= trailing_trigger_price:
-                        close_price = exit_eval_price
-                        close_trigger = "trailing_stop"
-                        price_source = exit_eval_price_source
-                elif (
-                    not resolve_only
-                    and max_hold_minutes is not None
-                    and age_minutes is not None
-                    and age_minutes >= max_hold_minutes
-                ):
-                    if exit_eval_price is not None:
-                        close_price = exit_eval_price
-                        close_trigger = "max_hold"
-                        price_source = exit_eval_price_source
-                elif (
-                    not resolve_only
-                    and close_on_inactive_market
-                    and not market_tradable
-                    and exit_eval_price is not None
-                    and min_hold_passed
-                ):
-                    close_price = exit_eval_price
-                    close_trigger = "market_inactive"
-                    price_source = exit_eval_price_source
+                pnl_pct = None
+                if exit_eval_price is not None and entry_price > 0:
+                    pnl_pct = ((exit_eval_price - entry_price) / entry_price) * 100.0
 
-        close_is_resolution = close_trigger in {"resolution", "resolution_inferred"}
+                if bundle_position_shortfall is not None:
+                    close_price = exit_eval_price
+                    if close_price is None or close_price <= 0.0:
+                        close_price = _state_price_floor(entry_price)
+                    close_trigger = "force_flatten_bundle_residual"
+                    price_source = exit_eval_price_source or ("entry_price" if close_price is not None else None)
+                    if not dry_run:
+                        payload["bundle_execution_state"] = {
+                            "status": "incomplete_live_wallet_bundle",
+                            "required_token_ids": list(bundle_position_shortfall["required_token_ids"]),
+                            "observed_token_ids": list(bundle_position_shortfall["observed_token_ids"]),
+                            "missing_token_ids": list(bundle_position_shortfall["missing_token_ids"]),
+                            "full_bundle_execution_mode": bundle_position_shortfall.get("full_bundle_execution_mode"),
+                            "plan_id": bundle_position_shortfall.get("plan_id"),
+                            "detected_at": _iso_utc(now),
+                        }
+                elif force_mark_to_market and exit_eval_price is not None:
+                    close_price = exit_eval_price
+                    close_trigger = "manual_mark_to_market"
+                    price_source = exit_eval_price_source
+                else:
+                    # ── Strategy-based exit check ──────────────────────────
+                    # If the strategy that opened this position has a
+                    # should_exit() method, call it first and respect its
+                    # decision before falling through to default TP/SL/etc.
+                    strategy_slug = (payload.get("strategy_type") or "").strip().lower()
+                    strategy_exit = None
+                    _exit_instance = await _strategy_exit_instance(session, strategy_slug) if strategy_slug else None
+                    if _exit_instance is not None:
+                        try:
+
+                            class _LivePositionView:
+                                pass
+
+                            pos_view = _LivePositionView()
+                            pos_view.entry_price = entry_price
+                            pos_view.current_price = exit_eval_price
+                            pos_view.highest_price = highest_price
+                            pos_view.lowest_price = lowest_price
+                            pos_view.age_minutes = age_minutes
+                            pos_view.pnl_percent = pnl_pct
+                            pos_view.filled_size = (
+                                filled_size
+                                if filled_size > 0.0
+                                else (notional / entry_price if entry_price > 0 else 0.0)
+                            )
+                            pos_view.notional_usd = notional
+                            if "strategy_context" not in payload:
+                                payload["strategy_context"] = {}
+                            strategy_context_payload = (
+                                payload["strategy_context"] if isinstance(payload.get("strategy_context"), dict) else {}
+                            )
+                            pos_view.strategy_context = payload["strategy_context"]
+                            pos_view.config = payload.get("strategy_exit_config", {})
+                            pos_view.outcome_idx = outcome_idx
+
+                            min_order_size_usd = _resolve_position_min_order_size_usd(
+                                trader_params=params,
+                                payload=payload,
+                                mode="live",
+                            )
+                            market_state_dict = {
+                                "current_price": exit_eval_price,
+                                "market_tradable": market_tradable,
+                                "is_resolved": False,
+                                "winning_outcome": None,
+                                "seconds_left": market_seconds_left,
+                                "end_time": market_end_time,
+                                "token_id": token_id,
+                                "mark_source": exit_eval_price_source,
+                                "min_order_size_usd": min_order_size_usd,
+                                "notional_usd": notional,
+                                "oracle_price": strategy_context_payload.get("oracle_price"),
+                                "price_to_beat": strategy_context_payload.get("price_to_beat"),
+                                "oracle_age_seconds": strategy_context_payload.get("oracle_age_seconds"),
+                                "confirmed_stage_triggered": strategy_context_payload.get("confirmed_stage_triggered"),
+                                "strategy_stage": strategy_context_payload.get("stage"),
+                            }
+
+                            exit_decision = _exit_instance.should_exit(pos_view, market_state_dict)
+                            exit_action = getattr(exit_decision, "action", None) if exit_decision is not None else None
+                            if exit_action == "close":
+                                strategy_exit = exit_decision
+                            elif exit_action == "reduce":
+                                strategy_exit = exit_decision
+                            elif _strategy_hold_blocks_default_exit(exit_decision):
+                                strategy_exit = exit_decision
+                        except Exception as exc:
+                            logger.warning(
+                                "Strategy should_exit() error for %s: %s",
+                                strategy_slug,
+                                exc,
+                            )
+
+                    if strategy_exit is not None and getattr(strategy_exit, "action", None) == "reduce":
+                        if not dry_run:
+                            payload["position_state"] = next_state
+                            row.payload_json = payload
+                            row.updated_at = now
+                            state_updates += 1
+                        held += 1
+                        continue
+
+                    if _strategy_hold_blocks_default_exit(strategy_exit):
+                        if not dry_run:
+                            payload["position_state"] = next_state
+                            row.payload_json = payload
+                            row.updated_at = now
+                            state_updates += 1
+                        held += 1
+                        continue
+
+                    active_take_profit_limit = (
+                        isinstance(pending_exit, dict)
+                        and str(pending_exit.get("kind") or "").strip().lower() == "take_profit_limit"
+                        and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
+                    )
+                    if strategy_exit is not None:
+                        _arm_reverse_entry_from_exit(
+                            row=row,
+                            payload=payload,
+                            strategy_exit=strategy_exit,
+                            market_info=market_info,
+                            market_seconds_left=market_seconds_left,
+                            current_price=exit_eval_price,
+                            now=now,
+                        )
+                        close_price = (
+                            strategy_exit.close_price if strategy_exit.close_price is not None else exit_eval_price
+                        )
+                        close_trigger = f"strategy:{strategy_exit.reason}"
+                        price_source = exit_eval_price_source
+                    elif (
+                        not resolve_only
+                        and take_profit_pct is not None
+                        and pnl_pct is not None
+                        and min_hold_passed
+                        and not active_take_profit_limit
+                        and pnl_pct >= take_profit_pct
+                    ):
+                        close_price = exit_eval_price
+                        close_trigger = "take_profit"
+                        price_source = exit_eval_price_source
+                    elif (
+                        not resolve_only
+                        and stop_loss_pct is not None
+                        and pnl_pct is not None
+                        and min_hold_passed
+                        and pnl_pct <= -abs(stop_loss_pct)
+                    ):
+                        close_price = exit_eval_price
+                        close_trigger = "stop_loss"
+                        price_source = exit_eval_price_source
+                    elif (
+                        not resolve_only
+                        and trailing_stop_pct is not None
+                        and trailing_stop_pct > 0
+                        and exit_eval_price is not None
+                        and highest_price is not None
+                        and min_hold_passed
+                    ):
+                        trailing_trigger_price = highest_price * (1.0 - (trailing_stop_pct / 100.0))
+                        if highest_price > entry_price and exit_eval_price <= trailing_trigger_price:
+                            close_price = exit_eval_price
+                            close_trigger = "trailing_stop"
+                            price_source = exit_eval_price_source
+                    elif (
+                        not resolve_only
+                        and max_hold_minutes is not None
+                        and age_minutes is not None
+                        and age_minutes >= max_hold_minutes
+                    ):
+                        if exit_eval_price is not None:
+                            close_price = exit_eval_price
+                            close_trigger = "max_hold"
+                            price_source = exit_eval_price_source
+                    elif (
+                        not resolve_only
+                        and close_on_inactive_market
+                        and not market_tradable
+                        and exit_eval_price is not None
+                        and min_hold_passed
+                    ):
+                        close_price = exit_eval_price
+                        close_trigger = "market_inactive"
+                        price_source = exit_eval_price_source
+
+        close_is_resolution = close_trigger in {"resolution", "resolution_inferred", "resolution_extreme_mark"}
 
         if close_price is None:
             state_changed = False

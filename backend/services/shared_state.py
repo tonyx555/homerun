@@ -26,6 +26,7 @@ from models.database import (
     ScannerRun,
     OpportunityState,
     ScannerSloIncident,
+    release_conn,
 )
 from models.opportunity import Opportunity, OpportunityFilter
 from services.event_bus import event_bus
@@ -66,6 +67,12 @@ _scanner_projection_lock = Lock()
 _scanner_projection_task: asyncio.Task | None = None
 _scanner_projection_pending: dict[str, Any] | None = None
 _SCANNER_STATE_PROJECTION_TIMEOUT_SECONDS = 15.0
+_NONCRITICAL_LOCK_TIMEOUT_MS = 1000
+_SCANNER_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS = 4000
+_SCANNER_ACTIVITY_WRITE_STATEMENT_TIMEOUT_MS = 2500
+_TRADERS_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS = 4000
+_MARKET_CATALOG_WRITE_STATEMENT_TIMEOUT_MS = 8000
+_SCANNER_STATE_PROJECTION_STATEMENT_TIMEOUT_MS = 8000
 
 
 async def _commit_with_retry(session: AsyncSession) -> None:
@@ -105,6 +112,24 @@ async def _publish_opportunity_runtime_events(event_messages: list[dict[str, Any
         pass
 
 
+async def _apply_local_db_timeouts(
+    session: AsyncSession,
+    *,
+    statement_timeout_ms: int,
+    lock_timeout_ms: int = _NONCRITICAL_LOCK_TIMEOUT_MS,
+) -> None:
+    statement_timeout = max(250, int(statement_timeout_ms))
+    lock_timeout = max(250, int(lock_timeout_ms))
+    try:
+        await session.execute(text(f"SET LOCAL statement_timeout = '{statement_timeout}ms'"))
+    except Exception:
+        pass
+    try:
+        await session.execute(text(f"SET LOCAL lock_timeout = '{lock_timeout}ms'"))
+    except Exception:
+        pass
+
+
 async def _project_scanner_state(
     opportunities: list[Opportunity],
     status: dict[str, Any],
@@ -124,6 +149,10 @@ async def _project_scanner_state(
 
     async def _run_projection() -> list[dict[str, Any]]:
         async with AsyncSessionLocal() as session:
+            await _apply_local_db_timeouts(
+                session,
+                statement_timeout_ms=_SCANNER_STATE_PROJECTION_STATEMENT_TIMEOUT_MS,
+            )
             event_messages = await _persist_incremental_state(session, payload, status, completed_at)
             await _commit_with_retry(session)
             return event_messages
@@ -310,6 +339,10 @@ async def write_scanner_snapshot(
     status: dict[str, Any],
 ) -> None:
     """Write scanner status/counts and schedule normalized active-state projection."""
+    await _apply_local_db_timeouts(
+        session,
+        statement_timeout_ms=_SCANNER_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS,
+    )
     last_scan = status.get("last_scan")
     if isinstance(last_scan, str):
         try:
@@ -423,26 +456,35 @@ async def write_market_catalog(
     """Persist the upstream market catalog (events + markets) to DB."""
     from models.database import MarketCatalog
 
-    events_payload = []
-    for e in events:
-        try:
-            if hasattr(e, "model_dump"):
-                payload = e.model_dump(mode="json", exclude={"markets"})
-            elif isinstance(e, dict):
-                payload = dict(e)
-                payload.pop("markets", None)
-            else:
-                payload = e
-            events_payload.append(payload)
-        except Exception:
-            pass
+    def _serialize_catalog_payloads() -> tuple[list[Any], list[Any]]:
+        events_payload: list[Any] = []
+        for event in events:
+            try:
+                if hasattr(event, "model_dump"):
+                    payload = event.model_dump(mode="json", exclude={"markets"})
+                elif isinstance(event, dict):
+                    payload = dict(event)
+                    payload.pop("markets", None)
+                else:
+                    payload = event
+                events_payload.append(payload)
+            except Exception:
+                pass
 
-    markets_payload = []
-    for m in markets:
-        try:
-            markets_payload.append(m.model_dump(mode="json") if hasattr(m, "model_dump") else m)
-        except Exception:
-            pass
+        markets_payload: list[Any] = []
+        for market in markets:
+            try:
+                markets_payload.append(market.model_dump(mode="json") if hasattr(market, "model_dump") else market)
+            except Exception:
+                pass
+        return events_payload, markets_payload
+
+    events_payload, markets_payload = await asyncio.to_thread(_serialize_catalog_payloads)
+
+    await _apply_local_db_timeouts(
+        session,
+        statement_timeout_ms=_MARKET_CATALOG_WRITE_STATEMENT_TIMEOUT_MS,
+    )
 
     updated_at = utcnow()
     values = {
@@ -543,7 +585,8 @@ async def read_market_catalog(
                     pass
         return events, markets
 
-    events, markets = await asyncio.to_thread(_deserialize_payload)
+    async with release_conn(session):
+        events, markets = await asyncio.to_thread(_deserialize_payload)
     if include_events and include_markets and events and markets:
         relink_event_markets(events, markets)
     return events, markets, metadata
@@ -584,6 +627,11 @@ async def write_traders_snapshot(
         return out, skip
 
     payload, skipped = await asyncio.to_thread(_serialize_traders_payload)
+
+    await _apply_local_db_timeouts(
+        session,
+        statement_timeout_ms=_TRADERS_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS,
+    )
 
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == TRADERS_SNAPSHOT_ID))
     row = result.scalar_one_or_none()
@@ -657,20 +705,11 @@ async def _persist_incremental_state(
 
     current_ids = set(current_map.keys())
 
-    active_rows = (
-        (
-            await session.execute(
-                select(OpportunityState).where(OpportunityState.is_active == True)  # noqa: E712
-            )
-        )
-        .scalars()
-        .all()
-    )
-    existing_by_id = {row.stable_id: row for row in active_rows}
-
-    if current_ids:
-        missing_current_ids = [stable_id for stable_id in current_ids if stable_id not in existing_by_id]
-        for stable_id_chunk in _chunked_values(missing_current_ids):
+    async def _load_rows_for_ids(stable_ids: set[str]) -> dict[str, OpportunityState]:
+        if not stable_ids:
+            return {}
+        rows_by_id: dict[str, OpportunityState] = {}
+        for stable_id_chunk in _chunked_values(stable_ids):
             existing_rows = (
                 (
                     await session.execute(
@@ -681,7 +720,25 @@ async def _persist_incremental_state(
                 .all()
             )
             for row in existing_rows:
-                existing_by_id.setdefault(row.stable_id, row)
+                stable_id = str(row.stable_id or "").strip()
+                if stable_id:
+                    rows_by_id[stable_id] = row
+        return rows_by_id
+
+    existing_by_id = await _load_rows_for_ids(current_ids)
+    active_ids = {
+        str(stable_id or "").strip()
+        for stable_id in (
+            (
+                await session.execute(
+                    select(OpportunityState.stable_id).where(OpportunityState.is_active == True)  # noqa: E712
+                )
+            )
+            .scalars()
+            .all()
+        )
+        if str(stable_id or "").strip()
+    }
 
     # Upsert current opportunities and emit detected/updated/reactivated events.
     for stable_id, item in current_map.items():
@@ -756,32 +813,38 @@ async def _persist_incremental_state(
             )
 
     # Any previously active row missing from current payload is now expired.
-    for stable_id, row in existing_by_id.items():
-        if not row.is_active:
-            continue
-        if stable_id in current_ids:
-            continue
-        row.is_active = False
-        row.last_seen_at = completed_at
-        row.last_updated_at = completed_at
-        row.last_run_id = run.id
-        expired_payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
-        event_messages.append(
-            {
-                "id": uuid.uuid4().hex[:16],
-                "stable_id": stable_id,
-                "run_id": run.id,
-                "event_type": "expired",
-                "opportunity": expired_payload,
-                "created_at": format_iso_utc_z(completed_at),
-            }
-        )
+    expired_ids = active_ids - current_ids
+    if expired_ids:
+        expired_rows_by_id = await _load_rows_for_ids(expired_ids)
+        for stable_id in expired_ids:
+            row = expired_rows_by_id.get(stable_id)
+            if row is None or not row.is_active:
+                continue
+            row.is_active = False
+            row.last_seen_at = completed_at
+            row.last_updated_at = completed_at
+            row.last_run_id = run.id
+            expired_payload = row.opportunity_json if isinstance(row.opportunity_json, dict) else {}
+            event_messages.append(
+                {
+                    "id": uuid.uuid4().hex[:16],
+                    "stable_id": stable_id,
+                    "run_id": run.id,
+                    "event_type": "expired",
+                    "opportunity": expired_payload,
+                    "created_at": format_iso_utc_z(completed_at),
+                }
+            )
 
     return event_messages
 
 
 async def update_scanner_activity(session: AsyncSession, activity: str) -> None:
     """Update only current_activity in the snapshot (worker calls during scan for live status)."""
+    await _apply_local_db_timeouts(
+        session,
+        statement_timeout_ms=_SCANNER_ACTIVITY_WRITE_STATEMENT_TIMEOUT_MS,
+    )
     result = await session.execute(select(ScannerSnapshot).where(ScannerSnapshot.id == SNAPSHOT_ID))
     row = result.scalar_one_or_none()
     if row is None:
@@ -879,7 +942,8 @@ async def read_scanner_snapshot(
                 pass
         return out
 
-    opportunities = await asyncio.to_thread(_deserialize_opportunities)
+    async with release_conn(session):
+        opportunities = await asyncio.to_thread(_deserialize_opportunities)
     opportunities.sort(key=lambda opp: float(getattr(opp, "roi_percent", 0.0) or 0.0), reverse=True)
 
     tiered = row.tiered_scanning_json if isinstance(row.tiered_scanning_json, dict) else {}

@@ -12,6 +12,16 @@ import models.database as database_module
 from workers import host
 
 
+def test_should_suppress_asyncio_exception_for_asyncpg_backend_pid_noise():
+    exc = AttributeError("'NoneType' object has no attribute 'backend_pid'")
+
+    assert host._should_suppress_asyncio_exception("Future exception was never retrieved", exc) is True
+
+
+def test_should_suppress_asyncio_exception_for_transport_noise():
+    assert host._should_suppress_asyncio_exception("_ProactorBasePipeTransport._loop_reading", None) is True
+
+
 @pytest.mark.asyncio
 async def test_initialize_services_schedules_live_execution_in_background(monkeypatch):
     worker_host = host.WorkerHost("all")

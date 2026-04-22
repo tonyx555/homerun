@@ -517,6 +517,12 @@ class TelegramNotifier:
                     await asyncio.sleep(MONITOR_POLL_SECONDS)
                     continue
 
+                control: Optional[TraderOrchestratorControl] = None
+                snapshot: Optional[TraderOrchestratorSnapshot] = None
+                new_events: list[TraderEvent] = []
+                new_orders: list[TraderOrder] = []
+                updated_orders: list[TraderOrder] = []
+                runtime_state_message: Optional[str] = None
                 async with AsyncSessionLocal() as session:
                     control = await session.get(TraderOrchestratorControl, "default")
                     snapshot = await session.get(TraderOrchestratorSnapshot, "latest")
@@ -538,23 +544,19 @@ class TelegramNotifier:
                     elif active and getattr(self, "_pending_active_message", None):
                         pending_mode = self._pending_active_message[0]
                         self._pending_active_message = None
-                        await self._enqueue(
-                            self._format_runtime_state_message(
-                                title="Autotrader Active",
-                                mode=pending_mode,
-                                traders_running=traders_running,
-                                traders_total=traders_total,
-                            )
+                        runtime_state_message = self._format_runtime_state_message(
+                            title="Autotrader Active",
+                            mode=pending_mode,
+                            traders_running=traders_running,
+                            traders_total=traders_total,
                         )
                     elif not active and self._autotrader_active:
                         self._pending_active_message = None
-                        await self._enqueue(
-                            self._format_runtime_state_message(
-                                title="Autotrader Paused",
-                                mode=mode,
-                                traders_running=traders_running,
-                                traders_total=traders_total,
-                            )
+                        runtime_state_message = self._format_runtime_state_message(
+                            title="Autotrader Paused",
+                            mode=mode,
+                            traders_running=traders_running,
+                            traders_total=traders_total,
                         )
                         self._last_summary_at = None
 
@@ -564,36 +566,53 @@ class TelegramNotifier:
                     new_orders = await self._load_new_trader_orders(session)
                     updated_orders = await self._load_updated_trader_orders(session)
 
-                    if active and self._notify_autotrader_issues:
-                        await self._send_issue_alerts(
-                            session=session,
-                            events=new_events,
-                            orders=new_orders,
-                            snapshot=snapshot,
-                        )
+                if runtime_state_message:
+                    await self._enqueue(runtime_state_message)
 
-                    if active and self._notify_autotrader_orders:
-                        await self._send_order_activity_alert(
-                            session=session,
-                            orders=new_orders,
-                            mode=mode,
-                        )
+                trader_names: dict[str, str] = {}
+                if active and (
+                    self._notify_autotrader_issues
+                    or self._notify_autotrader_orders
+                    or self._notify_autotrader_closes
+                ):
+                    trader_ids = {
+                        str(getattr(item, "trader_id", "") or "").strip()
+                        for item in [*new_events, *new_orders, *updated_orders]
+                        if str(getattr(item, "trader_id", "") or "").strip()
+                    }
+                    if trader_ids:
+                        async with AsyncSessionLocal() as session:
+                            trader_names = await self._load_trader_name_map(session, trader_ids)
 
-                    if active and self._notify_autotrader_closes:
-                        await self._send_position_close_alerts(
-                            session=session,
-                            orders=updated_orders,
-                            mode=mode,
-                        )
+                if active and self._notify_autotrader_issues:
+                    await self._send_issue_alerts(
+                        events=new_events,
+                        orders=new_orders,
+                        snapshot=snapshot,
+                        trader_names=trader_names,
+                    )
 
-                    if active and self._notify_autotrader_timeline:
-                        await self._maybe_send_timeline_summary(
-                            session=session,
-                            control=control,
-                            snapshot=snapshot,
-                        )
-                    elif not active:
-                        self._last_summary_at = None
+                if active and self._notify_autotrader_orders:
+                    await self._send_order_activity_alert(
+                        orders=new_orders,
+                        mode=mode,
+                        trader_names=trader_names,
+                    )
+
+                if active and self._notify_autotrader_closes:
+                    await self._send_position_close_alerts(
+                        orders=updated_orders,
+                        mode=mode,
+                        trader_names=trader_names,
+                    )
+
+                if active and self._notify_autotrader_timeline:
+                    await self._maybe_send_timeline_summary(
+                        control=control,
+                        snapshot=snapshot,
+                    )
+                elif not active:
+                    self._last_summary_at = None
 
                 # WS feed health monitoring (runs regardless of orchestrator state)
                 try:
@@ -743,23 +762,35 @@ class TelegramNotifier:
     async def _send_issue_alerts(
         self,
         *,
-        session,
         events: list[TraderEvent],
         orders: list[TraderOrder],
         snapshot: Optional[TraderOrchestratorSnapshot],
+        session=None,
+        trader_names: Optional[dict[str, str]] = None,
     ) -> None:
-        trader_ids = {str(item.trader_id) for item in list(events) + list(orders) if getattr(item, "trader_id", None)}
-        trader_names = await self._load_trader_name_map(session, trader_ids)
+        resolved_trader_names = dict(trader_names or {})
+        if not resolved_trader_names:
+            trader_ids = {
+                str(item.trader_id)
+                for item in list(events) + list(orders)
+                if getattr(item, "trader_id", None)
+            }
+            if trader_ids:
+                if session is not None:
+                    resolved_trader_names = await self._load_trader_name_map(session, trader_ids)
+                else:
+                    async with AsyncSessionLocal() as name_session:
+                        resolved_trader_names = await self._load_trader_name_map(name_session, trader_ids)
 
         for event in events:
             if not self._is_issue_event(event):
                 continue
-            await self._enqueue(self._format_issue_event_message(event=event, trader_names=trader_names))
+            await self._enqueue(self._format_issue_event_message(event=event, trader_names=resolved_trader_names))
 
         for order in orders:
             if not self._is_issue_order(order):
                 continue
-            await self._enqueue(self._format_issue_order_message(order=order, trader_names=trader_names))
+            await self._enqueue(self._format_issue_order_message(order=order, trader_names=resolved_trader_names))
 
         snapshot_error = None
         if snapshot is not None and snapshot.last_error:
@@ -773,9 +804,10 @@ class TelegramNotifier:
     async def _send_order_activity_alert(
         self,
         *,
-        session,
         orders: list[TraderOrder],
         mode: str,
+        session=None,
+        trader_names: Optional[dict[str, str]] = None,
     ) -> None:
         regular_orders = [row for row in orders if not self._is_issue_order(row)]
         if not regular_orders:
@@ -802,7 +834,13 @@ class TelegramNotifier:
                 trader_counts[trader_id] += 1
                 trader_notional[trader_id] += order_notional
 
-        trader_names = await self._load_trader_name_map(session, trader_ids)
+        resolved_trader_names = dict(trader_names or {})
+        if not resolved_trader_names and trader_ids:
+            if session is not None:
+                resolved_trader_names = await self._load_trader_name_map(session, trader_ids)
+            else:
+                async with AsyncSessionLocal() as name_session:
+                    resolved_trader_names = await self._load_trader_name_map(name_session, trader_ids)
         status_parts = [
             f"{status.upper()} {status_counts[status]}/{_format_money(status_notional[status])}"
             for status in sorted(status_counts.keys())
@@ -814,7 +852,7 @@ class TelegramNotifier:
             reverse=True,
         )[:3]
         trader_parts = [
-            f"{_truncate_text(trader_names.get(tid, tid[:8]), 12)} {count}/{_format_money(trader_notional.get(tid, 0.0))}"
+            f"{_truncate_text(resolved_trader_names.get(tid, tid[:8]), 12)} {count}/{_format_money(trader_notional.get(tid, 0.0))}"
             for tid, count in top_traders
         ]
 
@@ -831,9 +869,10 @@ class TelegramNotifier:
     async def _send_position_close_alerts(
         self,
         *,
-        session,
         orders: list[TraderOrder],
         mode: str,
+        session=None,
+        trader_names: Optional[dict[str, str]] = None,
     ) -> None:
         realized_rows: dict[str, TraderOrder] = {}
         markers_changed = False
@@ -860,7 +899,13 @@ class TelegramNotifier:
         )
         mode_label = _mode_label_from_orders(rows, _mode_label(mode))
         trader_ids = {str(row.trader_id) for row in rows if row.trader_id}
-        trader_names = await self._load_trader_name_map(session, trader_ids)
+        resolved_trader_names = dict(trader_names or {})
+        if not resolved_trader_names and trader_ids:
+            if session is not None:
+                resolved_trader_names = await self._load_trader_name_map(session, trader_ids)
+            else:
+                async with AsyncSessionLocal() as name_session:
+                    resolved_trader_names = await self._load_trader_name_map(name_session, trader_ids)
 
         title = "Autotrader Position Close" if len(rows) == 1 else "Autotrader Position Closes"
         realized_won = 0.0
@@ -870,7 +915,10 @@ class TelegramNotifier:
         display_limit = min(CLOSE_ALERT_BATCH_LIMIT, 5)
 
         for index, row in enumerate(rows, start=1):
-            trader_name = trader_names.get(str(row.trader_id), str(row.trader_id)[:8] if row.trader_id else "Unknown")
+            trader_name = resolved_trader_names.get(
+                str(row.trader_id),
+                str(row.trader_id)[:8] if row.trader_id else "Unknown",
+            )
             status = str(row.status or "closed").lower()
             status_label = status.replace("_", " ").upper()
             pnl = float(row.actual_profit or 0.0)
@@ -918,14 +966,18 @@ class TelegramNotifier:
 
         await self._enqueue("\n".join(lines))
         if markers_changed:
-            await self._persist_runtime_state(session)
+            if session is not None:
+                await self._persist_runtime_state(session)
+            else:
+                async with AsyncSessionLocal() as persist_session:
+                    await self._persist_runtime_state(persist_session)
 
     async def _maybe_send_timeline_summary(
         self,
         *,
-        session,
         control: Optional[TraderOrchestratorControl],
         snapshot: Optional[TraderOrchestratorSnapshot],
+        session=None,
     ) -> None:
         now = utcnow()
         interval = timedelta(minutes=self._summary_interval_minutes)
@@ -940,13 +992,23 @@ class TelegramNotifier:
         start = self._last_summary_at
         end = now
 
-        summary_message = await self._build_timeline_summary(
-            session=session,
-            start=start,
-            end=end,
-            control=control,
-            snapshot=snapshot,
-        )
+        if session is not None:
+            summary_message = await self._build_timeline_summary(
+                session=session,
+                start=start,
+                end=end,
+                control=control,
+                snapshot=snapshot,
+            )
+        else:
+            async with AsyncSessionLocal() as summary_session:
+                summary_message = await self._build_timeline_summary(
+                    session=summary_session,
+                    start=start,
+                    end=end,
+                    control=control,
+                    snapshot=snapshot,
+                )
         await self._enqueue(summary_message)
         self._last_summary_at = now
 

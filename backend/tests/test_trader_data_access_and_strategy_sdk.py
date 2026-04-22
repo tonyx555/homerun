@@ -11,7 +11,6 @@ if str(BACKEND_ROOT) not in sys.path:
 import services.trader_data_access as trader_data_access
 import services.traders_firehose_pipeline as traders_firehose_pipeline
 from services.strategy_sdk import StrategySDK
-from services.strategies.news_edge import news_edge_defaults, validate_news_edge_config
 from services.traders_sdk import TradersSDK
 
 
@@ -235,35 +234,6 @@ async def test_traders_sdk_directory_wrappers_passthrough(monkeypatch):
     assert tags == tag_rows
     assert by_tag == wallets_by_tag
 
-
-def test_strategy_sdk_news_filter_validation_and_defaults():
-    defaults = news_edge_defaults()
-    assert defaults["min_edge_percent"] == 5.0
-    assert defaults["min_confidence"] == 0.45
-    assert defaults["orchestrator_min_edge"] == 10.0
-    assert defaults["require_verifier"] is True
-    assert defaults["require_second_source"] is False
-    assert defaults["min_supporting_articles"] == 2
-    assert defaults["min_supporting_sources"] == 2
-
-    validated = validate_news_edge_config(
-        {
-            "min_edge_percent": "12.5",
-            "min_confidence": "0.62",
-            "orchestrator_min_edge": "9",
-            "require_verifier": "false",
-            "require_second_source": "1",
-            "min_supporting_articles": "3",
-            "min_supporting_sources": "4",
-        }
-    )
-    assert validated["min_edge_percent"] == 12.5
-    assert validated["min_confidence"] == 0.62
-    assert validated["orchestrator_min_edge"] == 9.0
-    assert validated["require_verifier"] is False
-    assert validated["require_second_source"] is True
-    assert validated["min_supporting_articles"] == 3
-    assert validated["min_supporting_sources"] == 4
 
 
 def test_strategy_sdk_extract_trader_signal_wallets_reads_nested_context():

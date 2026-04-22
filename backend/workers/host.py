@@ -113,6 +113,12 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
     return dt.astimezone(timezone.utc)
 
 
+def _should_suppress_asyncio_exception(message: str, exc: Exception | None) -> bool:
+    if "Proactor" in message or "_loop_reading" in message or "_loop_writing" in message:
+        return True
+    return isinstance(exc, AttributeError) and "backend_pid" in str(exc)
+
+
 class _WorkerPlaneLock:
     def __init__(self, plane_name: str) -> None:
         self._plane_name = plane_name
@@ -703,20 +709,13 @@ class WorkerHost:
         def _global_exception_handler(loop_ref, context):
             exc = context.get("exception")
             message = context.get("message", "Unhandled asyncio exception")
-            # ProactorEventLoop transport errors (e.g.
-            # _ProactorReadPipeTransport._loop_reading) are noisy and
-            # non-actionable — they indicate the IOCP layer dropped an I/O
-            # callback.  Log at WARNING instead of ERROR to reduce noise.
-            is_transport_noise = (
-                "Proactor" in message
-                or "_loop_reading" in message
-                or "_loop_writing" in message
-            )
-            if is_transport_noise:
+            if _should_suppress_asyncio_exception(message, exc):
                 logger.warning(
-                    "Asyncio transport callback error (suppressed)",
+                    "Asyncio callback error (suppressed)",
                     plane=self._plane_name,
                     context_message=message,
+                    error_type=type(exc).__name__ if exc is not None else None,
+                    error=str(exc) if exc is not None else None,
                 )
                 return
             if exc is not None:

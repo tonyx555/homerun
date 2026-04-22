@@ -7085,7 +7085,8 @@ async def list_live_wallet_positions_for_trader(
     if trader_row is None:
         raise ValueError("Trader not found")
 
-    wallet_address = await _resolve_execution_wallet_address()
+    async with release_conn(session):
+        wallet_address = await _resolve_execution_wallet_address()
     if not wallet_address:
         return {
             "trader_id": trader_id,

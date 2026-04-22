@@ -280,6 +280,10 @@ async def execute_live_order(
                 "price_resolution": price_resolution,
             },
         )
+    normalized_resolved_price = _clamp_binary_price(float(resolved_price))
+    if abs(normalized_resolved_price - float(resolved_price)) >= 1e-9:
+        resolved_price = normalized_resolved_price
+        price_resolution = f"{price_resolution}|binary_price_clamped"
 
     try:
         try:
