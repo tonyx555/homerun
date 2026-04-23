@@ -215,6 +215,52 @@ async def test_sync_inventory_ignores_unfilled_live_open_orders(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_sync_inventory_treats_completed_live_orders_as_open_positions(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-completed"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="live-order-completed",
+                    trader_id=trader_id,
+                    source="crypto",
+                    market_id="market-live-1",
+                    direction="buy_yes",
+                    mode="live",
+                    status="completed",
+                    notional_usd=40.0,
+                    entry_price=0.4,
+                    effective_price=0.4,
+                    payload_json={
+                        "token_id": "token-live-1",
+                        "provider_clob_order_id": "clob-completed",
+                        "provider_reconciliation": {
+                            "filled_size": 100.0,
+                            "filled_notional_usd": 40.0,
+                            "average_fill_price": 0.4,
+                        },
+                    },
+                    created_at=now,
+                    executed_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            await sync_trader_position_inventory(session, trader_id=trader_id, mode="live")
+
+            open_orders = await get_open_order_count_for_trader(session, trader_id, mode="live")
+            open_positions = await get_open_position_count_for_trader(session, trader_id, mode="live")
+            assert open_orders == 0
+            assert open_positions == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_sync_inventory_noop_does_not_leave_transaction_open(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-noop-inventory"

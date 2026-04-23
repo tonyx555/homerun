@@ -373,7 +373,9 @@ async def _seed_from_db(session: AsyncSession) -> None:
 
     # ── Orders (single pass) ───────────────────────────────────────
     order_status_key = func.lower(func.trim(func.coalesce(TraderOrder.status, "")))
-    seed_active_statuses = tuple(_normalize_status_key(status) for status in ("submitted", "executed", "open"))
+    seed_active_statuses = tuple(
+        _normalize_status_key(status) for status in ("submitted", "executed", "completed", "open")
+    )
     seed_unfilled_statuses = tuple(_normalize_status_key(status) for status in _HOT_UNFILLED_ORDER_STATUSES)
     seed_realized_statuses = tuple(_normalize_status_key(status) for status in REALIZED_ORDER_STATUSES)
     order_rows = await session.stream(
@@ -829,7 +831,7 @@ def upsert_active_order(
 ) -> None:
     mode_key = _normalize_mode_key(mode)
     snap = _ensure_snapshot(trader_id, mode_key)
-    active_notional = _live_active_notional(mode_key, "executed", notional_usd, payload)
+    active_notional = _live_active_notional(mode_key, status, notional_usd, payload)
     if active_notional <= 0:
         active_notional = abs(notional_usd)
 

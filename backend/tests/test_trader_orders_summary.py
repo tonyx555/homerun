@@ -16,7 +16,7 @@ from services.trader_orchestrator_state import (
 )
 
 
-OPEN_STATUSES = ("submitted", "executed", "open")
+OPEN_STATUSES = ("completed", "executed", "open", "submitted")
 RESOLVED_STATUSES = ("resolved", "resolved_win", "resolved_loss", "closed_win", "closed_loss", "win", "loss")
 FAILED_STATUSES = ("failed", "rejected", "error", "cancelled")
 
@@ -96,7 +96,7 @@ def test_grouped_trade_counts_collapse_multi_leg_bundles_and_flag_partial_opens(
 
 def test_grouped_trade_counts_keep_single_orders_separate_without_bundle_signal():
     rows = [
-        _order(order_id="a", trader_id="t1", signal_id=None, status="open"),
+        _order(order_id="a", trader_id="t1", signal_id=None, status="completed"),
         _order(order_id="b", trader_id="t1", signal_id=None, status="failed"),
         _order(order_id="c", trader_id="t2", signal_id="bundle_resolved", status="resolved_win"),
         _order(order_id="d", trader_id="t2", signal_id="bundle_resolved", status="resolved_loss"),
@@ -249,9 +249,10 @@ def test_visible_trader_order_query_clause_builds_not_in_filter():
 def test_expand_trader_order_status_filter_maps_status_buckets():
     assert _expand_trader_order_status_filter(None) is None
     assert _expand_trader_order_status_filter("all") is None
-    assert _expand_trader_order_status_filter("open") == ("executed", "open", "submitted")
+    assert _expand_trader_order_status_filter("open") == ("completed", "executed", "open", "submitted")
     assert _expand_trader_order_status_filter("failed") == ("cancelled", "error", "failed", "rejected")
     assert _expand_trader_order_status_filter("open+resolved") == (
+        "completed",
         "executed",
         "open",
         "resolved",

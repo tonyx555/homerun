@@ -26,6 +26,7 @@ from services.trader_orchestrator.position_lifecycle import (
 )
 from services.trader_orchestrator.session_engine import ExecutionSessionEngine
 from services.trader_orchestrator_state import (
+    OPEN_ORDER_STATUSES,
     adopt_live_wallet_position,
     cleanup_trader_open_orders,
     create_config_revision,
@@ -1735,7 +1736,7 @@ async def sell_trader_order_now(
         mode_key = "shadow"
 
     status_key = str(order.status or "").strip().lower()
-    if status_key not in {"submitted", "executed", "open"}:
+    if status_key not in OPEN_ORDER_STATUSES:
         raise HTTPException(status_code=409, detail="Order is not active")
 
     close_reason = str(request.reason or "manual_trade_sell").strip() or "manual_trade_sell"
@@ -1830,7 +1831,7 @@ async def reconcile_trader_order(
         raise HTTPException(status_code=422, detail="Reconcile only applies to live orders")
 
     status_key = str(order.status or "").strip().lower()
-    if status_key not in {"submitted", "executed", "open"}:
+    if status_key not in OPEN_ORDER_STATUSES:
         raise HTTPException(status_code=409, detail="Order is not active")
 
     token_id = _extract_order_token_id(order)

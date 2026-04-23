@@ -639,6 +639,7 @@ async def get_occupied_market_ids_for_trader(session, trader_id, mode=None):
         "partially_filled",
         "hedging",
         "executed",
+        "completed",
     )
     order_query = (
         select(TraderOrder.market_id)
@@ -693,7 +694,7 @@ async def get_trader_copy_leader_exposure(session, *, trader_id, source_wallet, 
 create_trader_order = _create_trader_order
 reconcile_paper_positions = reconcile_shadow_positions
 _RESUME_POLICIES = {"resume_full", "manage_only", "flatten_then_start"}
-_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
+_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
 _ORPHAN_CLEANUP_MAX_TRADERS_PER_CYCLE = 32
 _ORCHESTRATOR_CYCLE_LOCK_KEY = 0x54524F5243485354  # "TRORCHST"
 _ORCHESTRATOR_CRYPTO_CYCLE_LOCK_KEY = 0x54524F5243484352  # "TRORCHCR"
@@ -6398,6 +6399,7 @@ async def _run_trader_once(
                                 "partially_filled",
                                 "hedging",
                                 "executed",
+                                "completed",
                             )
                             position_occupied = bool(
                                 (

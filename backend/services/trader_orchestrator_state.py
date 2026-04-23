@@ -98,12 +98,12 @@ ORCHESTRATOR_CONTROL_ID = "default"
 ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS = 30
 _UNSET = object()  # Sentinel: distinguish "not provided" from explicit None
 ORCHESTRATOR_SNAPSHOT_ID = "latest"
-OPEN_ORDER_STATUSES = {"submitted", "executed", "open"}
+OPEN_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
 RESOLVED_ORDER_STATUSES = {"resolved", "resolved_win", "resolved_loss"}
 UNFILLED_ORDER_STATUSES = {"submitted", "open"}
-SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
-LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "open"}
-CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "open"}
+SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
+LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
+CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
 _LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
 _LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 150
 _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
@@ -571,7 +571,7 @@ def _row_counts_as_materialized_bundle_leg(row: TraderOrder) -> bool:
     ).strip()
     if status_key in {"resolved", "resolved_win", "resolved_loss", "closed_win", "closed_loss"}:
         return True
-    if status_key in {"submitted", "executed", "open"}:
+    if status_key in LIVE_ACTIVE_ORDER_STATUSES:
         return bool(provider_order_id or provider_clob_order_id) or (
             verification_rank >= trader_order_verification_rank(TRADER_ORDER_VERIFICATION_VENUE_ORDER)
         )
@@ -1618,7 +1618,7 @@ def _live_active_notional(mode: Any, status: Any, row_notional: float, payload: 
 
     status_key = _normalize_status_key(status)
     filled_notional_usd, _, _ = _extract_live_fill_metrics(payload)
-    if status_key == "executed":
+    if status_key in {"executed", "completed"}:
         if filled_notional_usd > 0.0:
             return filled_notional_usd
         return max(0.0, abs(row_notional))
@@ -2955,13 +2955,13 @@ async def recover_missing_live_trader_orders(
                 str(live_row.side or "").strip().upper() != "SELL"
                 and recovered_status in LIVE_ACTIVE_ORDER_STATUSES
                 and not existing_status_is_terminal
-                and existing_status in {"placing", "submitted", "executed", "open", "failed", "cancelled", "rejected", "error"}
+                and existing_status in {"placing", "submitted", "executed", "completed", "open", "failed", "cancelled", "rejected", "error"}
                 and existing_status != recovered_status
             ):
                 existing_row.status = recovered_status
                 existing_row.actual_profit = None
                 existing_row.error_message = None
-                if recovered_status in {"executed", "open"} and existing_row.executed_at is None:
+                if recovered_status in {"executed", "completed", "open"} and existing_row.executed_at is None:
                     existing_row.executed_at = live_row.updated_at or live_row.created_at or now
                 status_changed = True
             elif (
@@ -9288,7 +9288,7 @@ async def get_trader_orders_summary(
     *,
     mode: Optional[str] = None,
 ) -> dict[str, Any]:
-    open_statuses = ('submitted', 'executed', 'open')
+    open_statuses = tuple(sorted(OPEN_ORDER_STATUSES))
     resolved_statuses = ('resolved', 'resolved_win', 'resolved_loss', 'closed_win', 'closed_loss', 'win', 'loss')
     failed_statuses = ('failed', 'rejected', 'error', 'cancelled')
 

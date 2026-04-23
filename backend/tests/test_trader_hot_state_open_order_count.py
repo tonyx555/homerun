@@ -180,3 +180,28 @@ def test_active_order_status_transition_to_executed_clears_open_order_count():
         assert trader_hot_state.get_occupied_market_ids("trader-1", "live") == {"market-1"}
     finally:
         _reset_hot_state()
+
+
+def test_completed_orders_keep_market_occupied_without_counting_as_open_orders():
+    _reset_hot_state()
+    try:
+        trader_hot_state.upsert_active_order(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            status="completed",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            notional_usd=25.0,
+            entry_price=0.5,
+            token_id="token-1",
+            filled_shares=50.0,
+            payload={"token_id": "token-1", "filled_size": 50.0},
+        )
+
+        assert trader_hot_state.get_open_order_count("trader-1", "live") == 0
+        assert trader_hot_state.get_open_position_count("trader-1", "live") == 1
+        assert trader_hot_state.get_occupied_market_ids("trader-1", "live") == {"market-1"}
+    finally:
+        _reset_hot_state()

@@ -1122,7 +1122,7 @@ class ValidationService:
             notional_value = float(notional or 0.0)
             pnl_value = float(actual_profit or 0.0)
             is_failed = status_key == "failed"
-            is_executed_or_open = status_key in {"submitted", "executed", "open"}
+            is_executed_or_open = status_key in {"submitted", "executed", "completed", "open"}
             is_resolved = status_key in {"resolved_win", "resolved_loss"}
             is_closed = status_key in {"closed_win", "closed_loss"}
             is_terminal = is_resolved or is_closed
