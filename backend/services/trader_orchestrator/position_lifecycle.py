@@ -4515,7 +4515,7 @@ async def reconcile_live_positions(
             max(0.0, safe_float(provider_reconciliation.get("filled_size"), 0.0) or 0.0) <= _WALLET_SIZE_EPSILON
             and max(0.0, safe_float(provider_reconciliation.get("filled_notional_usd"), 0.0) or 0.0) <= 0.0
         )
-        if wallet_entry_trade_size > _WALLET_SIZE_EPSILON and (
+        if wallet_entry_trade_size > _WALLET_SIZE_EPSILON and provider_fill_missing and (
             entry_fill_size <= _WALLET_SIZE_EPSILON or entry_fill_notional <= 0.0
         ):
             entry_fill_size = wallet_entry_trade_size
