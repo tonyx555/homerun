@@ -2199,6 +2199,116 @@ async def test_recover_missing_live_trader_orders_carries_full_bundle_signal_met
 
 
 @pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_imports_multiple_distinct_orders_on_same_market(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-multiple-authority-same-market"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow() - timedelta(minutes=3)
+            session.add(
+                TradeSignal(
+                    id="signal-multiple-authority",
+                    source="scanner",
+                    signal_type="entry",
+                    strategy_type="generic_strategy",
+                    market_id="market-multiple-authority",
+                    market_question="Will Player A win the match?",
+                    direction="buy_yes",
+                    entry_price=0.36,
+                    dedupe_key="dedupe-multiple-authority",
+                    payload_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                TraderDecision(
+                    id="decision-multiple-authority",
+                    trader_id=trader_id,
+                    signal_id="signal-multiple-authority",
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    strategy_version=1,
+                    decision="selected",
+                    reason="Generic signal selected",
+                    created_at=now,
+                )
+            )
+            session.add_all(
+                [
+                    LiveTradingOrder(
+                        id="venue-order-multiple-authority-a",
+                        wallet_address="0xwallet",
+                        market_id="market-multiple-authority",
+                        clob_order_id="clob-multiple-authority-a",
+                        token_id="token-multiple-authority",
+                        side="BUY",
+                        price=0.36,
+                        size=7.8,
+                        order_type="GTC",
+                        status="filled",
+                        filled_size=7.8,
+                        average_fill_price=0.36,
+                        market_question="Will Player A win the match?",
+                        created_at=now + timedelta(seconds=4),
+                        updated_at=now + timedelta(seconds=20),
+                    ),
+                    LiveTradingOrder(
+                        id="venue-order-multiple-authority-b",
+                        wallet_address="0xwallet",
+                        market_id="market-multiple-authority",
+                        clob_order_id="clob-multiple-authority-b",
+                        token_id="token-multiple-authority",
+                        side="BUY",
+                        price=0.36,
+                        size=7.8,
+                        order_type="GTC",
+                        status="filled",
+                        filled_size=7.8,
+                        average_fill_price=0.36,
+                        market_question="Will Player A win the match?",
+                        created_at=now + timedelta(seconds=8),
+                        updated_at=now + timedelta(seconds=24),
+                    ),
+                ]
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 2
+            recovered_rows = (
+                await session.execute(
+                    select(TraderOrder)
+                    .where(TraderOrder.trader_id == trader_id)
+                    .order_by(TraderOrder.provider_clob_order_id.asc())
+                )
+            ).scalars().all()
+            assert [row.provider_clob_order_id for row in recovered_rows] == [
+                "clob-multiple-authority-a",
+                "clob-multiple-authority-b",
+            ]
+            assert sum(float(row.notional_usd or 0.0) for row in recovered_rows) == pytest.approx(5.616)
+
+            position_rows = (
+                await session.execute(
+                    select(TraderPosition).where(TraderPosition.trader_id == trader_id)
+                )
+            ).scalars().all()
+            assert len(position_rows) == 1
+            assert position_rows[0].total_notional_usd == pytest.approx(5.616)
+            assert position_rows[0].open_order_count == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_worker_runs_lifecycle_for_live_orders_without_provider_activity(tmp_path, monkeypatch):
     engine, session_factory = await _build_session_factory(tmp_path)
     trader_id = "live-trader-lifecycle-no-provider-activity"

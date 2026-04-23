@@ -2699,7 +2699,8 @@ async def recover_missing_live_trader_orders(
                 pre_submit_rows_by_token_key.setdefault(token_key, []).append(row)
         row_trader_id = str(row.trader_id or "").strip()
         row_market_id = str(row.market_id or "").strip()
-        if row_trader_id and row_market_id and not is_recovered_sell_authority:
+        has_authority = bool(authority_key or provider_order_id)
+        if row_trader_id and row_market_id and not is_recovered_sell_authority and not has_authority:
             # "placing" must also occupy the market: if a pre-submit placeholder
             # exists for (trader, market), the provider-side order it represents
             # may not yet have its clob_order_id linked back to the row.  Without
@@ -3246,10 +3247,6 @@ async def recover_missing_live_trader_orders(
         )
         recovered_rows.append(recovered_row)
         hot_state_sync_rows[str(recovered_row.id or "")] = recovered_row
-        if _normalize_status_key(recovered_row.status) in LIVE_ACTIVE_ORDER_STATUSES:
-            existing_occupied_markets.add((candidate_trader_id, candidate_market_id))
-        else:
-            recently_closed_recovery_guard_markets.add((candidate_trader_id, candidate_market_id))
         affected_traders.add(str(candidate["trader_id"]))
         if clob_order_id:
             existing_provider_rows_by_clob_id[clob_order_id] = recovered_row
