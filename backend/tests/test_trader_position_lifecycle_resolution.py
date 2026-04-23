@@ -649,13 +649,12 @@ async def test_reconcile_live_does_not_reopen_unfilled_failed_row_from_same_toke
             assert refreshed is not None
             assert refreshed.status == "failed"
             assert result["state_updates"] == 0
-            assert any(detail.get("note") == "kept_terminal_row_specific_authority_missing" for detail in result["details"])
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_reconcile_live_reopens_unfilled_failed_row_when_live_order_wallet_authority_matches(
+async def test_reconcile_live_does_not_reopen_unfilled_failed_row_when_provider_cancelled_zero_fill(
     tmp_path, monkeypatch
 ):
     engine, session_factory = await _build_session_factory(tmp_path)
@@ -711,9 +710,9 @@ async def test_reconcile_live_reopens_unfilled_failed_row_when_live_order_wallet
 
             refreshed = await session.get(TraderOrder, "order-1")
             assert refreshed is not None
-            assert refreshed.status == "open"
-            assert result["state_updates"] >= 1
-            assert any(detail.get("note") == "reopened_wallet_position_authority" for detail in result["details"])
+            assert refreshed.status == "failed"
+            assert result["state_updates"] == 0
+            assert any(detail.get("note") == "kept_terminal_row_specific_authority_missing" for detail in result["details"])
     finally:
         await engine.dispose()
 
@@ -725,6 +724,54 @@ def test_terminal_row_requires_reopen_audit_accepts_aware_datetimes():
         created_at=None,
         payload_json={
             "position_close": {"close_trigger": "wallet_absent_close"},
+        },
+    )
+
+    assert position_lifecycle._terminal_row_requires_reopen_audit(
+        row,
+        datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def test_terminal_row_requires_reopen_audit_rejects_local_failed_submission_without_order_evidence():
+    row = SimpleNamespace(
+        status="failed",
+        verification_status="local",
+        provider_clob_order_id=None,
+        provider_order_id=None,
+        updated_at=datetime.now(timezone.utc),
+        executed_at=None,
+        created_at=None,
+        payload_json={
+            "provider_reconciliation": {
+                "snapshot_status": "failed",
+                "mapped_status": "failed",
+                "snapshot": {"normalized_status": "failed"},
+            },
+        },
+    )
+
+    assert not position_lifecycle._terminal_row_requires_reopen_audit(
+        row,
+        datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def test_terminal_row_requires_reopen_audit_accepts_provider_order_evidence():
+    row = SimpleNamespace(
+        status="failed",
+        verification_status="venue_order",
+        provider_clob_order_id="0xabc",
+        provider_order_id=None,
+        updated_at=datetime.now(timezone.utc),
+        executed_at=None,
+        created_at=None,
+        payload_json={
+            "provider_reconciliation": {
+                "snapshot_status": "failed",
+                "mapped_status": "failed",
+                "snapshot": {"normalized_status": "failed", "clob_order_id": "0xabc"},
+            },
         },
     )
 
@@ -2736,6 +2783,11 @@ async def test_live_placing_unfilled_terminal_order_is_cancelled(tmp_path, monke
                 status="placing",
                 payload_json={
                     "token_id": "token-1",
+                    "live_wallet_authority": {
+                        "source": "live_trading_orders",
+                        "token_id": "token-1",
+                        "live_trading_order_id": "live-order-1",
+                    },
                     "provider_reconciliation": {
                         "snapshot_status": "placing",
                         "mapped_status": "placing",

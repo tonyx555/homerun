@@ -217,7 +217,7 @@ def _terminal_row_requires_reopen_audit(row: TraderOrder, now_naive: datetime) -
         return age_anchor >= (now_naive - timedelta(hours=_NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS))
     if str(getattr(row, "provider_order_id", None) or "").strip():
         return age_anchor >= (now_naive - timedelta(hours=_NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS))
-    return isinstance(payload.get("provider_reconciliation"), dict) and age_anchor >= (
+    return _provider_reconciliation_has_order_evidence(row, payload) and age_anchor >= (
         now_naive - timedelta(hours=_NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS)
     )
 
@@ -1322,6 +1322,40 @@ def _provider_reconciliation_parts(payload: dict[str, Any]) -> tuple[dict[str, A
     return provider_reconciliation, snapshot
 
 
+def _provider_reconciliation_has_order_evidence(row: TraderOrder, payload: dict[str, Any]) -> bool:
+    if str(getattr(row, "provider_clob_order_id", None) or "").strip():
+        return True
+    if str(getattr(row, "provider_order_id", None) or "").strip():
+        return True
+    filled_notional, filled_size, _average_fill_price = _extract_live_fill_metrics(payload)
+    if filled_notional > 0.0 or filled_size > _WALLET_SIZE_EPSILON:
+        return True
+    provider_reconciliation, snapshot = _provider_reconciliation_parts(payload)
+    raw_snapshot = snapshot.get("raw")
+    candidates = [payload, provider_reconciliation, snapshot]
+    if isinstance(raw_snapshot, dict):
+        candidates.append(raw_snapshot)
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in (
+            "clob_order_id",
+            "order_id",
+            "provider_order_id",
+            "provider_clob_order_id",
+            "live_trading_order_id",
+            "exchange_order_id",
+        ):
+            if str(candidate.get(key) or "").strip():
+                return True
+    live_wallet_authority = payload.get("live_wallet_authority")
+    if isinstance(live_wallet_authority, dict):
+        authority_source = str(live_wallet_authority.get("source") or "").strip().lower()
+        if authority_source in {"wallet_positions_api", "wallet_trade_history"}:
+            return True
+    return False
+
+
 def _normalize_provider_status(value: Any) -> str:
     status = str(value or "").strip().lower()
     if not status:
@@ -2123,6 +2157,15 @@ def _apply_position_close_verification(
 
 
 def _active_row_has_unfilled_terminal_provider_failure(row: TraderOrder, payload: dict[str, Any]) -> bool:
+    wallet_entry_fill_repair = payload.get("wallet_entry_fill_repair")
+    if isinstance(wallet_entry_fill_repair, dict):
+        return False
+    entry_fill_recovery = payload.get("entry_fill_recovery")
+    if (
+        isinstance(entry_fill_recovery, dict)
+        and str(entry_fill_recovery.get("source") or "").strip().lower() == "wallet_trade_history"
+    ):
+        return False
     filled_notional, filled_size, _average_fill_price = _extract_live_fill_metrics(payload)
     if filled_notional > 0.0 or filled_size > _WALLET_SIZE_EPSILON:
         return False
@@ -2158,25 +2201,10 @@ def _failed_terminal_row_can_reopen_from_wallet_position(row: TraderOrder, paylo
     filled_notional, filled_size, _average_fill_price = _extract_live_fill_metrics(payload)
     live_wallet_authority = payload.get("live_wallet_authority")
     authority_source = ""
-    authority_token_id = ""
-    authority_live_order_id = ""
     if isinstance(live_wallet_authority, dict):
         authority_source = str(live_wallet_authority.get("source") or "").strip().lower()
-        authority_token_id = str(
-            live_wallet_authority.get("token_id")
-            or live_wallet_authority.get("asset_id")
-            or live_wallet_authority.get("asset")
-            or ""
-        ).strip()
-        authority_live_order_id = str(live_wallet_authority.get("live_trading_order_id") or "").strip()
-    payload_token_id = _extract_live_token_id(payload)
     if _active_row_has_unfilled_terminal_provider_failure(row, payload):
-        return (
-            authority_source == "live_trading_orders"
-            and bool(authority_live_order_id)
-            and bool(authority_token_id)
-            and authority_token_id == payload_token_id
-        )
+        return False
 
     if filled_notional > 0.0 or filled_size > _WALLET_SIZE_EPSILON:
         return True
