@@ -53,6 +53,7 @@ from services.trader_orchestrator_state import (
     update_execution_session_status,
 )
 from utils.converters import safe_float, safe_int
+from utils.signal_helpers import normalize_position_side
 from utils.utcnow import utcnow
 import services.trader_hot_state as hot_state
 
@@ -294,6 +295,63 @@ def _selected_market_ids(legs: list[dict[str, Any]]) -> list[str]:
         if market_id and market_id not in selected_ids:
             selected_ids.append(market_id)
     return selected_ids
+
+
+def _normalize_plan_leg_sides(payload: dict[str, Any], legs: list[dict[str, Any]]) -> None:
+    positions = payload.get("positions_to_take") if isinstance(payload.get("positions_to_take"), list) else []
+    for index, leg in enumerate(legs):
+        metadata = leg.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        position_index = safe_int(metadata.get("position_index"), index)
+        position = positions[position_index] if 0 <= position_index < len(positions) and isinstance(positions[position_index], dict) else {}
+        action = (
+            metadata.get("raw_action")
+            or position.get("action")
+            or position.get("side")
+            or leg.get("side")
+        )
+        leg["side"] = normalize_position_side(action, fallback=str(leg.get("side") or "buy"))
+
+
+def _self_crossing_plan_violation(legs: list[dict[str, Any]]) -> dict[str, Any] | None:
+    by_instrument: dict[tuple[str, str, str], dict[str, list[dict[str, Any]]]] = {}
+    for leg in legs:
+        market_id = str(leg.get("market_id") or "").strip()
+        token_id = str(leg.get("token_id") or "").strip()
+        outcome = str(leg.get("outcome") or "").strip().lower()
+        if not market_id or not (token_id or outcome):
+            continue
+        side = normalize_position_side(leg.get("side"), fallback="buy")
+        limit_price = safe_float(leg.get("limit_price"), None)
+        if limit_price is None or limit_price <= 0.0:
+            continue
+        bucket = by_instrument.setdefault((market_id, token_id, outcome), {"buy": [], "sell": []})
+        bucket[side].append(
+            {
+                "leg_id": str(leg.get("leg_id") or ""),
+                "limit_price": float(limit_price),
+            }
+        )
+
+    for (market_id, token_id, outcome), sides in by_instrument.items():
+        buys = sides["buy"]
+        sells = sides["sell"]
+        if not buys or not sells:
+            continue
+        max_bid = max(float(item["limit_price"]) for item in buys)
+        min_ask = min(float(item["limit_price"]) for item in sells)
+        if max_bid >= min_ask:
+            return {
+                "reason": "self_crossing_quote",
+                "market_id": market_id,
+                "token_id": token_id or None,
+                "outcome": outcome or None,
+                "max_buy_limit_price": max_bid,
+                "min_sell_limit_price": min_ask,
+                "buy_legs": buys,
+                "sell_legs": sells,
+            }
+    return None
 
 
 def _entry_fill_metrics(result: Any, *, normalized_status: str) -> tuple[float, float, float | None]:
@@ -626,6 +684,7 @@ class ExecutionSessionEngine:
             resolved_market_question = _resolve_leg_market_question(payload, leg, fallback_market_question)
             if resolved_market_question:
                 leg["market_question"] = resolved_market_question
+        _normalize_plan_leg_sides(payload, legs)
 
         policy = normalize_execution_policy(execution_plan.get("policy") or profile["policy"], legs_count=len(legs))
         raw_constraints = execution_plan.get("constraints")
@@ -1333,6 +1392,38 @@ class ExecutionSessionEngine:
                 payload={
                     "execution_plan": plan,
                     "bundle_coverage": bundle_coverage,
+                    "legs": [],
+                },
+                created_orders=[],
+            )
+
+        self_crossing_violation = _self_crossing_plan_violation(legs)
+        if self_crossing_violation is not None:
+            rejection_reason = "Execution plan self-crosses: buy limit is at or above sell limit for the same token."
+            _append_event(
+                event_type="session_rejected",
+                severity="error",
+                message=rejection_reason,
+                payload=self_crossing_violation,
+            )
+            _update_session_status(
+                status="failed",
+                error_message=rejection_reason,
+                payload_patch={
+                    "orders_written": 0,
+                    "self_crossing_plan": self_crossing_violation,
+                },
+            )
+            await _persist_execution_projection_safely(signal_status="failed", effective_price=None)
+            return SessionExecutionResult(
+                session_id=session_row.id,
+                status="failed",
+                effective_price=None,
+                error_message=rejection_reason,
+                orders_written=0,
+                payload={
+                    "execution_plan": plan,
+                    "self_crossing_plan": self_crossing_violation,
                     "legs": [],
                 },
                 created_orders=[],

@@ -26,6 +26,20 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
 
+def normalize_position_side(value: Any, *, fallback: str = "buy") -> str:
+    text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    fallback_key = str(fallback or "buy").strip().lower()
+    fallback_side = "sell" if fallback_key == "sell" else "buy"
+    if not text:
+        return fallback_side
+    tokens = {token for token in re.split(r"[_:/]+", text) if token}
+    if "sell" in tokens or text in {"ask", "offer", "close", "exit"}:
+        return "sell"
+    if "buy" in tokens or text in {"bid", "enter", "entry"}:
+        return "buy"
+    return fallback_side
+
+
 def _extract_machine_learning_probability(payload: dict[str, Any], *, direction: str | None = None) -> float | None:
     machine_learning = payload.get("machine_learning")
     if not isinstance(machine_learning, dict):

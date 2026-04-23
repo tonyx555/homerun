@@ -30,6 +30,7 @@ from services.event_bus import event_bus
 from services.market_roster import build_market_roster, ensure_market_roster_payload
 from models.opportunity import Opportunity
 from services.market_tradability import get_market_tradability_map
+from utils.signal_helpers import normalize_position_side
 
 
 SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
@@ -614,7 +615,7 @@ def _normalize_execution_plan(opportunity: Opportunity) -> dict[str, Any] | None
                     or opportunity.title
                 ),
                 "token_id": str(position.get("token_id") or "").strip() or None,
-                "side": "sell" if action.startswith("sell") else "buy",
+                "side": normalize_position_side(action),
                 "outcome": str(position.get("outcome") or "").strip().lower() or None,
                 "limit_price": parsed_price,
                 "max_execution_price": position.get("max_execution_price"),

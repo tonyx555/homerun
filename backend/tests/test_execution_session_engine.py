@@ -202,6 +202,146 @@ def test_build_execution_session_rows_carries_market_roster_into_session_payload
     }
 
 
+def test_build_plan_normalizes_limit_sell_action_from_position_payload():
+    engine = session_engine_module.ExecutionSessionEngine(_FailureProjectionDb())
+    signal = SimpleNamespace(
+        id="signal-side-normalization",
+        source="scanner",
+        strategy_type="generic_strategy",
+        payload_json={
+            "positions_to_take": [
+                {
+                    "action": "LIMIT_BUY",
+                    "market_id": "market-1",
+                    "token_id": "token-1",
+                    "outcome": "YES",
+                    "price": 0.44,
+                },
+                {
+                    "action": "LIMIT_SELL",
+                    "market_id": "market-1",
+                    "token_id": "token-1",
+                    "outcome": "YES",
+                    "price": 0.56,
+                },
+            ],
+            "execution_plan": {
+                "policy": "PARALLEL_MAKER",
+                "legs": [
+                    {
+                        "leg_id": "leg-1",
+                        "market_id": "market-1",
+                        "token_id": "token-1",
+                        "side": "buy",
+                        "outcome": "yes",
+                        "limit_price": 0.44,
+                        "metadata": {"position_index": 0, "raw_action": "limit_buy"},
+                    },
+                    {
+                        "leg_id": "leg-2",
+                        "market_id": "market-1",
+                        "token_id": "token-1",
+                        "side": "buy",
+                        "outcome": "yes",
+                        "limit_price": 0.56,
+                        "metadata": {"position_index": 1, "raw_action": "limit_sell"},
+                    },
+                ],
+            },
+        },
+        market_id="market-1",
+        market_question="Will generic event happen?",
+        direction="buy_yes",
+        entry_price=0.44,
+    )
+
+    _plan, legs, _constraints = engine._build_plan(
+        signal,
+        strategy_key="generic_strategy",
+        size_usd=10.0,
+        risk_limits={},
+    )
+
+    assert [leg["side"] for leg in legs] == ["buy", "sell"]
+
+
+@pytest.mark.asyncio
+async def test_execute_signal_rejects_self_crossing_same_token_plan(monkeypatch):
+    db = _FailureProjectionDb()
+    engine = session_engine_module.ExecutionSessionEngine(db)
+
+    plan = {"policy": "PARALLEL_MAKER", "plan_id": "plan-self-cross", "metadata": {}}
+    legs = [
+        {
+            "leg_id": "leg-1",
+            "market_id": "market-self-cross",
+            "market_question": "Will generic event happen?",
+            "token_id": "token-self-cross",
+            "side": "buy",
+            "outcome": "yes",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.55,
+            "price_policy": "maker_limit",
+            "time_in_force": "GTC",
+        },
+        {
+            "leg_id": "leg-2",
+            "market_id": "market-self-cross",
+            "market_question": "Will generic event happen?",
+            "token_id": "token-self-cross",
+            "side": "sell",
+            "outcome": "yes",
+            "requested_notional_usd": 5.0,
+            "requested_shares": 10.0,
+            "limit_price": 0.55,
+            "price_policy": "maker_limit",
+            "time_in_force": "GTC",
+        },
+    ]
+    constraints = {"max_unhedged_notional_usd": 0.0, "hedge_timeout_seconds": 20}
+    monkeypatch.setattr(engine, "_build_plan", lambda *args, **kwargs: (plan, legs, constraints))
+    submit_mock = AsyncMock(return_value=[])
+    monkeypatch.setattr(session_engine_module, "submit_execution_wave", submit_mock)
+    monkeypatch.setattr(session_engine_module, "set_trade_signal_status", AsyncMock(return_value=True))
+    monkeypatch.setattr(session_engine_module.event_bus, "publish", AsyncMock(return_value=None))
+    monkeypatch.setattr(engine, "_publish_hot_signal_status", AsyncMock(return_value=None))
+
+    signal = SimpleNamespace(
+        id="signal-self-cross",
+        source="scanner",
+        trace_id="trace-self-cross",
+        strategy_type="generic_strategy",
+        strategy_context_json={},
+        payload_json={},
+        market_id="market-self-cross",
+        market_question="Will generic event happen?",
+        direction="buy_yes",
+        entry_price=0.55,
+        edge_percent=5.0,
+        confidence=0.7,
+    )
+    result = await engine.execute_signal(
+        trader_id="trader-self-cross",
+        signal=signal,
+        decision_id="decision-self-cross",
+        strategy_key="generic_strategy",
+        strategy_version=None,
+        strategy_params={},
+        risk_limits={},
+        mode="live",
+        size_usd=10.0,
+        reason="generic signal selected",
+    )
+
+    assert result.status == "failed"
+    assert result.orders_written == 0
+    assert result.payload["self_crossing_plan"]["reason"] == "self_crossing_quote"
+    assert submit_mock.await_count == 0
+    session_rows = db.persisted_rows_by_type.get("ExecutionSession") or []
+    assert session_rows[0].payload_json["self_crossing_plan"]["reason"] == "self_crossing_quote"
+
+
 @pytest.mark.asyncio
 async def test_execute_signal_flushes_new_trader_orders_before_execution_orders(monkeypatch):
     db = _ForeignKeyStrictProjectionDb()

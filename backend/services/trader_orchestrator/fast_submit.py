@@ -41,6 +41,7 @@ from services.trader_orchestrator_state import (
 )
 from utils.converters import safe_float
 from utils.logger import get_logger
+from utils.signal_helpers import normalize_position_side
 from utils.utcnow import utcnow
 
 logger = get_logger(__name__)
@@ -86,8 +87,8 @@ def _extract_single_position(signal: Any) -> tuple[dict[str, Any] | None, str | 
 
 def _leg_from_position(position: dict[str, Any], signal: Any) -> dict[str, Any]:
     """Build the ``leg`` dict that ``submit_execution_leg`` expects."""
-    action = str(position.get("action") or "").strip().upper()
-    side = "sell" if action == "SELL" else "buy"
+    action = str(position.get("action") or position.get("side") or "").strip()
+    side = normalize_position_side(action)
     outcome = str(position.get("outcome") or "").strip().upper()
     market_id = str(position.get("market_id") or "").strip() or str(getattr(signal, "market_id", "") or "").strip()
     price = safe_float(position.get("price"), None)

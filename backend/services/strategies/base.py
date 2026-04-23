@@ -21,7 +21,7 @@ from services.market_roster import build_market_roster
 
 from utils.converters import to_float, to_confidence
 from utils.kelly import kalshi_taker_fee, polymarket_taker_fee
-from utils.signal_helpers import signal_payload
+from utils.signal_helpers import normalize_position_side, signal_payload
 from utils.utcnow import utcnow as _utcnow, as_utc
 
 
@@ -1232,7 +1232,7 @@ class BaseStrategy(ABC):
                 market = single_market
             legacy_market_label = legacy_market_ref if legacy_market_ref and legacy_market_ref != market_id else ""
             action = str(position.get("action") or position.get("side") or "").strip().lower()
-            side = "sell" if action.startswith("sell") else "buy"
+            side = normalize_position_side(action)
             outcome = str(position.get("outcome") or "").strip().lower() or None
             limit_price = to_float(position.get("price"), 0.0)
             token_id = str(position.get("token_id") or "").strip() or None

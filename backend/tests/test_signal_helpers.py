@@ -1,6 +1,14 @@
 from types import SimpleNamespace
 
-from utils.signal_helpers import signal_payload, signal_strategy_context, weather_signal_context
+from utils.signal_helpers import normalize_position_side, signal_payload, signal_strategy_context, weather_signal_context
+
+
+def test_normalize_position_side_handles_limit_actions():
+    assert normalize_position_side("LIMIT_BUY") == "buy"
+    assert normalize_position_side("LIMIT_SELL") == "sell"
+    assert normalize_position_side("SELL_LIMIT") == "sell"
+    assert normalize_position_side("buy_yes") == "buy"
+    assert normalize_position_side("", fallback="sell") == "sell"
 
 
 def test_signal_payload_merges_strategy_context_and_firehose_fields():
