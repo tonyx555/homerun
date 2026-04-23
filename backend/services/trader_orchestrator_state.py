@@ -5187,11 +5187,13 @@ async def list_trader_orders(
     *,
     trader_id: Optional[str] = None,
     status: Optional[str] = None,
+    mode: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[TraderOrder]:
     status_values = _expand_trader_order_status_filter(status)
     status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
+    mode_key = str(mode or "").strip().lower()
     include_all_open_orders = status_values is None or any(
         status_value in OPEN_ORDER_STATUSES for status_value in status_values
     )
@@ -5208,6 +5210,8 @@ async def list_trader_orders(
         )
         if trader_id:
             open_query = open_query.where(TraderOrder.trader_id == trader_id)
+        if mode_key:
+            open_query = open_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
         open_orders = list((await session.execute(open_query)).scalars().all())
 
     # Fetch the paginated historical window.
@@ -5217,9 +5221,11 @@ async def list_trader_orders(
         query = query.where(TraderOrder.trader_id == trader_id)
     if status_values is not None:
         query = query.where(status_key_expr.in_(status_values))
+    if mode_key:
+        query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
     if offset > 0:
         query = query.offset(offset)
-    query = query.limit(max(1, min(limit, 5000)))
+    query = query.limit(max(1, min(limit, 20000)))
     paginated = list((await session.execute(query)).scalars().all())
 
     # Merge: open orders first, then paginated (deduplicated).
@@ -9448,6 +9454,7 @@ async def list_serialized_trader_orders(
     *,
     trader_id: Optional[str] = None,
     status: Optional[str] = None,
+    mode: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -9455,6 +9462,7 @@ async def list_serialized_trader_orders(
         session,
         trader_id=trader_id,
         status=status,
+        mode=mode,
         limit=limit,
         offset=offset,
     )

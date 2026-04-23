@@ -173,6 +173,7 @@ async def test_get_trader_orders_history_is_read_only_by_default(monkeypatch):
         session=session_obj,
         status=None,
         limit=200,
+        mode=None,
     )
 
     assert result == {"orders": []}
@@ -180,7 +181,32 @@ async def test_get_trader_orders_history_is_read_only_by_default(monkeypatch):
         session_obj,
         trader_id="live-trader-1",
         status=None,
+        mode=None,
         limit=200,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_trader_orders_passes_mode_filter(monkeypatch):
+    session_obj = object()
+    list_orders_mock = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(routes_traders, "list_serialized_trader_orders", list_orders_mock)
+
+    await routes_traders.get_trader_orders(
+        trader_id="live-trader-1",
+        session=session_obj,
+        status="resolved",
+        limit=500,
+        mode="live",
+    )
+
+    list_orders_mock.assert_awaited_once_with(
+        session_obj,
+        trader_id="live-trader-1",
+        status="resolved",
+        mode="live",
+        limit=500,
     )
 
 

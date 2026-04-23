@@ -1527,7 +1527,7 @@ export const getAllTraderDecisions = async (
 
 export const getTraderOrders = async (
   traderId: string,
-  params?: { status?: string; limit?: number }
+  params?: { status?: string; mode?: string; limit?: number }
 ): Promise<TraderOrder[]> => {
   const { data } = await api.get(`/traders/${traderId}/orders`, { params })
   return data.orders || []

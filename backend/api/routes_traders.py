@@ -2088,13 +2088,15 @@ async def get_trader_decisions(
 async def get_trader_orders(
     trader_id: str,
     status: Optional[str] = Query(default=None),
-    limit: int = Query(default=200, ge=1, le=5000),
+    mode: Optional[str] = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=20000),
     session: AsyncSession = Depends(get_db_session),
 ):
     orders = await list_serialized_trader_orders(
         session,
         trader_id=trader_id,
         status=status,
+        mode=mode,
         limit=limit,
     )
     return {

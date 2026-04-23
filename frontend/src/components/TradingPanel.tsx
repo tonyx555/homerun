@@ -41,6 +41,7 @@ import {
   getAllTraderDecisions,
   getAllTraderOrders,
   getAllTraderEventsBulk,
+  getTraderOrders,
   getTraderMarketHistory,
   getTraderDecisionDetail,
   getTraderConfigSchema,
@@ -468,6 +469,7 @@ const TERMINAL_COMPACT_ROW_HEIGHT = 34
 const TERMINAL_COMPACT_OVERSCAN = 16
 const ORDERS_PAGE_SIZE = 200
 const ORDERS_PAGE_SIZE_OPTIONS = [100, 200, 500] as const
+const SELECTED_TRADER_ORDERS_LIMIT = 20000
 
 const CRYPTO_STRATEGY_OPTIONS = [
   { key: 'btc_eth_highfreq', label: 'Crypto High Frequency' },
@@ -5739,6 +5741,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] }),
         queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['trader-orders-selected'] }),
         queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] }),
       ])
       void marketHistoryQuery.refetch()
@@ -5766,6 +5769,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] }),
         queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] }),
+        queryClient.invalidateQueries({ queryKey: ['trader-orders-selected'] }),
         queryClient.invalidateQueries({ queryKey: ['trader-orchestrator-overview'] }),
       ])
       void marketHistoryQuery.refetch()
@@ -5805,6 +5809,16 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => traders.find((trader) => trader.id === selectedTraderId) || null,
     [traders, selectedTraderId]
   )
+  const selectedTraderOrdersQuery = useQuery({
+    queryKey: ['trader-orders-selected', selectedTraderId, selectedAccountId ? selectedTraderDataMode : 'all-visible'],
+    queryFn: () => getTraderOrders(String(selectedTraderId), {
+      limit: SELECTED_TRADER_ORDERS_LIMIT,
+      mode: selectedAccountId ? selectedTraderDataMode : undefined,
+    }),
+    enabled: Boolean(selectedTraderId),
+    refetchInterval: isConnected ? 8000 : 20000,
+    staleTime: 2000,
+  })
   const selectedTraderLiveWalletPositionsQuery = useQuery({
     queryKey: ['trader-live-wallet-positions', selectedTraderId],
     queryFn: () => getTraderLiveWalletPositions(String(selectedTraderId), { include_managed: true }),
@@ -5862,8 +5876,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }, [traderTogglePendingById, traders])
 
   const selectedOrders = useMemo(
-    () => (selectedTraderId ? allOrders.filter((order) => order.trader_id === selectedTraderId) : []),
-    [allOrders, selectedTraderId]
+    () => {
+      if (!selectedTraderId) return []
+      if (Array.isArray(selectedTraderOrdersQuery.data)) return selectedTraderOrdersQuery.data
+      return allOrders.filter((order) => order.trader_id === selectedTraderId)
+    },
+    [allOrders, selectedTraderId, selectedTraderOrdersQuery.data]
   )
 
   const selectedDecisions = useMemo(
@@ -6302,6 +6320,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     queryClient.invalidateQueries({ queryKey: ['traders-list'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders-all'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders-summary'] })
+    queryClient.invalidateQueries({ queryKey: ['trader-orders-selected'] })
     queryClient.invalidateQueries({ queryKey: ['trader-orders'] })
     queryClient.invalidateQueries({ queryKey: ['trader-decisions-all'] })
     queryClient.invalidateQueries({ queryKey: ['trader-events-all'] })
@@ -7783,18 +7802,33 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [globalPositionBook, selectedTraderId]
   )
 
+  const selectedTraderPerformanceRow = useMemo(
+    () => globalSummary.traderRows.find((row) => row.traderId === selectedTraderId) || null,
+    [globalSummary.traderRows, selectedTraderId]
+  )
+
   const selectedTraderSummary = useMemo(() => {
-    let resolved = 0
-    let wins = 0
-    let losses = 0
-    let failed = 0
-    let open = 0
-    let pnl = 0
-    let notional = 0
+    let resolved = toNumber(selectedTraderPerformanceRow?.resolved)
+    let wins = toNumber(selectedTraderPerformanceRow?.wins)
+    let losses = toNumber(selectedTraderPerformanceRow?.losses)
+    let failed = toNumber(selectedTraderPerformanceRow?.failedTrades)
+    let open = toNumber(selectedTraderPerformanceRow?.open)
+    let pnl = toNumber(selectedTraderPerformanceRow?.pnl)
+    let notional = toNumber(selectedTraderPerformanceRow?.notional)
     let edgeSum = 0
     let edgeCount = 0
     let confidenceSum = 0
     let confidenceCount = 0
+
+    if (!selectedTraderPerformanceRow) {
+      resolved = 0
+      wins = 0
+      losses = 0
+      failed = 0
+      open = 0
+      pnl = 0
+      notional = 0
+    }
 
     for (const order of selectedOrders) {
       const status = normalizeStatus(order.status)
@@ -7802,19 +7836,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const orderNotional = Math.abs(toNumber(order.notional_usd))
       const edge = toNumber(order.edge_percent)
       const confidence = toNumber(order.confidence)
-      notional += orderNotional
 
-      if (OPEN_ORDER_STATUSES.has(status)) {
-        open += 1
-      }
-      if (RESOLVED_ORDER_STATUSES.has(status)) {
-        resolved += 1
-        pnl += orderPnl
-        if (orderPnl > 0) wins += 1
-        if (orderPnl < 0) losses += 1
-      }
-      if (FAILED_ORDER_STATUSES.has(status)) {
-        failed += 1
+      if (!selectedTraderPerformanceRow) {
+        notional += orderNotional
+        if (OPEN_ORDER_STATUSES.has(status)) {
+          open += 1
+        }
+        if (RESOLVED_ORDER_STATUSES.has(status)) {
+          resolved += 1
+          pnl += orderPnl
+          if (orderPnl > 0) wins += 1
+          if (orderPnl < 0) losses += 1
+        }
+        if (FAILED_ORDER_STATUSES.has(status)) {
+          failed += 1
+        }
       }
       if (edge !== 0) {
         edgeSum += edge
@@ -7843,12 +7879,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       decisions,
       selectedDecisions: selectedDecisionsCount,
       events: selectedEvents.length,
-      conversion: decisions > 0 ? (selectedOrders.length / decisions) * 100 : 0,
+      conversion: decisions > 0 ? ((selectedTraderPerformanceRow?.orders ?? selectedOrders.length) / decisions) * 100 : 0,
       selectionRate: decisions > 0 ? (selectedDecisionsCount / decisions) * 100 : 0,
       avgEdge: edgeCount > 0 ? edgeSum / edgeCount : 0,
       avgConfidence: confidenceCount > 0 ? confidenceSum / confidenceCount : 0,
     }
-  }, [selectedOrders, selectedDecisions, selectedEvents.length])
+  }, [selectedOrders, selectedDecisions, selectedEvents.length, selectedTraderPerformanceRow])
 
   const selectedPerformance = useMemo(() => {
     const dimensions = selectedOrders.map((order) => {
@@ -11088,7 +11124,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     <span className="text-border">|</span>
                     <span>WR {formatPercent(selectedTraderSummary.winRate)}</span>
                     <span className="text-border">|</span>
-                    <span>{selectedOrders.length} orders</span>
+                    <span>{selectedTraderPerformanceRow?.orders ?? selectedOrders.length} orders</span>
                     <span className="text-border">|</span>
                     <span>Exp {formatCurrency(selectedTraderExposure, true)}</span>
                     <span className="text-border">|</span>
