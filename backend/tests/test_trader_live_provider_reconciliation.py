@@ -40,11 +40,9 @@ from utils.utcnow import utcnow
 
 
 def test_sync_recovered_order_hot_state_routes_terminal_unfilled_order_to_cancel(monkeypatch):
-    created: list[dict] = []
     resolved: list[dict] = []
     cancelled: list[dict] = []
 
-    monkeypatch.setattr(trader_hot_state, "record_order_created", lambda **kwargs: created.append(kwargs))
     monkeypatch.setattr(trader_hot_state, "record_order_resolved", lambda **kwargs: resolved.append(kwargs))
     monkeypatch.setattr(trader_hot_state, "record_order_cancelled", lambda **kwargs: cancelled.append(kwargs))
 
@@ -71,7 +69,6 @@ def test_sync_recovered_order_hot_state_routes_terminal_unfilled_order_to_cancel
         )
     )
 
-    assert created == []
     assert resolved == []
     assert len(cancelled) == 1
     assert cancelled[0]["order_id"] == "recovered-order-1"

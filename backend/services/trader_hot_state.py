@@ -154,6 +154,8 @@ class _TraderSnapshot:
     copy_leader_notional: dict[str, float] = field(default_factory=dict)
     daily_realized_pnl: float = 0.0
     daily_pnl_date: str = ""
+    daily_realized_order_pnl: dict[str, float] = field(default_factory=dict)
+    resolved_order_statuses: dict[str, str] = field(default_factory=dict)
     consecutive_losses: int = 0
     last_loss_at: Optional[datetime] = None
     cursor_created_at: Optional[datetime] = None
@@ -349,8 +351,6 @@ async def _seed_from_db(session: AsyncSession) -> None:
     # very end via dict.update after clear.
     _shadow_snapshots: dict[tuple[str, str], _TraderSnapshot] = {}
     _shadow_global_gross: dict[str, float] = {}
-    _shadow_global_daily_pnl: dict[str, float] = {}
-    _shadow_global_daily_pnl_date: dict[str, str] = {}
 
     # Override _ensure_snapshot to build into shadow dict
     def _shadow_ensure(trader_id: str, mode: str) -> _TraderSnapshot:
@@ -464,10 +464,12 @@ async def _seed_from_db(session: AsyncSession) -> None:
                     updated = updated.replace(tzinfo=timezone.utc)
                 if updated >= today_start:
                     profit = safe_float(order.actual_profit, 0.0) or 0.0
+                    order_id = str(order.id or "").strip()
                     snap.daily_realized_pnl += profit
                     snap.daily_pnl_date = today_str
-                    _shadow_global_daily_pnl[mode] = _shadow_global_daily_pnl.get(mode, 0.0) + profit
-                    _shadow_global_daily_pnl_date[mode] = today_str
+                    if order_id:
+                        snap.daily_realized_order_pnl[order_id] = profit
+                        snap.resolved_order_statuses[order_id] = status_key
 
     # ── Positions (open only, for position cap scope) ──────────────
     pos_rows = (
@@ -607,13 +609,28 @@ async def _seed_from_db(session: AsyncSession) -> None:
             # Merge any market_ids the old snapshot had that the shadow doesn't
             for order_id, tracked in old_snap.active_orders.items():
                 shadow_snap.active_orders.setdefault(order_id, tracked)
+            if old_snap.daily_pnl_date == today_str:
+                if shadow_snap.daily_pnl_date != today_str:
+                    shadow_snap.daily_pnl_date = today_str
+                    shadow_snap.daily_realized_pnl = 0.0
+                    shadow_snap.daily_realized_order_pnl.clear()
+                for order_id, profit in old_snap.daily_realized_order_pnl.items():
+                    if order_id not in shadow_snap.daily_realized_order_pnl:
+                        shadow_snap.daily_realized_order_pnl[order_id] = profit
+                        shadow_snap.daily_realized_pnl += profit
+                for order_id, status in old_snap.resolved_order_statuses.items():
+                    shadow_snap.resolved_order_statuses.setdefault(order_id, status)
             _rebuild_snapshot_order_views(shadow_snap)
-        elif old_snap.active_orders:
+        elif old_snap.active_orders or (
+            old_snap.daily_pnl_date == today_str and bool(old_snap.daily_realized_order_pnl)
+        ):
             # Old snapshot has open markets but shadow doesn't have this trader at all —
             # preserve it so the stacking guard still sees it
             preserved_snap = _TraderSnapshot(
                 daily_realized_pnl=old_snap.daily_realized_pnl,
                 daily_pnl_date=old_snap.daily_pnl_date,
+                daily_realized_order_pnl=dict(old_snap.daily_realized_order_pnl),
+                resolved_order_statuses=dict(old_snap.resolved_order_statuses),
                 consecutive_losses=old_snap.consecutive_losses,
                 last_loss_at=old_snap.last_loss_at,
                 cursor_created_at=old_snap.cursor_created_at,
@@ -630,9 +647,11 @@ async def _seed_from_db(session: AsyncSession) -> None:
         if snap.gross_notional > 0.0:
             _global_gross[mode_key] = _global_gross.get(mode_key, 0.0) + snap.gross_notional
     _global_daily_pnl.clear()
-    _global_daily_pnl.update(_shadow_global_daily_pnl)
     _global_daily_pnl_date.clear()
-    _global_daily_pnl_date.update(_shadow_global_daily_pnl_date)
+    for (_, mode_key), snap in _snapshots.items():
+        if snap.daily_pnl_date == today_str:
+            _global_daily_pnl[mode_key] = _global_daily_pnl.get(mode_key, 0.0) + snap.daily_realized_pnl
+            _global_daily_pnl_date[mode_key] = today_str
 
 
 def _ensure_snapshot(trader_id: str, mode: str) -> _TraderSnapshot:
@@ -880,16 +899,6 @@ def upsert_active_order(
     )
 
 
-def record_order_created(
-    *,
-    trader_id: str,
-    mode: str,
-    order_id: str,
-    **kwargs: Any,
-) -> None:
-    pass
-
-
 def record_order_resolved(
     *,
     trader_id: str,
@@ -902,13 +911,13 @@ def record_order_resolved(
     actual_profit: float,
     payload: dict[str, Any],
     copy_source_wallet: str = "",
+    updated_at: datetime | None = None,
 ) -> None:
     mode_key = _normalize_mode_key(mode)
-    snap = _snapshots.get((trader_id, mode_key))
-    if snap is None:
-        return
+    snap = _ensure_snapshot(trader_id, mode_key)
+    order_id_clean = str(order_id or "").strip()
 
-    snap.active_orders.pop(str(order_id or "").strip(), None)
+    snap.active_orders.pop(order_id_clean, None)
 
     status_key = _normalize_status_key(status)
     _rebuild_snapshot_order_views(snap)
@@ -926,20 +935,40 @@ def record_order_resolved(
     # Update PnL / loss streak
     if status_key in REALIZED_ORDER_STATUSES:
         today_str = utcnow().strftime("%Y-%m-%d")
+        resolved_at = updated_at if isinstance(updated_at, datetime) else utcnow()
+        if resolved_at.tzinfo is None:
+            resolved_at = resolved_at.replace(tzinfo=timezone.utc)
+        if resolved_at.strftime("%Y-%m-%d") != today_str:
+            return
+
         profit = safe_float(actual_profit, 0.0) or 0.0
         if snap.daily_pnl_date != today_str:
             snap.daily_realized_pnl = 0.0
             snap.daily_pnl_date = today_str
-        snap.daily_realized_pnl += profit
+            snap.daily_realized_order_pnl.clear()
+            snap.resolved_order_statuses.clear()
+
+        previous_profit = snap.daily_realized_order_pnl.get(order_id_clean)
+        pnl_delta = profit - previous_profit if previous_profit is not None else profit
+        if order_id_clean:
+            snap.daily_realized_order_pnl[order_id_clean] = profit
+        snap.daily_realized_pnl += pnl_delta
+
         if _global_daily_pnl_date.get(mode_key) != today_str:
             _global_daily_pnl[mode_key] = 0.0
             _global_daily_pnl_date[mode_key] = today_str
-        _global_daily_pnl[mode_key] = _global_daily_pnl.get(mode_key, 0.0) + profit
+        _global_daily_pnl[mode_key] = _global_daily_pnl.get(mode_key, 0.0) + pnl_delta
 
-        if status_key in REALIZED_LOSS_ORDER_STATUSES:
+        previous_status = snap.resolved_order_statuses.get(order_id_clean)
+        if order_id_clean:
+            snap.resolved_order_statuses[order_id_clean] = status_key
+        if previous_status == status_key:
+            return
+
+        if status_key in REALIZED_LOSS_ORDER_STATUSES and previous_status not in REALIZED_LOSS_ORDER_STATUSES:
             snap.consecutive_losses += 1
             snap.last_loss_at = utcnow()
-        elif status_key in REALIZED_WIN_ORDER_STATUSES:
+        elif status_key in REALIZED_WIN_ORDER_STATUSES and previous_status not in REALIZED_WIN_ORDER_STATUSES:
             snap.consecutive_losses = 0
 
 

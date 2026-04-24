@@ -2139,6 +2139,7 @@ def _sync_recovered_order_hot_state(row: TraderOrder) -> None:
             actual_profit=float(row.actual_profit or 0.0),
             payload=payload,
             copy_source_wallet=copy_source_wallet,
+            updated_at=getattr(row, "updated_at", None),
         )
         return
 

@@ -205,3 +205,73 @@ def test_completed_orders_keep_market_occupied_without_counting_as_open_orders()
         assert trader_hot_state.get_occupied_market_ids("trader-1", "live") == {"market-1"}
     finally:
         _reset_hot_state()
+
+
+def test_resolved_order_updates_daily_pnl_by_order_delta_only():
+    _reset_hot_state()
+    try:
+        trader_hot_state.record_order_resolved(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            status="closed_loss",
+            actual_profit=-1.25,
+            payload={},
+        )
+
+        assert trader_hot_state.get_daily_realized_pnl("trader-1", "live") == -1.25
+        assert trader_hot_state.get_daily_realized_pnl(None, "live") == -1.25
+        assert trader_hot_state.get_consecutive_loss_count("trader-1", "live") == 1
+
+        trader_hot_state.record_order_resolved(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            status="closed_loss",
+            actual_profit=-1.25,
+            payload={},
+        )
+
+        assert trader_hot_state.get_daily_realized_pnl("trader-1", "live") == -1.25
+        assert trader_hot_state.get_daily_realized_pnl(None, "live") == -1.25
+        assert trader_hot_state.get_consecutive_loss_count("trader-1", "live") == 1
+
+        trader_hot_state.record_order_resolved(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            status="closed_loss",
+            actual_profit=-0.75,
+            payload={},
+        )
+
+        assert trader_hot_state.get_daily_realized_pnl("trader-1", "live") == -0.75
+        assert trader_hot_state.get_daily_realized_pnl(None, "live") == -0.75
+        assert trader_hot_state.get_consecutive_loss_count("trader-1", "live") == 1
+
+        trader_hot_state.record_order_resolved(
+            trader_id="trader-1",
+            mode="live",
+            order_id="order-1",
+            market_id="market-1",
+            direction="buy_yes",
+            source="scanner",
+            status="closed_win",
+            actual_profit=0.5,
+            payload={},
+        )
+
+        assert trader_hot_state.get_daily_realized_pnl("trader-1", "live") == 0.5
+        assert trader_hot_state.get_daily_realized_pnl(None, "live") == 0.5
+        assert trader_hot_state.get_consecutive_loss_count("trader-1", "live") == 0
+    finally:
+        _reset_hot_state()
