@@ -252,14 +252,17 @@ async def test_seed_close_alert_markers_rekeys_old_persisted_marker():
 
 
 @pytest.mark.asyncio
-async def test_position_close_alert_labels_zero_pnl_as_flat(monkeypatch):
+async def test_position_close_alert_suppresses_zero_pnl(monkeypatch):
     notifier = TelegramNotifier()
     captured: list[str] = []
+    persisted = False
 
     async def _enqueue(text: str) -> None:
         captured.append(text)
 
     async def _persist(_session) -> None:
+        nonlocal persisted
+        persisted = True
         return None
 
     async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
@@ -289,10 +292,67 @@ async def test_position_close_alert_labels_zero_pnl_as_flat(monkeypatch):
         mode="live",
     )
 
+    assert captured == []
+    assert persisted
+    assert "order-flat" in notifier._close_alert_markers
+
+
+@pytest.mark.asyncio
+async def test_position_close_alert_dedupes_same_wallet_close_evidence(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _persist(_session) -> None:
+        return None
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha"}
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+
+    now = datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc)
+    close_payload = {
+        "close_trigger": "wallet_activity",
+        "price_source": "wallet_activity",
+        "wallet_activity_transaction_hash": "0xclose",
+        "wallet_activity_timestamp": "2026-03-02T12:00:00Z",
+        "closed_at": "2026-03-02T12:01:00Z",
+    }
+    orders = [
+        SimpleNamespace(
+            id=f"order-{idx}",
+            trader_id="trader-1",
+            status="closed_loss",
+            actual_profit=-0.74,
+            market_question="Will duplicate wallet evidence stay quiet?",
+            market_id="market-1",
+            direction="yes",
+            payload_json={
+                "token_id": "token-1",
+                "position_close": dict(close_payload),
+            },
+            updated_at=now,
+            created_at=now,
+            mode="live",
+        )
+        for idx in range(1, 4)
+    ]
+
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=orders,
+        mode="live",
+    )
+
     plain = _plain_text(captured[0])
-    assert "FLAT" in plain
-    assert "+$0.00" in plain
-    assert "Won: $0.00" in plain
+    assert "Count: 1" in plain
+    assert plain.count("Alpha") == 1
+    assert set(notifier._close_alert_markers) == {"order-1", "order-2", "order-3"}
 
 
 @pytest.mark.asyncio

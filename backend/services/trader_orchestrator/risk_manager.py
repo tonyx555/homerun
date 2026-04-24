@@ -202,6 +202,9 @@ def evaluate_risk(
 
     # --- Per-market exposure limit ---
     max_per_market = safe_float(trader_limits.get("max_per_market_exposure_usd"), 500.0)
+    max_position_notional = safe_float(trader_limits.get("max_position_notional_usd"), None)
+    if max_position_notional is not None and max_position_notional > 0.0:
+        max_per_market = min(max_per_market, max_position_notional)
     next_market = max(0.0, market_exposure_usd) + max(0.0, size_usd)
     checks.append(
         RiskCheck(

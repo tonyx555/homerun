@@ -51,7 +51,7 @@ TERMINAL_NON_RESOLUTION_TRIGGERS = {
     "failed_exit_exhausted",
 }
 PENDING_EXIT_STUCK_SECONDS = 90
-ALERT_DEDUP_SECONDS = 15
+ALERT_DEDUP_SECONDS = 300
 DECISION_FRESHNESS_SECONDS = 120
 WALLET_EVENT_STALE_SECONDS = 120
 WALLET_BLOCK_STALE_SECONDS = 60
@@ -219,6 +219,7 @@ def _is_rapid_close_trigger(close_trigger: Any) -> bool:
         "underwater",
         "resolution risk flatten",
         "force flatten",
+        "risk position cap",
     )
     return any(marker in normalized for marker in rapid_markers)
 
@@ -249,6 +250,25 @@ def _pending_exit_fill_threshold(pending_exit: dict[str, Any]) -> float:
     if retry_count >= 2:
         threshold = max(0.85, threshold - 0.03)
     return max(0.5, min(1.0, float(threshold)))
+
+
+def _position_close_fill_evidence(position_close: Any) -> tuple[float, str]:
+    if not isinstance(position_close, dict):
+        return 0.0, ""
+    for key in (
+        "wallet_activity_size",
+        "wallet_trade_size",
+        "filled_size",
+        "close_size",
+        "executed_size",
+        "matched_size",
+        "shares",
+        "size",
+    ):
+        value = safe_float(position_close.get(key), None)
+        if value is not None and value > 0.0:
+            return float(value), key
+    return 0.0, ""
 
 
 def _extract_wallet_token_map(positions: list[dict[str, Any]]) -> dict[str, float]:
@@ -977,7 +997,11 @@ async def run_monitor(config: MonitorConfig) -> int:
                             )
 
                     # Stuck pending live exit.
-                    if isinstance(pending_exit, dict) and pending_exit_status in {"pending", "submitted", "failed"}:
+                    if (
+                        status not in LIVE_TERMINAL_STATUSES
+                        and isinstance(pending_exit, dict)
+                        and pending_exit_status in {"pending", "submitted", "failed"}
+                    ):
                         if pending_exit_trigger_dt is not None:
                             pending_age = (now - pending_exit_trigger_dt).total_seconds()
                             if pending_age >= PENDING_EXIT_STUCK_SECONDS:
@@ -1004,11 +1028,30 @@ async def run_monitor(config: MonitorConfig) -> int:
                     # Non-strategy fallback exits.
                     position_close = payload.get("position_close")
                     close_trigger = ""
+                    close_event_dt = None
                     if isinstance(position_close, dict):
                         close_trigger = normalize_status(position_close.get("close_trigger"))
+                        for key in ("closed_at", "wallet_activity_timestamp", "wallet_trade_timestamp", "filled_at"):
+                            close_event_dt = parse_iso(position_close.get(key))
+                            if close_event_dt is not None:
+                                break
                     elif isinstance(pending_exit, dict):
                         close_trigger = normalize_status(pending_exit.get("close_trigger"))
-                    if close_trigger and close_trigger in TERMINAL_NON_RESOLUTION_TRIGGERS:
+                    if close_event_dt is None and order.updated_at is not None:
+                        close_event_dt = (
+                            order.updated_at.replace(tzinfo=timezone.utc)
+                            if order.updated_at.tzinfo is None
+                            else order.updated_at.astimezone(timezone.utc)
+                        )
+                    if (
+                        close_trigger
+                        and close_trigger in TERMINAL_NON_RESOLUTION_TRIGGERS
+                        and (
+                            status not in LIVE_TERMINAL_STATUSES
+                            or close_event_dt is None
+                            or close_event_dt >= started_at
+                        )
+                    ):
                         new_alerts.append(
                             _make_alert_record(
                                 ts=now,
@@ -1060,13 +1103,43 @@ async def run_monitor(config: MonitorConfig) -> int:
                         _, entry_filled_size, _ = _extract_live_fill_metrics(payload)
                         required_size = max(0.0, pending_exit_required_size if pending_exit_required_size > 0 else entry_filled_size)
                         threshold_ratio = _pending_exit_fill_threshold(pending_exit) if isinstance(pending_exit, dict) else 0.98
+                        position_close_filled_size, position_close_size_source = _position_close_fill_evidence(position_close)
+                        if close_trigger in {"wallet_activity", "wallet_summary_recovery"}:
+                            if position_close_filled_size > 0.0:
+                                close_filled_size = max(close_filled_size, position_close_filled_size)
+                                if close_provider_status in {"", "missing", "invalid"}:
+                                    close_provider_status = position_close_size_source
+                            elif (
+                                wallet_ctx["ready"]
+                                and wallet_position_size is not None
+                                and wallet_position_size <= CLOSE_FILL_ABSOLUTE_TOLERANCE_SHARES
+                            ):
+                                continue
                         remaining_size = max(0.0, required_size - close_filled_size)
+                        close_status_has_no_fill = (
+                            close_provider_status
+                            not in {
+                                "filled",
+                                "matched",
+                                "executed",
+                                "wallet_activity_size",
+                                "wallet_trade_size",
+                                "filled_size",
+                                "close_size",
+                                "executed_size",
+                                "matched_size",
+                                "shares",
+                                "size",
+                            }
+                            and close_filled_size <= 0.0
+                        )
+                        close_fill_sufficient = (
+                            close_filled_size + 1e-9 >= (required_size * threshold_ratio)
+                            or remaining_size <= CLOSE_FILL_ABSOLUTE_TOLERANCE_SHARES
+                        )
                         if required_size > 0 and (
-                            close_provider_status not in {"filled", "matched", "executed"}
-                            or (
-                                close_filled_size + 1e-9 < (required_size * threshold_ratio)
-                                and remaining_size > CLOSE_FILL_ABSOLUTE_TOLERANCE_SHARES
-                            )
+                            close_status_has_no_fill
+                            or not close_fill_sufficient
                         ):
                             new_alerts.append(
                                 _make_alert_record(

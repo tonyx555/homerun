@@ -123,6 +123,21 @@ _STRATEGY_EVALUATION_TIMEOUT_SECONDS = 15.0
 # orchestrator loop skips them entirely so their per-tick budget is not
 # consumed by the 20-30s cycles that "normal" / "slow" traders can incur.
 _FAST_LATENCY_CLASS = "fast"
+LIVE_ENTRY_BLOCKING_ORDER_STATUSES = (
+    "pending",
+    "placing",
+    "submitted",
+    "open",
+    "working",
+    "partial",
+    "partially_filled",
+    "hedging",
+    "executed",
+    "completed",
+)
+LIVE_AUTHORITY_PENDING_ENTRY_STATUSES = ("placing", "failed", "cancelled", "error")
+LIVE_AUTHORITY_PENDING_STATES = {"pre_submit_persisted", "submit_timeout"}
+LIVE_AUTHORITY_PENDING_MARKET_BLOCK_SECONDS = 1800.0
 
 
 def _is_fast_tier_trader(trader: dict) -> bool:
@@ -131,6 +146,29 @@ def _is_fast_tier_trader(trader: dict) -> bool:
         return False
     cls = str(trader.get("latency_class") or "normal").strip().lower()
     return cls == _FAST_LATENCY_CLASS
+
+
+def _submission_intent_state(payload: Any) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    submission_intent = payload.get("submission_intent")
+    if not isinstance(submission_intent, dict):
+        return ""
+    return str(submission_intent.get("state") or "").strip().lower()
+
+
+def _live_authority_pending_entry_blocks_market(status: Any, payload: Any, updated_at: Any) -> bool:
+    status_key = str(status or "").strip().lower()
+    if status_key not in LIVE_AUTHORITY_PENDING_ENTRY_STATUSES:
+        return False
+    if _submission_intent_state(payload) not in LIVE_AUTHORITY_PENDING_STATES:
+        return False
+    if not isinstance(updated_at, datetime):
+        return True
+    updated = updated_at if updated_at.tzinfo is not None else updated_at.replace(tzinfo=timezone.utc)
+    return (utcnow() - updated.astimezone(timezone.utc)).total_seconds() <= LIVE_AUTHORITY_PENDING_MARKET_BLOCK_SECONDS
+
+
 _SIGNAL_DEADLOCK_MAX_RETRIES = 3
 _SIGNAL_DEADLOCK_BASE_DELAY = 0.1
 _SIGNAL_TRANSIENT_ERROR_MARKERS = (
@@ -630,22 +668,10 @@ async def get_occupied_market_ids_for_trader(session, trader_id, mode=None):
         if market_id:
             occupied_market_ids.add(market_id)
 
-    active_order_statuses = (
-        "pending",
-        "placing",
-        "submitted",
-        "open",
-        "working",
-        "partial",
-        "partially_filled",
-        "hedging",
-        "executed",
-        "completed",
-    )
     order_query = (
         select(TraderOrder.market_id)
         .where(TraderOrder.trader_id == trader_id)
-        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(active_order_statuses))
+        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(LIVE_ENTRY_BLOCKING_ORDER_STATUSES))
     )
     if mode_key:
         order_query = order_query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
@@ -653,6 +679,23 @@ async def get_occupied_market_ids_for_trader(session, trader_id, mode=None):
     for row in order_rows:
         market_id = str(row.market_id or "").strip()
         if market_id:
+            occupied_market_ids.add(market_id)
+
+    authority_pending_cutoff = utcnow() - timedelta(seconds=LIVE_AUTHORITY_PENDING_MARKET_BLOCK_SECONDS)
+    authority_pending_query = (
+        select(TraderOrder.market_id, TraderOrder.status, TraderOrder.payload_json, TraderOrder.updated_at)
+        .where(TraderOrder.trader_id == trader_id)
+        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(LIVE_AUTHORITY_PENDING_ENTRY_STATUSES))
+        .where(func.coalesce(TraderOrder.updated_at, TraderOrder.created_at) >= authority_pending_cutoff)
+    )
+    if mode_key:
+        authority_pending_query = authority_pending_query.where(
+            func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key
+        )
+    authority_pending_rows = (await session.execute(authority_pending_query)).all()
+    for row in authority_pending_rows:
+        market_id = str(row.market_id or "").strip()
+        if market_id and _live_authority_pending_entry_blocks_market(row.status, row.payload_json, row.updated_at):
             occupied_market_ids.add(market_id)
 
     return occupied_market_ids
@@ -3877,7 +3920,7 @@ async def _run_terminal_stale_order_watchdog(session: Any, *, now: datetime | No
                     trader_id=trader_id,
                     trader_params={},
                     dry_run=False,
-                    force_mark_to_market=True,
+                    force_mark_to_market=False,
                     order_ids=order_ids,
                     reason="terminal_market_watchdog",
                 )
@@ -4827,7 +4870,7 @@ async def _run_trader_once(
                         trader_id=trader_id,
                         trader_params=default_strategy_params,
                         dry_run=False,
-                        force_mark_to_market=True,
+                        force_mark_to_market=False,
                         reason="circuit_breaker_safe_exit",
                     )
                     safe_exit_closed = int(safe_exit_result.get("closed", 0))
@@ -6399,18 +6442,6 @@ async def _run_trader_once(
                         # spending real money.  The hot-state pre-gate is fast but
                         # can miss entries during reseed or after wallet_absent_close.
                         if _pre_gate_market_id and run_mode == "live":
-                            active_order_statuses = (
-                                "pending",
-                                "placing",
-                                "submitted",
-                                "open",
-                                "working",
-                                "partial",
-                                "partially_filled",
-                                "hedging",
-                                "executed",
-                                "completed",
-                            )
                             position_occupied = bool(
                                 (
                                     await session.execute(
@@ -6424,19 +6455,46 @@ async def _run_trader_once(
                                 ).scalar_one()
                                 or 0
                             ) > 0
-                            order_occupied = bool(
-                                (
-                                    await session.execute(
-                                        select(func.count())
-                                        .select_from(TraderOrder)
-                                        .where(TraderOrder.trader_id == trader_id)
-                                        .where(func.lower(func.coalesce(TraderOrder.mode, "")) == run_mode)
-                                        .where(func.lower(func.coalesce(TraderOrder.status, "")).in_(active_order_statuses))
-                                        .where(TraderOrder.market_id == _pre_gate_market_id)
+                            authority_pending_cutoff = utcnow() - timedelta(
+                                seconds=LIVE_AUTHORITY_PENDING_MARKET_BLOCK_SECONDS
+                            )
+                            order_rows = (
+                                await session.execute(
+                                    select(
+                                        TraderOrder.status,
+                                        TraderOrder.payload_json,
+                                        TraderOrder.updated_at,
+                                        TraderOrder.created_at,
                                     )
-                                ).scalar_one()
-                                or 0
-                            ) > 0
+                                    .where(TraderOrder.trader_id == trader_id)
+                                    .where(func.lower(func.coalesce(TraderOrder.mode, "")) == run_mode)
+                                    .where(TraderOrder.market_id == _pre_gate_market_id)
+                                    .where(
+                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
+                                            LIVE_ENTRY_BLOCKING_ORDER_STATUSES
+                                            + LIVE_AUTHORITY_PENDING_ENTRY_STATUSES
+                                        )
+                                    )
+                                    .where(
+                                        func.lower(func.coalesce(TraderOrder.status, "")).in_(
+                                            LIVE_ENTRY_BLOCKING_ORDER_STATUSES
+                                        )
+                                        | (
+                                            func.coalesce(TraderOrder.updated_at, TraderOrder.created_at)
+                                            >= authority_pending_cutoff
+                                        )
+                                    )
+                                )
+                            ).all()
+                            order_occupied = any(
+                                str(row.status or "").strip().lower() in LIVE_ENTRY_BLOCKING_ORDER_STATUSES
+                                or _live_authority_pending_entry_blocks_market(
+                                    row.status,
+                                    row.payload_json,
+                                    row.updated_at or row.created_at,
+                                )
+                                for row in order_rows
+                            )
                             if position_occupied or order_occupied:
                                 _db_occupied_market_ids = [_pre_gate_market_id]
                                 final_decision = "blocked"

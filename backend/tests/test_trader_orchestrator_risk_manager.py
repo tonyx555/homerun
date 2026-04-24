@@ -69,3 +69,35 @@ def test_risk_blocks_on_open_order_limit():
     assert result.reason.startswith("Risk blocked: trader_open_orders")
     assert "next=3 max=2" in result.reason
     assert any(check.key == "trader_open_orders" and not check.passed for check in result.checks)
+
+
+def test_risk_blocks_on_position_notional_limit_even_without_per_market_limit():
+    result = evaluate_risk(
+        size_usd=12.0,
+        gross_exposure_usd=100.0,
+        trader_open_positions=1,
+        trader_open_orders=1,
+        market_exposure_usd=10.0,
+        global_limits={
+            "max_gross_exposure_usd": 10_000.0,
+            "max_daily_loss_usd": 10_000.0,
+        },
+        trader_limits={
+            "max_open_positions": 5,
+            "max_open_orders": 5,
+            "max_orders_per_cycle": 10,
+            "max_trade_notional_usd": 500.0,
+            "max_position_notional_usd": 20.0,
+            "max_daily_loss_usd": 10_000.0,
+        },
+        global_daily_realized_pnl_usd=0.0,
+        trader_daily_realized_pnl_usd=0.0,
+        trader_consecutive_losses=0,
+        cycle_orders_placed=0,
+        cooldown_active=False,
+    )
+
+    assert result.allowed is False
+    assert result.reason.startswith("Risk blocked: trader_market_exposure")
+    assert "next=22.00 max=20.00" in result.reason
+    assert any(check.key == "trader_market_exposure" and not check.passed for check in result.checks)

@@ -2033,7 +2033,10 @@ class LiveExecutionService:
             OrderStatus.FAILED: "failed",
         }
         normalized_status = status_map.get(order.status, "unknown")
+        order_size = max(0.0, safe_float(order.size, 0.0) or 0.0)
         filled_size = max(0.0, safe_float(order.filled_size, 0.0) or 0.0)
+        if order_size > 0.0 and filled_size > order_size:
+            filled_size = order_size
         average_fill_price = safe_float(order.average_fill_price)
         filled_notional_usd = None
         if filled_size > 0 and average_fill_price is not None and average_fill_price > 0:
@@ -2042,9 +2045,9 @@ class LiveExecutionService:
             "clob_order_id": clob_id,
             "normalized_status": normalized_status,
             "raw_status": str(getattr(order.status, "value", order.status) or ""),
-            "size": max(0.0, safe_float(order.size, 0.0) or 0.0),
+            "size": order_size,
             "filled_size": filled_size,
-            "remaining_size": max(0.0, (safe_float(order.size, 0.0) or 0.0) - filled_size),
+            "remaining_size": max(0.0, order_size - filled_size),
             "average_fill_price": float(average_fill_price) if average_fill_price is not None else None,
             "limit_price": float(safe_float(order.price, 0.0) or 0.0),
             "filled_notional_usd": float(filled_notional_usd) if filled_notional_usd is not None else None,
@@ -2115,6 +2118,8 @@ class LiveExecutionService:
             filled_size = 0.0
         if size is None and remaining_size is not None:
             size = max(0.0, remaining_size + filled_size)
+        if size is not None and size > 0.0 and filled_size > size:
+            filled_size = size
 
         average_fill_price = _first_float(
             server_order,
@@ -2137,6 +2142,10 @@ class LiveExecutionService:
         )
         if filled_notional_usd is None and filled_size > 0 and average_fill_price is not None:
             filled_notional_usd = filled_size * average_fill_price
+        elif filled_notional_usd is not None and average_fill_price is not None and average_fill_price > 0:
+            max_notional = filled_size * average_fill_price
+            if max_notional >= 0.0 and filled_notional_usd > max_notional:
+                filled_notional_usd = max_notional
 
         return {
             "clob_order_id": clob_order_id,
@@ -2170,7 +2179,11 @@ class LiveExecutionService:
 
         filled_size = safe_float(snapshot.get("filled_size"))
         if filled_size is not None:
-            order.filled_size = max(0.0, float(filled_size))
+            normalized_filled_size = max(0.0, float(filled_size))
+            order_size = max(0.0, safe_float(order.size, 0.0) or 0.0)
+            if order_size > 0.0 and normalized_filled_size > order_size:
+                normalized_filled_size = order_size
+            order.filled_size = normalized_filled_size
         average_fill_price = safe_float(snapshot.get("average_fill_price"))
         if average_fill_price is not None and average_fill_price > 0:
             order.average_fill_price = float(average_fill_price)
@@ -2327,6 +2340,9 @@ class LiveExecutionService:
                         position = token_positions.get(str(local_order.token_id or ""))
                         if position is not None and float(position.size or 0.0) > 0:
                             inferred_filled_size = float(position.size)
+                            local_order_size = max(0.0, safe_float(local_order.size, 0.0) or 0.0)
+                            if local_order_size > 0.0 and inferred_filled_size > local_order_size:
+                                inferred_filled_size = local_order_size
                             inferred_avg_price = safe_float(position.average_cost)
                             if inferred_avg_price is None or inferred_avg_price <= 0:
                                 inferred_avg_price = safe_float(synthesized.get("limit_price"))

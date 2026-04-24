@@ -300,3 +300,28 @@ async def test_fast_runtime_restarts_dead_per_trader_task(monkeypatch):
     assert created["count"] == 1
     assert runtime._task_objs["fast-trader"] is not old_runner
     assert runtime._tasks["fast-trader"] is not old_task
+
+
+def test_fast_trader_filters_signal_strategy_types_by_source_config():
+    task = object.__new__(fast_trader_runtime._FastTraderTask)
+    task._trader = {
+        "source_configs": [
+            {
+                "source_key": "feed",
+                "strategy_key": "configured",
+                "requested_strategy_key": "requested",
+                "strategy_params": {
+                    "accepted_signal_strategy_types": ["alternate", "configured"],
+                },
+            },
+            {
+                "source_key": "disabled",
+                "strategy_key": "ignored",
+                "enabled": False,
+            },
+        ]
+    }
+
+    assert task._accepted_strategy_types_by_source() == {
+        "feed": ["configured", "requested", "alternate"]
+    }

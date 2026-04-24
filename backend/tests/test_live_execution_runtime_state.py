@@ -224,6 +224,34 @@ async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(mo
     assert snapshots["clob-1"]["normalized_status"] == "open"
 
 
+def test_order_snapshot_fill_size_cannot_exceed_submitted_size():
+    service = LiveExecutionService()
+    order = Order(
+        id="order-cap",
+        token_id="token-cap",
+        side=OrderSide.BUY,
+        price=0.9,
+        size=9.89,
+        status=OrderStatus.OPEN,
+        clob_order_id="clob-cap",
+    )
+
+    service._apply_snapshot_to_order(
+        order,
+        {
+            "normalized_status": "filled",
+            "filled_size": 29.65,
+            "average_fill_price": 0.9,
+        },
+    )
+
+    assert order.status == OrderStatus.FILLED
+    assert order.filled_size == pytest.approx(9.89)
+    snapshot = service._snapshot_from_cached_order(order)
+    assert snapshot["filled_size"] == pytest.approx(9.89)
+    assert snapshot["filled_notional_usd"] == pytest.approx(8.901)
+
+
 @pytest.mark.asyncio
 async def test_sync_positions_marks_redeemable_claims_as_not_open(monkeypatch):
     service = LiveExecutionService()

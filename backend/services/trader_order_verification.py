@@ -436,17 +436,21 @@ def apply_trader_order_verification(
     normalized_status = normalize_trader_order_verification_status(verification_status)
     current_status = normalize_trader_order_verification_status(getattr(row, "verification_status", None))
     if force or trader_order_verification_rank(normalized_status) >= trader_order_verification_rank(current_status):
+        verification_state_changed = False
         if current_status != normalized_status:
             row.verification_status = normalized_status
             changed = True
+            verification_state_changed = True
         if verification_source and str(getattr(row, "verification_source", "") or "") != verification_source:
             row.verification_source = verification_source
             changed = True
+            verification_state_changed = True
         if verification_reason != getattr(row, "verification_reason", None):
             row.verification_reason = verification_reason
             changed = True
+            verification_state_changed = True
         resolved_verified_at = verified_at or utcnow()
-        if getattr(row, "verified_at", None) != resolved_verified_at:
+        if (verification_state_changed or getattr(row, "verified_at", None) is None) and getattr(row, "verified_at", None) != resolved_verified_at:
             row.verified_at = resolved_verified_at
             changed = True
 
@@ -495,6 +499,27 @@ def append_trader_order_verification_event(
     resolved_size = size if size is not None else derived_trade.get("size")
     resolved_trade_timestamp = trade_timestamp or derived_trade.get("trade_timestamp")
     resolved_trade_id = trade_id or derived_trade.get("trade_id")
+    resolved_created_at = created_at or utcnow()
+    event_key = (
+        str(trader_order_id or "").strip(),
+        normalize_trader_order_verification_status(verification_status),
+        str(source or "").strip(),
+        str(event_type or "").strip() or "verification_update",
+        str(reason or "").strip(),
+        str(provider_order_id or "").strip(),
+        str(provider_clob_order_id or "").strip(),
+        str(execution_wallet_address or "").strip().lower(),
+        str(tx_hash or "").strip(),
+        str(resolved_token_id or "").strip(),
+        str(resolved_side or "").strip(),
+        _safe_float(resolved_price),
+        _safe_float(resolved_size),
+        _parse_timestamp(resolved_trade_timestamp),
+        str(resolved_trade_id or "").strip(),
+    )
+    event_rows_by_key = session.info.setdefault("trader_order_verification_event_rows_by_key", {})
+    if event_key in event_rows_by_key:
+        return event_rows_by_key[event_key]
 
     row = TraderOrderVerificationEvent(
         id=uuid4().hex,
@@ -514,9 +539,10 @@ def append_trader_order_verification_event(
         trade_timestamp=_parse_timestamp(resolved_trade_timestamp),
         trade_id=str(resolved_trade_id or "").strip() or None,
         payload_json=dict(payload_json or {}),
-        created_at=created_at or utcnow(),
+        created_at=resolved_created_at,
     )
     session.add(row)
+    event_rows_by_key[event_key] = row
     return row
 
 

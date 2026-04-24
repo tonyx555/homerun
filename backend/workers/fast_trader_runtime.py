@@ -32,7 +32,7 @@ from typing import Any, Optional
 
 from sqlalchemy.exc import DBAPIError
 
-from models.database import AsyncSessionLocal, FastAsyncSessionLocal, Trader
+from models.database import AsyncSessionLocal, FastAsyncSessionLocal, Trader, TraderSignalCursor
 from services.event_bus import event_bus
 from services.strategy_loader import strategy_loader
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
@@ -49,6 +49,7 @@ from services.trader_orchestrator_state import (
     update_trader_decision,
 )
 from services.worker_state import _is_retryable_db_error, write_worker_snapshot
+from utils.converters import safe_int
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
@@ -158,6 +159,38 @@ class _FastTraderTask:
             if src:
                 sources.append(src)
         return sources
+
+    def _accepted_strategy_types_by_source(self) -> dict[str, list[str]]:
+        configs = self._trader.get("source_configs") or []
+        accepted_by_source: dict[str, list[str]] = {}
+        for cfg in configs:
+            if not isinstance(cfg, dict) or not cfg.get("enabled", True):
+                continue
+            source_key = str(cfg.get("source_key") or "").strip().lower()
+            if not source_key:
+                continue
+            raw_values: list[Any] = [
+                cfg.get("strategy_key"),
+                cfg.get("requested_strategy_key"),
+            ]
+            params = cfg.get("strategy_params")
+            if isinstance(params, dict):
+                accepted = params.get("accepted_signal_strategy_types")
+                if isinstance(accepted, str):
+                    raw_values.extend(part.strip() for part in accepted.split(","))
+                elif isinstance(accepted, (list, tuple, set)):
+                    raw_values.extend(accepted)
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for raw_value in raw_values:
+                value = str(raw_value or "").strip().lower()
+                if not value or value in seen:
+                    continue
+                seen.add(value)
+                normalized.append(value)
+            if normalized:
+                accepted_by_source[source_key] = normalized
+        return accepted_by_source
 
     def _strategy_params_for_source(self, source_key: str) -> dict[str, Any]:
         configs = self._trader.get("source_configs") or []
@@ -319,10 +352,15 @@ class _FastTraderTask:
                 session, trader_id=trader_id
             )
             cursor_runtime_sequence = _get_sequence_cursor(trader_id)
+            if cursor_runtime_sequence is None:
+                cursor_row = await session.get(TraderSignalCursor, trader_id)
+                cursor_runtime_sequence = safe_int(getattr(cursor_row, "last_runtime_sequence", None), None)
+            strategy_types_by_source = self._accepted_strategy_types_by_source()
             signals = await list_unconsumed_trade_signals(
                 session,
                 trader_id=trader_id,
                 sources=accepted_sources,
+                strategy_types_by_source=strategy_types_by_source,
                 cursor_runtime_sequence=cursor_runtime_sequence,
                 cursor_created_at=cursor_created_at,
                 cursor_signal_id=cursor_signal_id,

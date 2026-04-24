@@ -2796,6 +2796,7 @@ async def recover_missing_live_trader_orders(
     hot_state_sync_rows: dict[str, TraderOrder] = {}
     ambiguous_orders = 0
     adopted_existing_orders = 0
+    adopted_existing_order_ids: set[str] = set()
     candidate_cache: dict[tuple[str, int, tuple[str, ...] | None], dict[str, Any] | None] = {}
 
     for live_row in live_rows:
@@ -2911,6 +2912,7 @@ async def recover_missing_live_trader_orders(
                     existing_row = placeholder_candidates[0][2]
                     matched_pre_submit_placeholder = True
         if existing_row is not None:
+            existing_row_id = str(existing_row.id or "").strip()
             existing_payload = dict(existing_row.payload_json or {})
             merged_payload, payload_changed = _merge_missing_mapping_values(
                 existing_payload,
@@ -2918,16 +2920,26 @@ async def recover_missing_live_trader_orders(
             )
             recovered_provider_reconciliation = recovered_payload_json.get("provider_reconciliation")
             if isinstance(recovered_provider_reconciliation, dict):
-                next_provider_reconciliation = dict(merged_payload.get("provider_reconciliation") or {})
+                existing_provider_reconciliation = dict(merged_payload.get("provider_reconciliation") or {})
+                next_provider_reconciliation = dict(existing_provider_reconciliation)
                 next_provider_reconciliation.update(copy.deepcopy(recovered_provider_reconciliation))
-                if merged_payload.get("provider_reconciliation") != next_provider_reconciliation:
+                existing_provider_material = dict(existing_provider_reconciliation)
+                next_provider_material = dict(next_provider_reconciliation)
+                existing_provider_material.pop("reconciled_at", None)
+                next_provider_material.pop("reconciled_at", None)
+                if existing_provider_material != next_provider_material:
                     merged_payload["provider_reconciliation"] = next_provider_reconciliation
                     payload_changed = True
             recovered_live_wallet_authority = recovered_payload_json.get("live_wallet_authority")
             if isinstance(recovered_live_wallet_authority, dict):
-                next_live_wallet_authority = dict(merged_payload.get("live_wallet_authority") or {})
+                existing_live_wallet_authority = dict(merged_payload.get("live_wallet_authority") or {})
+                next_live_wallet_authority = dict(existing_live_wallet_authority)
                 next_live_wallet_authority.update(copy.deepcopy(recovered_live_wallet_authority))
-                if merged_payload.get("live_wallet_authority") != next_live_wallet_authority:
+                existing_authority_material = dict(existing_live_wallet_authority)
+                next_authority_material = dict(next_live_wallet_authority)
+                existing_authority_material.pop("recovered_at", None)
+                next_authority_material.pop("recovered_at", None)
+                if existing_authority_material != next_authority_material:
                     merged_payload["live_wallet_authority"] = next_live_wallet_authority
                     payload_changed = True
             if matched_pre_submit_placeholder:
@@ -3098,29 +3110,31 @@ async def recover_missing_live_trader_orders(
                     touched_session_ids.add(session_id)
             if payload_changed or status_changed or verification_changed or field_changed:
                 existing_row.updated_at = now
-                event_payload = dict(existing_row.payload_json or {})
-                event_payload.update(
-                    {
-                        "live_trading_order_id": live_order_id or None,
-                        "live_trading_status": str(live_row.status or ""),
-                        "adopted_status": str(existing_row.status or ""),
-                    }
-                )
-                append_trader_order_verification_event(
-                    session,
-                    trader_order_id=str(existing_row.id),
-                    verification_status=str(existing_row.verification_status or TRADER_ORDER_VERIFICATION_LOCAL),
-                    source=existing_row.verification_source,
-                    event_type="authority_adopted_existing",
-                    reason=existing_row.verification_reason or "Recovered from live venue authority",
-                    provider_order_id=existing_row.provider_order_id,
-                    provider_clob_order_id=existing_row.provider_clob_order_id,
-                    execution_wallet_address=existing_row.execution_wallet_address,
-                    tx_hash=existing_row.verification_tx_hash,
-                    payload_json=event_payload,
-                    created_at=now,
-                )
-                adopted_existing_orders += 1
+                if existing_row_id not in adopted_existing_order_ids:
+                    event_payload = dict(existing_row.payload_json or {})
+                    event_payload.update(
+                        {
+                            "live_trading_order_id": live_order_id or None,
+                            "live_trading_status": str(live_row.status or ""),
+                            "adopted_status": str(existing_row.status or ""),
+                        }
+                    )
+                    append_trader_order_verification_event(
+                        session,
+                        trader_order_id=str(existing_row.id),
+                        verification_status=str(existing_row.verification_status or TRADER_ORDER_VERIFICATION_LOCAL),
+                        source=existing_row.verification_source,
+                        event_type="authority_adopted_existing",
+                        reason=existing_row.verification_reason or "Recovered from live venue authority",
+                        provider_order_id=existing_row.provider_order_id,
+                        provider_clob_order_id=existing_row.provider_clob_order_id,
+                        execution_wallet_address=existing_row.execution_wallet_address,
+                        tx_hash=existing_row.verification_tx_hash,
+                        payload_json=event_payload,
+                        created_at=now,
+                    )
+                    adopted_existing_order_ids.add(existing_row_id)
+                    adopted_existing_orders += 1
                 hot_state_sync_rows[str(existing_row.id or "")] = existing_row
             if matched_pre_submit_placeholder and token_key:
                 pre_submit_rows_by_token_key[token_key] = [

@@ -458,6 +458,35 @@ class TelegramNotifier:
         return f"{status}|{closed_marker}"
 
     @staticmethod
+    def _close_alert_evidence_key_for_order(order: TraderOrder, marker: str) -> str:
+        payload = order.payload_json if isinstance(order.payload_json, dict) else {}
+        token_id = ""
+        for candidate in (
+            payload,
+            payload.get("live_wallet_authority") if isinstance(payload.get("live_wallet_authority"), dict) else {},
+            payload.get("provider_reconciliation") if isinstance(payload.get("provider_reconciliation"), dict) else {},
+        ):
+            if not isinstance(candidate, dict):
+                continue
+            token_id = str(
+                candidate.get("token_id")
+                or candidate.get("asset_id")
+                or candidate.get("asset")
+                or ""
+            ).strip()
+            if token_id:
+                break
+            snapshot = candidate.get("snapshot")
+            if isinstance(snapshot, dict):
+                token_id = str(snapshot.get("token_id") or snapshot.get("asset_id") or snapshot.get("asset") or "").strip()
+                if token_id:
+                    break
+        market_id = str(getattr(order, "market_id", "") or "").strip()
+        trader_id = str(getattr(order, "trader_id", "") or "").strip()
+        direction = str(getattr(order, "direction", "") or "").strip().lower()
+        return "|".join((trader_id, token_id or market_id, direction, marker))
+
+    @staticmethod
     def _realized_at_for_order(order: TraderOrder) -> datetime | None:
         position_close = _position_close_payload(order)
         for key in (
@@ -970,6 +999,7 @@ class TelegramNotifier:
     ) -> None:
         realized_rows: dict[str, TraderOrder] = {}
         markers_changed = False
+        batch_evidence_keys: set[str] = set()
 
         for row in orders:
             if not self._is_realized_order(row):
@@ -980,9 +1010,22 @@ class TelegramNotifier:
                 continue
             self._close_alert_markers[order_id] = marker
             markers_changed = True
+            if abs(_realized_pnl_for_order(row)) < 0.005:
+                continue
+            evidence_key = self._close_alert_evidence_key_for_order(row, marker)
+            if evidence_key in batch_evidence_keys:
+                continue
+            batch_evidence_keys.add(evidence_key)
             realized_rows[order_id] = row
 
         if not realized_rows:
+            if markers_changed:
+                self._trim_close_alert_markers()
+                if session is not None:
+                    await self._persist_runtime_state(session)
+                else:
+                    async with AsyncSessionLocal() as persist_session:
+                        await self._persist_runtime_state(persist_session)
             return
 
         self._trim_close_alert_markers()

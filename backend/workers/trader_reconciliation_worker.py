@@ -28,6 +28,7 @@ from services.trader_orchestrator_state import (
     create_trader_event,
     get_open_order_count_for_trader,
     list_traders,
+    read_orchestrator_control,
     recover_missing_live_trader_orders,
     reconcile_live_provider_orders,
     sync_trader_position_inventory,
@@ -40,6 +41,7 @@ from services.worker_state import (
     read_worker_control,
     write_worker_snapshot,
 )
+from utils.converters import safe_float
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
@@ -170,6 +172,36 @@ def _default_strategy_params(trader: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def _clamped_live_lifecycle_params(trader: dict[str, Any], control_settings: dict[str, Any]) -> dict[str, Any]:
+    params = _default_strategy_params(trader)
+    risk_limits = trader.get("risk_limits")
+    if isinstance(risk_limits, dict):
+        params.update(dict(risk_limits))
+
+    global_runtime = control_settings.get("global_runtime")
+    global_runtime = global_runtime if isinstance(global_runtime, dict) else {}
+    live_risk_clamps = global_runtime.get("live_risk_clamps")
+    live_risk_clamps = live_risk_clamps if isinstance(live_risk_clamps, dict) else {}
+
+    trade_cap = safe_float(live_risk_clamps.get("max_trade_notional_usd_cap"))
+    if trade_cap is not None and trade_cap > 0.0:
+        configured = safe_float(params.get("max_trade_notional_usd"))
+        params["max_trade_notional_usd"] = min(configured, trade_cap) if configured and configured > 0.0 else trade_cap
+
+    market_cap = safe_float(live_risk_clamps.get("max_per_market_exposure_usd_cap"))
+    if market_cap is not None and market_cap > 0.0:
+        configured_market = safe_float(params.get("max_per_market_exposure_usd"))
+        params["max_per_market_exposure_usd"] = (
+            min(configured_market, market_cap) if configured_market and configured_market > 0.0 else market_cap
+        )
+        configured_position = safe_float(params.get("max_position_notional_usd"))
+        params["max_position_notional_usd"] = (
+            min(configured_position, market_cap) if configured_position and configured_position > 0.0 else market_cap
+        )
+
+    return params
+
+
 def _empty_cycle_summary() -> dict[str, Any]:
     return {
         "traders_seen": 0,
@@ -236,6 +268,7 @@ async def _reconcile_live_state_for_trader(
     trader: dict[str, Any],
     *,
     provider_pass: bool,
+    control_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     trader_id = str(trader.get("id") or "").strip()
     if not trader_id:
@@ -277,7 +310,7 @@ async def _reconcile_live_state_for_trader(
 
     active_seen = int(provider_result.get("active_seen", 0) or 0)
     lifecycle_result: dict[str, Any] = {"would_close": 0, "closed": 0}
-    trader_params = _default_strategy_params(trader)
+    trader_params = _clamped_live_lifecycle_params(trader, control_settings or {})
     if (not provider_pass) or active_seen > 0 or active_open_orders > 0:
         async with AsyncSessionLocal() as session:
             lifecycle_result = await reconcile_live_positions(
@@ -622,6 +655,8 @@ async def _run_reconciliation_cycle(
 
     async with AsyncSessionLocal() as session:
         traders = await list_traders(session)
+        orchestrator_control = await read_orchestrator_control(session)
+    control_settings = dict(orchestrator_control.get("settings") or {})
 
     summary["traders_seen"] = len(traders)
 
@@ -632,7 +667,11 @@ async def _run_reconciliation_cycle(
         for attempt in range(_TRADER_RECONCILE_ATTEMPTS):
             try:
                 return await _graceful_timeout(
-                    _reconcile_live_state_for_trader(trader, provider_pass=provider_pass),
+                    _reconcile_live_state_for_trader(
+                        trader,
+                        provider_pass=provider_pass,
+                        control_settings=control_settings,
+                    ),
                     label=f"reconcile:{trader_id}",
                     timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
                 )
