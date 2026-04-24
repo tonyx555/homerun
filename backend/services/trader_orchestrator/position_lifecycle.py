@@ -1811,6 +1811,26 @@ def _position_close_wallet_trade_id(position_close: dict[str, Any]) -> str:
     return str(position_close.get("wallet_trade_id") or "").strip()
 
 
+def _position_close_has_terminal_external_authority(position_close: dict[str, Any]) -> bool:
+    price_source = str(position_close.get("price_source") or "").strip().lower()
+    close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
+    if price_source in {"wallet_activity", "wallet_trade", "wallet_flat_override"}:
+        return True
+    if close_trigger in {"wallet_activity", "wallet_summary_recovery", "external_wallet_flatten"}:
+        return True
+    for key in (
+        "wallet_activity_transaction_hash",
+        "wallet_trade_id",
+        "wallet_activity_id",
+        "wallet_trade_timestamp",
+        "wallet_activity_timestamp",
+        "wallet_closed_position_timestamp",
+    ):
+        if str(position_close.get(key) or "").strip():
+            return True
+    return False
+
+
 def _extract_wallet_trade_token_id(trade: dict[str, Any]) -> str:
     return str(
         trade.get("asset_id") or trade.get("asset") or trade.get("token_id") or trade.get("tokenId") or ""
@@ -4011,6 +4031,8 @@ async def reconcile_live_positions(
                     continue
         pending_exit = payload.get("pending_live_exit")
         if not isinstance(pending_exit, dict):
+            continue
+        if isinstance(position_close, dict) and _position_close_has_terminal_external_authority(position_close):
             continue
         pending_status = str(pending_exit.get("status") or "").strip().lower()
         if pending_status != "filled":

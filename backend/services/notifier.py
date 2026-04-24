@@ -69,6 +69,7 @@ ISSUE_ORDER_STATUSES = {"failed", "rejected", "cancelled", "error"}
 ACTIVE_POSITION_STATUS = "open"
 AI_CHAT_MAX_HISTORY = 20
 AI_CHAT_MAX_TOKENS = 1024
+REALIZED_LOOKBACK_PADDING_DAYS = 7
 
 
 def _escape_html(text: Any) -> str:
@@ -97,6 +98,60 @@ def _to_utc(value: Optional[datetime]) -> Optional[datetime]:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _parse_notifier_timestamp(value: Any) -> Optional[datetime]:
+    if isinstance(value, datetime):
+        return _to_utc(value)
+    if value is None:
+        return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return _to_utc(parsed)
+
+
+def _position_close_payload(order: TraderOrder) -> dict[str, Any]:
+    payload = order.payload_json if isinstance(order.payload_json, dict) else {}
+    position_close = payload.get("position_close") if isinstance(payload, dict) else {}
+    return position_close if isinstance(position_close, dict) else {}
+
+
+def _pending_exit_payload(order: TraderOrder) -> dict[str, Any]:
+    payload = order.payload_json if isinstance(order.payload_json, dict) else {}
+    pending_exit = payload.get("pending_live_exit") if isinstance(payload, dict) else {}
+    return pending_exit if isinstance(pending_exit, dict) else {}
+
+
+def _payload_float(value: Any) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _realized_pnl_for_order(order: TraderOrder) -> float:
+    actual_value = _payload_float(getattr(order, "actual_profit", None))
+    position_close = _position_close_payload(order)
+    payload_value = None
+    for key in ("realized_pnl", "realized_pnl_usd", "actual_profit", "pnl"):
+        payload_value = _payload_float(position_close.get(key))
+        if payload_value is not None:
+            break
+
+    if actual_value is None:
+        return float(payload_value or 0.0)
+    if abs(actual_value) < 0.005 and payload_value is not None and abs(payload_value) >= 0.005:
+        return payload_value
+    return actual_value
 
 
 def _format_money(value: float) -> str:
@@ -370,22 +425,62 @@ class TelegramNotifier:
     @staticmethod
     def _close_alert_marker_for_order(order: TraderOrder) -> str:
         status = str(getattr(order, "status", "") or "").strip().lower() or "closed"
-        payload = order.payload_json if isinstance(order.payload_json, dict) else {}
-        position_close = payload.get("position_close") if isinstance(payload, dict) else {}
-        position_close = position_close if isinstance(position_close, dict) else {}
+        position_close = _position_close_payload(order)
+        pending_exit = _pending_exit_payload(order)
 
-        closed_marker = str(position_close.get("closed_at") or "").strip()
+        close_identity_parts: list[str] = []
+        for key in (
+            "wallet_activity_transaction_hash",
+            "wallet_trade_id",
+            "wallet_activity_id",
+            "wallet_trade_timestamp",
+            "wallet_activity_timestamp",
+            "wallet_closed_position_timestamp",
+        ):
+            value = str(position_close.get(key) or "").strip()
+            if value:
+                close_identity_parts.append(f"{key}:{value}")
+        if not close_identity_parts:
+            for key in ("provider_clob_order_id", "exit_order_id", "filled_at", "last_snapshot_at"):
+                value = str(pending_exit.get(key) or "").strip()
+                if value:
+                    close_identity_parts.append(f"{key}:{value}")
+
+        closed_marker = "|".join(close_identity_parts)
         if not closed_marker:
-            wallet_closed_timestamp = position_close.get("wallet_closed_position_timestamp")
-            if wallet_closed_timestamp not in {None, ""}:
-                closed_marker = str(wallet_closed_timestamp).strip()
-        if not closed_marker and getattr(order, "updated_at", None) is not None:
-            closed_marker = _to_utc(order.updated_at).isoformat()
+            closed_marker = str(position_close.get("closed_at") or "").strip()
+        if not closed_marker and getattr(order, "executed_at", None) is not None:
+            closed_marker = _to_utc(order.executed_at).isoformat()
         if not closed_marker and getattr(order, "created_at", None) is not None:
             closed_marker = _to_utc(order.created_at).isoformat()
         if not closed_marker:
             closed_marker = str(getattr(order, "id", "") or "").strip()
         return f"{status}|{closed_marker}"
+
+    @staticmethod
+    def _realized_at_for_order(order: TraderOrder) -> datetime | None:
+        position_close = _position_close_payload(order)
+        for key in (
+            "wallet_activity_timestamp",
+            "wallet_trade_timestamp",
+            "wallet_closed_position_timestamp",
+            "closed_at",
+        ):
+            parsed = _parse_notifier_timestamp(position_close.get(key))
+            if parsed is not None:
+                return parsed
+
+        pending_exit = _pending_exit_payload(order)
+        for key in ("filled_at", "resolved_at", "last_snapshot_at"):
+            parsed = _parse_notifier_timestamp(pending_exit.get(key))
+            if parsed is not None:
+                return parsed
+
+        if getattr(order, "executed_at", None) is not None:
+            return _to_utc(order.executed_at)
+        if getattr(order, "created_at", None) is not None:
+            return _to_utc(order.created_at)
+        return None
 
     @staticmethod
     def _normalize_close_alert_markers(value: Any) -> dict[str, str]:
@@ -415,7 +510,7 @@ class TelegramNotifier:
         row.close_alert_markers_json = dict(self._close_alert_markers)
         await session.commit()
 
-    async def _seed_close_alert_markers(self, session) -> None:
+    async def _seed_close_alert_markers(self, session, *, preserve_existing: bool = False) -> None:
         rows = (
             await session.execute(
                 select(TraderOrder)
@@ -425,9 +520,11 @@ class TelegramNotifier:
             )
         ).scalars().all()
 
-        seeded_markers: dict[str, str] = {}
+        seeded_markers: dict[str, str] = dict(self._close_alert_markers) if preserve_existing else {}
         for row in reversed(rows):
-            seeded_markers[str(row.id)] = self._close_alert_marker_for_order(row)
+            order_id = str(row.id)
+            seeded_markers.pop(order_id, None)
+            seeded_markers[order_id] = self._close_alert_marker_for_order(row)
         self._close_alert_markers = seeded_markers
         self._trim_close_alert_markers()
 
@@ -481,11 +578,8 @@ class TelegramNotifier:
                     self._close_alert_markers = self._normalize_close_alert_markers(
                         runtime_state.close_alert_markers_json
                     )
-                if not self._close_alert_markers:
-                    await self._seed_close_alert_markers(session)
-                    await self._persist_runtime_state(session)
-                else:
-                    self._trim_close_alert_markers()
+                await self._seed_close_alert_markers(session, preserve_existing=bool(self._close_alert_markers))
+                await self._persist_runtime_state(session)
         except Exception as exc:
             logger.debug("Notifier cursor priming skipped", exc_info=exc)
 
@@ -921,7 +1015,7 @@ class TelegramNotifier:
             )
             status = str(row.status or "closed").lower()
             status_label = status.replace("_", " ").upper()
-            pnl = float(row.actual_profit or 0.0)
+            pnl = _realized_pnl_for_order(row)
             market = str(row.market_question or row.market_id or "unknown market")
             payload = row.payload_json if isinstance(row.payload_json, dict) else {}
             position_close = payload.get("position_close") if isinstance(payload, dict) else {}
@@ -935,7 +1029,15 @@ class TelegramNotifier:
                 realized_lost += abs(pnl)
 
             if index <= display_limit:
-                status_short = "WIN" if "win" in status else "LOSS" if "loss" in status else _truncate_text(status_label, 10)
+                status_short = (
+                    "FLAT"
+                    if abs(pnl) < 0.005
+                    else "WIN"
+                    if "win" in status
+                    else "LOSS"
+                    if "loss" in status
+                    else _truncate_text(status_label, 10)
+                )
                 close_lines.append(
                     f"{_escape_html(index)}) {_escape_html(_truncate_text(trader_name, 13))} · "
                     f"{_escape_html(status_short)} · {_escape_html(_format_signed_money(pnl))}"
@@ -1054,27 +1156,19 @@ class TelegramNotifier:
         order_counts = {str(row[0] or "unknown").lower(): int(row[1] or 0) for row in order_rows}
         total_notional = float(sum(float(row[2] or 0.0) for row in order_rows))
 
-        realized_rows = (
-            await session.execute(
-                select(
-                    TraderOrder.status,
-                    func.count(TraderOrder.id),
-                    func.coalesce(func.sum(TraderOrder.actual_profit), 0.0),
-                )
-                .where(
-                    TraderOrder.updated_at >= start_naive,
-                    TraderOrder.updated_at < end_naive,
-                    TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
-                )
-                .group_by(TraderOrder.status)
-            )
-        ).all()
-
+        realized_orders = await self._load_realized_orders_for_window(session=session, start=start, end=end)
+        realized_counts: dict[str, int] = defaultdict(int)
+        realized_pnl: dict[str, float] = defaultdict(float)
         realized_won = 0.0
         realized_lost = 0.0
-        for row in realized_rows:
-            pnl = float(row[2] or 0.0)
-            if pnl >= 0:
+        for row in realized_orders:
+            status = str(getattr(row, "status", None) or "unknown").lower()
+            pnl = _realized_pnl_for_order(row)
+            realized_counts[status] += 1
+            realized_pnl[status] += pnl
+            if abs(pnl) < 0.005:
+                pass
+            elif pnl > 0:
                 realized_won += pnl
             else:
                 realized_lost += abs(pnl)
@@ -1106,8 +1200,8 @@ class TelegramNotifier:
             for row in sorted(order_rows, key=lambda item: (-int(item[1] or 0), str(item[0] or "unknown")))
         ]
         realized_parts = [
-            f"{str(row[0] or 'unknown').upper()} {int(row[1] or 0)}/{_format_signed_money(float(row[2] or 0.0))}"
-            for row in sorted(realized_rows, key=lambda item: (-int(item[1] or 0), str(item[0] or "unknown")))
+            f"{status.upper()} {realized_counts[status]}/{_format_signed_money(realized_pnl[status])}"
+            for status in sorted(realized_counts.keys(), key=lambda key: (-realized_counts[key], key))
         ]
 
         lines = [
@@ -1126,7 +1220,7 @@ class TelegramNotifier:
             lines.append(f"{_bold('Decisions:')} {_escape_html(_compact_join(decision_parts, max_items=4))}")
         if order_counts:
             lines.append(f"{_bold('Orders:')} {_escape_html(_compact_join(order_parts, max_items=4))}")
-        if realized_rows:
+        if realized_counts:
             lines.append(f"{_bold('Realized:')} {_escape_html(_compact_join(realized_parts, max_items=4))}")
 
         if self._summary_per_trader:
@@ -1140,6 +1234,46 @@ class TelegramNotifier:
                 lines.extend(trader_lines)
 
         return "\n".join(lines)
+
+    async def _load_realized_orders_for_window(
+        self,
+        *,
+        session,
+        start: datetime,
+        end: datetime,
+    ) -> list[TraderOrder]:
+        start_utc = _to_utc(start)
+        end_utc = _to_utc(end)
+        if start_utc is None or end_utc is None:
+            return []
+        query_start = (start_utc - timedelta(days=REALIZED_LOOKBACK_PADDING_DAYS)).replace(tzinfo=None)
+        end_naive = end_utc.replace(tzinfo=None)
+        rows = (
+            await session.execute(
+                select(TraderOrder).where(
+                    TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
+                    or_(
+                        TraderOrder.updated_at >= query_start,
+                        TraderOrder.executed_at >= query_start,
+                        TraderOrder.created_at >= query_start,
+                    ),
+                    or_(
+                        TraderOrder.updated_at < end_naive,
+                        TraderOrder.executed_at < end_naive,
+                        TraderOrder.created_at < end_naive,
+                    ),
+                )
+            )
+        ).scalars().all()
+
+        realized_orders: list[TraderOrder] = []
+        for row in rows:
+            realized_at = self._realized_at_for_order(row)
+            if realized_at is None:
+                continue
+            if start_utc <= realized_at < end_utc:
+                realized_orders.append(row)
+        return realized_orders
 
     async def _build_per_trader_summary_lines(
         self,
@@ -1651,27 +1785,21 @@ class TelegramNotifier:
         async with AsyncSessionLocal() as session:
             control = await read_orchestrator_control(session)
             snapshot = await read_orchestrator_snapshot(session)
-            cutoff = (utcnow() - timedelta(hours=24)).replace(tzinfo=None)
-            realized_rows = (
-                await session.execute(
-                    select(
-                        TraderOrder.status,
-                        func.coalesce(func.sum(TraderOrder.actual_profit), 0.0),
-                    )
-                    .where(
-                        TraderOrder.updated_at >= cutoff,
-                        TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
-                    )
-                    .group_by(TraderOrder.status)
-                )
-            ).all()
+            status_now = utcnow()
+            realized_orders = await self._load_realized_orders_for_window(
+                session=session,
+                start=status_now - timedelta(hours=24),
+                end=status_now,
+            )
             exposure = await get_gross_exposure(session)
 
         realized_won = 0.0
         realized_lost = 0.0
-        for row in realized_rows:
-            pnl = float(row[1] or 0.0)
-            if pnl >= 0:
+        for row in realized_orders:
+            pnl = _realized_pnl_for_order(row)
+            if abs(pnl) < 0.005:
+                pass
+            elif pnl > 0:
                 realized_won += pnl
             else:
                 realized_lost += abs(pnl)

@@ -654,6 +654,95 @@ async def test_reconcile_live_does_not_reopen_unfilled_failed_row_from_same_toke
 
 
 @pytest.mark.asyncio
+async def test_reconcile_live_positions_does_not_reopen_verified_wallet_activity_close_for_partial_exit(
+    tmp_path, monkeypatch
+):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    try:
+        async with session_factory() as session:
+            await _seed_order(
+                session,
+                mode="live",
+                status="closed_loss",
+                payload_json={
+                    "token_id": "token-1",
+                    "provider_reconciliation": {
+                        "filled_size": 10.0,
+                        "average_fill_price": 0.4,
+                        "filled_notional_usd": 4.0,
+                    },
+                    "pending_live_exit": {
+                        "status": "filled",
+                        "exit_size": 10.0,
+                        "filled_size": 2.0,
+                        "fill_ratio": 0.2,
+                        "close_trigger": "manual_mark_to_market",
+                        "provider_clob_order_id": "0xexit",
+                    },
+                    "position_close": {
+                        "close_price": 0.35,
+                        "price_source": "wallet_activity",
+                        "close_trigger": "wallet_activity",
+                        "realized_pnl": -0.5,
+                        "closed_at": "2026-03-02T13:00:00Z",
+                        "wallet_activity_timestamp": "2026-03-02T12:58:00Z",
+                        "wallet_activity_transaction_hash": "0xwalletclose",
+                    },
+                },
+            )
+            order = await session.get(TraderOrder, "order-1")
+            assert order is not None
+            order.actual_profit = -0.5
+            await session.commit()
+
+            monkeypatch.setattr(position_lifecycle, "_wallet_positions_last_refresh_succeeded", True)
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_positions_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_sell_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_closed_positions_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_buy_trades_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(
+                position_lifecycle,
+                "_load_execution_wallet_recent_close_activity_by_token",
+                AsyncMock(return_value={}),
+            )
+            monkeypatch.setattr(position_lifecycle.polymarket_client, "get_midpoint", AsyncMock(return_value=None))
+
+            result = await position_lifecycle.reconcile_live_positions(
+                session,
+                trader_id="trader-1",
+                trader_params={},
+                dry_run=False,
+            )
+            refreshed = await session.get(TraderOrder, "order-1")
+
+            assert result["state_updates"] == 0
+            assert refreshed is not None
+            assert refreshed.status == "closed_loss"
+            assert refreshed.actual_profit == pytest.approx(-0.5)
+            payload = dict(refreshed.payload_json or {})
+            assert payload["position_close"]["wallet_activity_transaction_hash"] == "0xwalletclose"
+            assert "reopened_at" not in payload["pending_live_exit"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_reconcile_live_does_not_reopen_unfilled_failed_row_when_provider_cancelled_zero_fill(
     tmp_path, monkeypatch
 ):

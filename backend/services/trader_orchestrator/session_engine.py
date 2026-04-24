@@ -62,6 +62,9 @@ _MIN_BUNDLE_EXECUTION_SHARES = 5.0
 _PRE_SUBMIT_ORDER_STATUS = "placing"
 _STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS = 45.0
 _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS = 900.0
+_STALE_SESSION_PROVIDER_IO_SKIP_SECONDS = 3600.0
+_PROVIDER_SNAPSHOT_TIMEOUT_SECONDS = 5.0
+_PROVIDER_CANCEL_TIMEOUT_SECONDS = 5.0
 
 
 def _iso_utc(value: datetime) -> str:
@@ -2737,14 +2740,21 @@ class ExecutionSessionEngine:
                         session_id=row.id,
                         reason=timeout_reason,
                         terminal_status="failed",
+                        skip_provider_io=placing_age_seconds > _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS,
                     )
                     cancelled += 1
                     continue
             if row.expires_at is not None and now > row.expires_at:
+                expires_at = row.expires_at
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                else:
+                    expires_at = expires_at.astimezone(timezone.utc)
                 await self.cancel_session(
                     session_id=row.id,
                     reason="Session timed out before all legs completed.",
                     terminal_status="expired",
+                    skip_provider_io=(now - expires_at).total_seconds() > _STALE_SESSION_PROVIDER_IO_SKIP_SECONDS,
                 )
                 expired += 1
                 continue
@@ -2822,6 +2832,7 @@ class ExecutionSessionEngine:
         session_id: str,
         reason: str,
         terminal_status: str = "cancelled",
+        skip_provider_io: bool = False,
     ) -> bool:
         detail = await get_execution_session_detail(self.db, session_id)
         if detail is None:
@@ -2845,13 +2856,14 @@ class ExecutionSessionEngine:
             if clob_id:
                 clob_ids_to_fetch.add(clob_id)
         provider_snapshots: dict[str, dict[str, Any]] = {}
-        if clob_ids_to_fetch:
+        if clob_ids_to_fetch and not skip_provider_io:
             async with release_conn(self.db):
                 try:
-                    provider_snapshots = await live_execution_service.get_order_snapshots_by_clob_ids(
-                        sorted(clob_ids_to_fetch)
+                    provider_snapshots = await asyncio.wait_for(
+                        live_execution_service.get_order_snapshots_by_clob_ids(sorted(clob_ids_to_fetch)),
+                        timeout=_PROVIDER_SNAPSHOT_TIMEOUT_SECONDS,
                     )
-                except Exception:
+                except (asyncio.TimeoutError, Exception):
                     provider_snapshots = {}
 
         trader_orders_by_id: dict[str, TraderOrder] = {}
@@ -2899,12 +2911,19 @@ class ExecutionSessionEngine:
             if provider_order_id and provider_order_id not in cancel_targets:
                 cancel_targets.append(provider_order_id)
             cancel_success = False
-            for target in cancel_targets:
-                async with release_conn(self.db):
-                    cancel_success = await cancel_live_provider_order(target)
-                if cancel_success:
-                    cancel_success = True
-                    break
+            if not skip_provider_io:
+                for target in cancel_targets:
+                    async with release_conn(self.db):
+                        try:
+                            cancel_success = await asyncio.wait_for(
+                                cancel_live_provider_order(target),
+                                timeout=_PROVIDER_CANCEL_TIMEOUT_SECONDS,
+                            )
+                        except asyncio.TimeoutError:
+                            cancel_success = False
+                    if cancel_success:
+                        cancel_success = True
+                        break
 
             if trader_order is None:
                 continue

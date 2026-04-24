@@ -27,6 +27,9 @@ class _FakeResult:
     def all(self):
         return list(self._rows)
 
+    def scalars(self):
+        return self
+
     def scalar(self):
         return self._scalar_value
 
@@ -154,13 +157,241 @@ async def test_position_close_alert_skips_replayed_close_marker(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_position_close_alert_uses_wallet_activity_identity_not_updated_closed_at(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _persist(_session) -> None:
+        return None
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha"}
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+
+    base_position_close = {
+        "close_trigger": "wallet_activity",
+        "price_source": "wallet_activity",
+        "wallet_activity_transaction_hash": "0xclose",
+        "wallet_activity_timestamp": "2026-03-02T12:00:00Z",
+    }
+    notifier._close_alert_markers = {
+        "order-1": TelegramNotifier._close_alert_marker_for_order(
+            SimpleNamespace(
+                id="order-1",
+                status="closed_loss",
+                payload_json={"position_close": {**base_position_close, "closed_at": "2026-03-02T12:05:00Z"}},
+                updated_at=datetime(2026, 3, 2, 12, 5, tzinfo=timezone.utc),
+                executed_at=datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
+                created_at=datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc),
+            )
+        )
+    }
+    order = SimpleNamespace(
+        id="order-1",
+        trader_id="trader-1",
+        status="closed_loss",
+        actual_profit=-0.74,
+        market_question="Will a repeated close stay quiet?",
+        market_id="market-1",
+        payload_json={"position_close": {**base_position_close, "closed_at": "2026-03-02T13:05:00Z"}},
+        updated_at=datetime(2026, 3, 2, 13, 5, tzinfo=timezone.utc),
+        executed_at=datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc),
+        mode="live",
+    )
+
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=[order],
+        mode="live",
+    )
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_seed_close_alert_markers_rekeys_old_persisted_marker():
+    notifier = TelegramNotifier()
+    notifier._close_alert_markers = {"order-1": "closed_loss|2026-03-02T12:05:00Z"}
+    session = _FakeSession(
+        [
+            _FakeResult(
+                rows=[
+                    SimpleNamespace(
+                        id="order-1",
+                        status="closed_loss",
+                        payload_json={
+                            "position_close": {
+                                "close_trigger": "wallet_activity",
+                                "wallet_activity_transaction_hash": "0xclose",
+                                "wallet_activity_timestamp": "2026-03-02T12:00:00Z",
+                                "closed_at": "2026-03-02T13:05:00Z",
+                            }
+                        },
+                        updated_at=datetime(2026, 3, 2, 13, 5, tzinfo=timezone.utc),
+                        executed_at=datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
+                        created_at=datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc),
+                    )
+                ]
+            )
+        ]
+    )
+
+    await notifier._seed_close_alert_markers(session, preserve_existing=True)
+
+    assert notifier._close_alert_markers["order-1"] == (
+        "closed_loss|wallet_activity_transaction_hash:0xclose|"
+        "wallet_activity_timestamp:2026-03-02T12:00:00Z"
+    )
+
+
+@pytest.mark.asyncio
+async def test_position_close_alert_labels_zero_pnl_as_flat(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _persist(_session) -> None:
+        return None
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha"}
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+
+    now = datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc)
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=[
+            SimpleNamespace(
+                id="order-flat",
+                trader_id="trader-1",
+                status="closed_win",
+                actual_profit=0.0,
+                market_question="Will flat closes be labelled flat?",
+                market_id="market-flat",
+                payload_json={"position_close": {"close_trigger": "wallet_activity", "closed_at": "2026-03-02T12:00:00Z"}},
+                updated_at=now,
+                created_at=now,
+                mode="live",
+            )
+        ],
+        mode="live",
+    )
+
+    plain = _plain_text(captured[0])
+    assert "FLAT" in plain
+    assert "+$0.00" in plain
+    assert "Won: $0.00" in plain
+
+
+@pytest.mark.asyncio
+async def test_position_close_alert_uses_payload_pnl_when_actual_profit_is_stale_zero(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _persist(_session) -> None:
+        return None
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha"}
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+
+    now = datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc)
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=[
+            SimpleNamespace(
+                id="order-payload-pnl",
+                trader_id="trader-1",
+                status="closed_loss",
+                actual_profit=0.0,
+                market_question="Will payload PnL correct stale zero actual profit?",
+                market_id="market-payload-pnl",
+                payload_json={
+                    "position_close": {
+                        "close_trigger": "wallet_activity",
+                        "closed_at": "2026-03-02T12:00:00Z",
+                        "realized_pnl": -1.48,
+                    }
+                },
+                updated_at=now,
+                created_at=now,
+                mode="live",
+            )
+        ],
+        mode="live",
+    )
+
+    plain = _plain_text(captured[0])
+    assert "LOSS" in plain
+    assert "-$1.48" in plain
+    assert "Lost: $1.48" in plain
+
+
+@pytest.mark.asyncio
 async def test_timeline_summary_has_compact_realized_won_lost_net():
     notifier = TelegramNotifier()
     session = _FakeSession(
         [
             _FakeResult(rows=[("selected", 6), ("blocked", 2)]),
             _FakeResult(rows=[("submitted", 4, 120.0), ("resolved_win", 2, 80.0)]),
-            _FakeResult(rows=[("resolved_win", 2, 35.0), ("resolved_loss", 1, -12.5)]),
+            _FakeResult(
+                rows=[
+                    SimpleNamespace(
+                        id="win-1",
+                        status="resolved_win",
+                        actual_profit=20.0,
+                        payload_json={"position_close": {"closed_at": "2026-03-01T06:00:00Z"}},
+                        updated_at=datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc),
+                        executed_at=datetime(2026, 3, 1, 5, 0, tzinfo=timezone.utc),
+                        created_at=datetime(2026, 3, 1, 4, 0, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id="win-2",
+                        status="resolved_win",
+                        actual_profit=15.0,
+                        payload_json={"position_close": {"closed_at": "2026-03-01T08:00:00Z"}},
+                        updated_at=datetime(2026, 3, 2, 1, 0, tzinfo=timezone.utc),
+                        executed_at=datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc),
+                        created_at=datetime(2026, 3, 1, 6, 0, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id="loss-1",
+                        status="resolved_loss",
+                        actual_profit=-12.5,
+                        payload_json={"position_close": {"closed_at": "2026-03-01T09:00:00Z"}},
+                        updated_at=datetime(2026, 3, 1, 9, 5, tzinfo=timezone.utc),
+                        executed_at=datetime(2026, 3, 1, 8, 0, tzinfo=timezone.utc),
+                        created_at=datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc),
+                    ),
+                    SimpleNamespace(
+                        id="stale-reupdated",
+                        status="resolved_loss",
+                        actual_profit=-99.0,
+                        payload_json={"position_close": {"wallet_activity_timestamp": "2026-02-27T09:00:00Z"}},
+                        updated_at=datetime(2026, 3, 1, 10, 0, tzinfo=timezone.utc),
+                        executed_at=datetime(2026, 2, 27, 8, 0, tzinfo=timezone.utc),
+                        created_at=datetime(2026, 2, 27, 7, 0, tzinfo=timezone.utc),
+                    ),
+                ]
+            ),
             _FakeResult(scalar_value=3),
         ]
     )
@@ -183,6 +414,7 @@ async def test_timeline_summary_has_compact_realized_won_lost_net():
     assert "Decisions:" in plain
     assert "Orders:" in plain
     assert "Realized:" in plain
+    assert "$99.00" not in plain
 
 
 @pytest.mark.asyncio
@@ -193,7 +425,28 @@ async def test_status_message_has_daily_and_realized_usd_breakdown(monkeypatch):
         async def __aenter__(self):
             return _FakeSession(
                 [
-                    _FakeResult(rows=[("resolved_win", 20.0), ("resolved_loss", -8.5)]),
+                    _FakeResult(
+                        rows=[
+                            SimpleNamespace(
+                                id="status-win",
+                                status="resolved_win",
+                                actual_profit=20.0,
+                                payload_json={"position_close": {"closed_at": "2026-03-02T10:00:00Z"}},
+                                updated_at=datetime(2026, 3, 2, 10, 1, tzinfo=timezone.utc),
+                                executed_at=datetime(2026, 3, 2, 9, 0, tzinfo=timezone.utc),
+                                created_at=datetime(2026, 3, 2, 8, 0, tzinfo=timezone.utc),
+                            ),
+                            SimpleNamespace(
+                                id="status-loss",
+                                status="resolved_loss",
+                                actual_profit=-8.5,
+                                payload_json={"position_close": {"closed_at": "2026-03-02T10:30:00Z"}},
+                                updated_at=datetime(2026, 3, 2, 10, 31, tzinfo=timezone.utc),
+                                executed_at=datetime(2026, 3, 2, 9, 30, tzinfo=timezone.utc),
+                                created_at=datetime(2026, 3, 2, 8, 30, tzinfo=timezone.utc),
+                            ),
+                        ]
+                    ),
                 ]
             )
 
@@ -234,6 +487,11 @@ async def test_status_message_has_daily_and_realized_usd_breakdown(monkeypatch):
         notifier_module,
         "get_gross_exposure",
         AsyncMock(return_value=500.0),
+    )
+    monkeypatch.setattr(
+        notifier_module,
+        "utcnow",
+        lambda: datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
     )
 
     message = await notifier._telegram_status_message()
