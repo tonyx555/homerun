@@ -3482,7 +3482,6 @@ async def reconcile_paper_positions(
     skipped_reasons: dict[str, int] = {}
     details: list[dict[str, Any]] = []
     state_updates = 0
-    extra_touched_rows: list[TraderOrder] = []
     reverse_signal_ids_by_source: dict[str, list[str]] = {}
 
     for row in candidates:
