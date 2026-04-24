@@ -128,6 +128,7 @@ class LiveRiskClampsSettingsRequest(BaseModel):
     max_open_orders_cap: int | None = Field(default=None, ge=1, le=1000)
     max_open_positions_cap: int | None = Field(default=None, ge=1, le=1000)
     max_trade_notional_usd_cap: float | None = Field(default=None, ge=1.0, le=1_000_000.0)
+    max_per_market_exposure_usd_cap: float | None = Field(default=None, ge=1.0, le=1_000_000.0)
     max_orders_per_cycle_cap: int | None = Field(default=None, ge=1, le=1000)
     enforce_halt_on_consecutive_losses: bool | None = None
 

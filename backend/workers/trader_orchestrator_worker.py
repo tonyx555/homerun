@@ -77,6 +77,7 @@ from services.trader_orchestrator_state import (
     DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
     DEFAULT_LIVE_MARKET_CONTEXT,
     DEFAULT_LIVE_PROVIDER_HEALTH,
+    DEFAULT_LIVE_RISK_CLAMPS,
     DEFAULT_PENDING_LIVE_EXIT_GUARD,
     ORCHESTRATOR_SNAPSHOT_ID,
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
@@ -3303,12 +3304,12 @@ def _apply_live_risk_clamps(
     effective_risk_limits: dict[str, Any],
     live_risk_clamps: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Apply global live-risk clamps to trader effective limits.
-
-    Only clamps that are **explicitly present** in *live_risk_clamps* are
-    applied.  Missing keys mean "no clamp for this field".
-    """
+    """Apply production live-risk clamps to trader effective limits."""
     changes: dict[str, dict[str, Any]] = {}
+    live_risk_clamps = {
+        **DEFAULT_LIVE_RISK_CLAMPS,
+        **(live_risk_clamps if isinstance(live_risk_clamps, dict) else {}),
+    }
 
     if live_risk_clamps.get("enforce_allow_averaging_off"):
         configured_allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
@@ -3358,6 +3359,14 @@ def _apply_live_risk_clamps(
         if clamped != float(configured):
             changes["max_trade_notional_usd"] = {"configured": float(configured), "effective": clamped}
         effective_risk_limits["max_trade_notional_usd"] = clamped
+
+    if "max_per_market_exposure_usd_cap" in live_risk_clamps:
+        configured = max(1.0, safe_float(effective_risk_limits.get("max_per_market_exposure_usd"), 350.0))
+        cap = max(1.0, safe_float(live_risk_clamps["max_per_market_exposure_usd_cap"], 1_000_000.0))
+        clamped = min(float(configured), float(cap))
+        if clamped != float(configured):
+            changes["max_per_market_exposure_usd"] = {"configured": float(configured), "effective": clamped}
+        effective_risk_limits["max_per_market_exposure_usd"] = clamped
 
     if "max_orders_per_cycle_cap" in live_risk_clamps:
         configured = max(1, safe_int(effective_risk_limits.get("max_orders_per_cycle"), 50))
@@ -5064,7 +5073,7 @@ async def _run_trader_once(
             signals = scoped_signals
             occupied_signal_ids: set[str] = set()
             cooldown_signal_ids: set[str] = set()
-            if run_mode == "live" and not allow_averaging and occupied_market_ids:
+            if run_mode == "live" and occupied_market_ids:
                 occupied_signal_ids = {
                     str(signal.id)
                     for signal in signals
@@ -6016,7 +6025,7 @@ async def _run_trader_once(
                     _pre_gate_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
                     _pre_gate_occupied = bool(
                         _pre_gate_market_id
-                        and not allow_averaging
+                        and (run_mode == "live" or not allow_averaging)
                         and (
                             _pre_gate_market_id in occupied_market_ids
                             or _pre_gate_market_id in intra_cycle_seen_market_ids
@@ -6335,6 +6344,7 @@ async def _run_trader_once(
                             invoke_hooks=True,
                             strategy_params=strategy_params,
                             global_runtime=global_runtime_settings,
+                            execution_mode=run_mode,
                         )
                     final_decision = gate_result["final_decision"]
                     final_reason = gate_result["final_reason"]
@@ -6388,7 +6398,7 @@ async def _run_trader_once(
                         # Final authoritative check against the database before
                         # spending real money.  The hot-state pre-gate is fast but
                         # can miss entries during reseed or after wallet_absent_close.
-                        if _pre_gate_market_id and not allow_averaging and run_mode == "live":
+                        if _pre_gate_market_id and run_mode == "live":
                             active_order_statuses = (
                                 "pending",
                                 "placing",
@@ -6442,7 +6452,8 @@ async def _run_trader_once(
                                         "payload": {
                                             "market_id": _pre_gate_market_id,
                                             "occupied_market_ids": sorted(_db_occupied_market_ids),
-                                            "allow_averaging": False,
+                                            "allow_averaging": allow_averaging,
+                                            "live_single_market_guard": True,
                                         },
                                     }
                                 )

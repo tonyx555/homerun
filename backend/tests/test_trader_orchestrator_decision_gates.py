@@ -22,8 +22,19 @@ def _decision(size_usd: float = 50.0):
     )
 
 
-def _runtime_signal():
-    return SimpleNamespace(market_id="market-1")
+def _runtime_signal(
+    *,
+    market_id: str = "market-1",
+    entry_price: float | None = None,
+    direction: str = "buy_yes",
+    payload_json: dict | None = None,
+):
+    return SimpleNamespace(
+        market_id=market_id,
+        entry_price=entry_price,
+        direction=direction,
+        payload_json=payload_json or {},
+    )
 
 
 def _risk_evaluator(size_for_eval: float):
@@ -301,6 +312,195 @@ def test_min_exit_notional_guard_arms_stop_loss_when_inside_close_window(monkeyp
     assert min_exit_check["passed"] is True
     assert min_exit_check["payload"]["stop_loss_armed"] is True
     assert min_exit_check["payload"]["conservative_exit_source"] == "stop_loss_pct"
+
+
+def test_stop_loss_settlement_upside_guard_blocks_bad_live_risk_reward(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(entry_price=0.90),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"stop_loss_pct": 20.0, "enforce_min_exit_notional": False},
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert "Stop-loss economics guard blocked" in result["final_reason"]
+    stop_loss_check = next(
+        check for check in result["checks_payload"] if check["check_key"] == "stop_loss_settlement_upside_guard"
+    )
+    assert stop_loss_check["passed"] is False
+    assert round(stop_loss_check["payload"]["settlement_upside"], 2) == 0.10
+
+
+def test_stop_loss_settlement_upside_guard_allows_tight_live_stop(monkeypatch):
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(entry_price=0.90),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"stop_loss_pct": 5.0, "enforce_min_exit_notional": False},
+    )
+
+    assert result["final_decision"] == "selected"
+    stop_loss_check = next(
+        check for check in result["checks_payload"] if check["check_key"] == "stop_loss_settlement_upside_guard"
+    )
+    assert stop_loss_check["passed"] is True
+    assert round(stop_loss_check["payload"]["stop_loss_downside"], 3) == 0.045
+
+
+def test_live_stacking_guard_blocks_occupied_market_even_when_averaging_allowed():
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(market_id="occupied-market"),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids={"occupied-market"},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"enforce_min_exit_notional": False},
+        execution_mode="live",
+    )
+
+    assert result["final_decision"] == "blocked"
+    assert result["final_reason"] == "Live exposure guard: market already occupied"
+    stacking_check = next(check for check in result["checks_payload"] if check["check_key"] == "stacking_guard")
+    assert stacking_check["payload"]["allow_averaging"] is True
+    assert stacking_check["payload"]["live_single_market_guard"] is True
+
+
+def test_non_live_stacking_guard_allows_occupied_market_when_averaging_allowed():
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(market_id="occupied-market"),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids={"occupied-market"},
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"enforce_min_exit_notional": False},
+        execution_mode="paper",
+    )
+
+    assert result["final_decision"] == "selected"
+    assert any(
+        gate["gate"] == "stacking_guard" and gate["status"] == "skipped"
+        for gate in result["platform_gates"]
+    )
+
+
+def test_execution_plan_token_conflict_guard_blocks_duplicate_buy_legs():
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(
+            payload_json={
+                "execution_plan": {
+                    "plan_id": "plan-1",
+                    "legs": [
+                        {"leg_id": "a", "market_id": "market-1", "token_id": "token-1", "side": "buy"},
+                        {"leg_id": "b", "market_id": "market-1", "token_id": "token-1", "side": "buy"},
+                    ],
+                }
+            }
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"enforce_min_exit_notional": False},
+    )
+
+    assert result["final_decision"] == "blocked"
+    conflict_check = next(
+        check for check in result["checks_payload"] if check["check_key"] == "execution_plan_token_conflict_guard"
+    )
+    assert conflict_check["payload"]["violation"]["reason"] == "duplicate_buy_legs"
+
+
+def test_execution_plan_token_conflict_guard_blocks_self_crossing_quote():
+    result = apply_platform_decision_gates(
+        decision_obj=_decision(10.0),
+        runtime_signal=_runtime_signal(
+            payload_json={
+                "execution_plan": {
+                    "plan_id": "plan-1",
+                    "legs": [
+                        {
+                            "leg_id": "bid",
+                            "market_id": "market-1",
+                            "token_id": "token-1",
+                            "side": "buy",
+                            "limit_price": 0.62,
+                        },
+                        {
+                            "leg_id": "ask",
+                            "market_id": "market-1",
+                            "token_id": "token-1",
+                            "side": "sell",
+                            "limit_price": 0.61,
+                        },
+                    ],
+                }
+            }
+        ),
+        strategy=None,
+        checks_payload=[],
+        trading_schedule_ok=True,
+        trading_schedule_config={},
+        global_limits={"max_gross_exposure_usd": 5000.0},
+        effective_risk_limits={"max_trade_notional_usd": 1000.0},
+        allow_averaging=True,
+        occupied_market_ids=set(),
+        portfolio_allocator=None,
+        risk_evaluator=_risk_evaluator,
+        invoke_hooks=False,
+        strategy_params={"enforce_min_exit_notional": False},
+    )
+
+    assert result["final_decision"] == "blocked"
+    conflict_check = next(
+        check for check in result["checks_payload"] if check["check_key"] == "execution_plan_token_conflict_guard"
+    )
+    assert conflict_check["payload"]["violation"]["reason"] == "self_crossing_quote"
 
 
 def test_pending_live_exit_guard_is_disabled_when_max_allowed_is_zero():

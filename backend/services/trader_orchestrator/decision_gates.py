@@ -7,6 +7,7 @@ from config import settings
 from services.data_events import BlockReason
 from services.strategy_sdk import StrategySDK
 from utils.converters import coerce_bool as _coerce_bool, safe_float
+from utils.signal_helpers import normalize_position_side
 
 
 def _parse_hhmm_utc(value: Any) -> tuple[int, int] | None:
@@ -320,6 +321,102 @@ def _runtime_signal_risk_score(runtime_signal: Any) -> float | None:
         parsed = safe_float(candidate, None)
         if parsed is not None:
             return max(0.0, min(1.0, float(parsed)))
+    return None
+
+
+def _runtime_signal_execution_plan(runtime_signal: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = getattr(runtime_signal, "payload_json", None)
+    payload = payload if isinstance(payload, dict) else {}
+    plan = payload.get("execution_plan")
+    if isinstance(plan, dict):
+        return plan, payload
+
+    strategy_context = payload.get("strategy_context")
+    strategy_context = strategy_context if isinstance(strategy_context, dict) else {}
+    plan = strategy_context.get("execution_plan")
+    if isinstance(plan, dict):
+        return plan, payload
+    return {}, payload
+
+
+def _execution_plan_leg_side(leg: dict[str, Any], payload: dict[str, Any], index: int) -> str:
+    metadata = leg.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    positions = payload.get("positions_to_take")
+    positions = positions if isinstance(positions, list) else []
+    position_index = index
+    try:
+        position_index = int(metadata.get("position_index", index))
+    except Exception:
+        position_index = index
+    position = (
+        positions[position_index]
+        if 0 <= position_index < len(positions) and isinstance(positions[position_index], dict)
+        else {}
+    )
+    action = (
+        metadata.get("raw_action")
+        or position.get("action")
+        or position.get("side")
+        or leg.get("action")
+        or leg.get("side")
+    )
+    return normalize_position_side(action, fallback=str(leg.get("side") or leg.get("action") or "buy"))
+
+
+def _execution_plan_token_conflict(plan: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any] | None:
+    raw_legs = plan.get("legs")
+    legs = [leg for leg in raw_legs if isinstance(leg, dict)] if isinstance(raw_legs, list) else []
+    if len(legs) < 2:
+        return None
+
+    by_instrument: dict[tuple[str, str, str], dict[str, list[dict[str, Any]]]] = {}
+    for index, leg in enumerate(legs):
+        market_id = str(leg.get("market_id") or "").strip()
+        token_id = str(leg.get("token_id") or "").strip()
+        outcome = str(leg.get("outcome") or "").strip().lower()
+        if not market_id or not (token_id or outcome):
+            continue
+        side = _execution_plan_leg_side(leg, payload, index)
+        limit_price = safe_float(leg.get("limit_price"), None)
+        if limit_price is None:
+            limit_price = safe_float(leg.get("price"), None)
+        item = {
+            "leg_id": str(leg.get("leg_id") or leg.get("id") or index),
+            "limit_price": float(limit_price) if limit_price is not None else None,
+        }
+        bucket = by_instrument.setdefault((market_id, token_id, outcome), {"buy": [], "sell": []})
+        bucket[side].append(item)
+
+    for (market_id, token_id, outcome), sides in by_instrument.items():
+        buys = sides["buy"]
+        if len(buys) > 1:
+            return {
+                "reason": "duplicate_buy_legs",
+                "market_id": market_id,
+                "token_id": token_id or None,
+                "outcome": outcome or None,
+                "buy_legs": buys,
+            }
+
+        sells = sides["sell"]
+        priced_buys = [item for item in buys if item["limit_price"] is not None and item["limit_price"] > 0.0]
+        priced_sells = [item for item in sells if item["limit_price"] is not None and item["limit_price"] > 0.0]
+        if not priced_buys or not priced_sells:
+            continue
+        max_bid = max(float(item["limit_price"]) for item in priced_buys)
+        min_ask = min(float(item["limit_price"]) for item in priced_sells)
+        if max_bid >= min_ask:
+            return {
+                "reason": "self_crossing_quote",
+                "market_id": market_id,
+                "token_id": token_id or None,
+                "outcome": outcome or None,
+                "max_buy_limit_price": max_bid,
+                "min_sell_limit_price": min_ask,
+                "buy_legs": priced_buys,
+                "sell_legs": priced_sells,
+            }
     return None
 
 
@@ -665,6 +762,58 @@ def apply_platform_decision_gates(
         platform_gates.append(
             {
                 "gate": "size_cap",
+                "status": "skipped",
+                "detail": f"Skipped because decision is '{final_decision}'",
+            }
+        )
+
+    if final_decision == "selected":
+        execution_plan, execution_payload = _runtime_signal_execution_plan(runtime_signal)
+        execution_conflict = _execution_plan_token_conflict(execution_plan, execution_payload)
+        execution_plan_guard_passed = execution_conflict is None
+        checks_payload.append(
+            {
+                "check_key": "execution_plan_token_conflict_guard",
+                "check_label": "Execution plan token conflict guard",
+                "passed": execution_plan_guard_passed,
+                "score": None,
+                "detail": (
+                    "No duplicate buy or self-crossing token legs"
+                    if execution_plan_guard_passed
+                    else "Execution plan has duplicate buy legs or self-crossing quotes for one token"
+                ),
+                "payload": {
+                    "plan_id": str(execution_plan.get("plan_id") or "").strip() or None,
+                    "violation": execution_conflict,
+                },
+            }
+        )
+        if not execution_plan_guard_passed:
+            final_decision = "blocked"
+            violation_reason = str(execution_conflict.get("reason") or "token_conflict")
+            final_reason = f"Execution plan token conflict guard blocked: {violation_reason}"
+            platform_gates.append(
+                {
+                    "gate": "execution_plan_token_conflict",
+                    "status": "blocked",
+                    "detail": final_reason,
+                    "payload": execution_conflict,
+                }
+            )
+            if invoke_hooks and strategy is not None and hasattr(strategy, "on_blocked"):
+                strategy.on_blocked(runtime_signal, BlockReason.RISK_TRADE_NOTIONAL, execution_conflict)
+        else:
+            platform_gates.append(
+                {
+                    "gate": "execution_plan_token_conflict",
+                    "status": "passed",
+                    "detail": "No duplicate buy or self-crossing token legs",
+                }
+            )
+    else:
+        platform_gates.append(
+            {
+                "gate": "execution_plan_token_conflict",
                 "status": "skipped",
                 "detail": f"Skipped because decision is '{final_decision}'",
             }
@@ -1503,6 +1652,111 @@ def apply_platform_decision_gates(
         stop_loss_armed = (not stop_loss_near_close_only) or (
             signal_seconds_left is not None and signal_seconds_left <= stop_loss_activation_seconds
         )
+        stop_loss_upside_guard_enabled = live_execution_gates_enabled and _coerce_bool(
+            params.get("enforce_stop_loss_upside_guard"),
+            True,
+        )
+        max_stop_loss_to_upside_ratio = safe_float(params.get("max_stop_loss_to_upside_ratio"), None)
+        if max_stop_loss_to_upside_ratio is None:
+            max_stop_loss_to_upside_ratio = 1.0
+        max_stop_loss_to_upside_ratio = max(0.05, min(10.0, float(max_stop_loss_to_upside_ratio)))
+        signal_side = normalize_position_side(getattr(runtime_signal, "direction", None), fallback="buy")
+        settlement_upside = None
+        stop_loss_downside = None
+        stop_loss_to_upside_ratio = None
+        stop_loss_upside_skip_reason = ""
+        stop_loss_upside_passed = True
+        if not stop_loss_upside_guard_enabled:
+            stop_loss_upside_skip_reason = "guard_disabled"
+        elif signal_side != "buy":
+            stop_loss_upside_skip_reason = "non_entry_side"
+        elif entry_price is None or entry_price <= 0.0:
+            stop_loss_upside_skip_reason = "entry_price_unavailable"
+        elif stop_loss_pct is None or stop_loss_pct <= 0.0 or stop_loss_pct >= 100.0:
+            stop_loss_upside_skip_reason = "stop_loss_not_configured"
+        elif not stop_loss_armed:
+            stop_loss_upside_skip_reason = "stop_loss_not_armed"
+        else:
+            settlement_upside = max(0.0, 1.0 - float(entry_price))
+            stop_loss_downside = float(entry_price) * (float(stop_loss_pct) / 100.0)
+            if settlement_upside > 0.0:
+                stop_loss_to_upside_ratio = stop_loss_downside / settlement_upside
+                stop_loss_upside_passed = stop_loss_downside <= (settlement_upside * max_stop_loss_to_upside_ratio) + 1e-9
+            else:
+                stop_loss_upside_passed = False
+        checks_payload.append(
+            {
+                "check_key": "stop_loss_settlement_upside_guard",
+                "check_label": "Stop-loss downside vs settlement upside",
+                "passed": stop_loss_upside_passed,
+                "score": stop_loss_to_upside_ratio,
+                "detail": (
+                    f"stop-loss downside {stop_loss_downside:.4f} within settlement upside {settlement_upside:.4f}"
+                    if stop_loss_upside_passed and stop_loss_downside is not None and settlement_upside is not None
+                    else (
+                        f"stop-loss downside {stop_loss_downside:.4f} exceeds settlement upside {settlement_upside:.4f}"
+                        if stop_loss_downside is not None and settlement_upside is not None
+                        else f"Skipped: {stop_loss_upside_skip_reason}"
+                    )
+                ),
+                "payload": {
+                    "enabled": stop_loss_upside_guard_enabled,
+                    "entry_price": entry_price,
+                    "signal_side": signal_side,
+                    "stop_loss_pct": stop_loss_pct,
+                    "stop_loss_armed": stop_loss_armed,
+                    "settlement_upside": settlement_upside,
+                    "stop_loss_downside": stop_loss_downside,
+                    "max_stop_loss_to_upside_ratio": max_stop_loss_to_upside_ratio,
+                    "stop_loss_to_upside_ratio": stop_loss_to_upside_ratio,
+                    "skip_reason": stop_loss_upside_skip_reason or None,
+                },
+            }
+        )
+        if not stop_loss_upside_passed:
+            final_decision = "blocked"
+            final_reason = (
+                f"Stop-loss economics guard blocked: downside={stop_loss_downside:.4f} "
+                f"> upside={settlement_upside:.4f}"
+            )
+            platform_gates.append(
+                {
+                    "gate": "stop_loss_settlement_upside",
+                    "status": "blocked",
+                    "detail": final_reason,
+                }
+            )
+            if invoke_hooks and strategy is not None and hasattr(strategy, "on_blocked"):
+                strategy.on_blocked(
+                    runtime_signal,
+                    BlockReason.RISK_TRADE_NOTIONAL,
+                    {
+                        "entry_price": entry_price,
+                        "stop_loss_pct": stop_loss_pct,
+                        "settlement_upside": settlement_upside,
+                        "stop_loss_downside": stop_loss_downside,
+                    },
+                )
+        elif stop_loss_upside_guard_enabled:
+            platform_gates.append(
+                {
+                    "gate": "stop_loss_settlement_upside",
+                    "status": "passed",
+                    "detail": (
+                        "Skipped because stop-loss economics inputs are unavailable"
+                        if stop_loss_upside_skip_reason
+                        else "Stop-loss downside is within settlement upside"
+                    ),
+                }
+            )
+        else:
+            platform_gates.append(
+                {
+                    "gate": "stop_loss_settlement_upside",
+                    "status": "skipped",
+                    "detail": "Disabled by strategy config",
+                }
+            )
         configured_exit_price_ratio = safe_float(params.get("live_exit_price_ratio_floor"), None)
         if configured_exit_price_ratio is None:
             configured_exit_price_ratio = safe_float(params.get("exit_price_ratio_floor"), None)
@@ -1580,7 +1834,7 @@ def apply_platform_decision_gates(
             }
         )
 
-        if min_exit_guard_enabled and not min_exit_notional_passed:
+        if final_decision == "selected" and min_exit_guard_enabled and not min_exit_notional_passed:
             final_decision = "blocked"
             final_reason = (
                 f"Min-exit-notional guard blocked: required size >= {required_size_usd:.2f} "
@@ -1605,7 +1859,7 @@ def apply_platform_decision_gates(
                             "conservative_exit_price": conservative_exit_price,
                         },
                     )
-        elif min_exit_guard_enabled:
+        elif final_decision == "selected" and min_exit_guard_enabled:
             platform_gates.append(
                 {
                     "gate": "min_exit_notional",
@@ -1613,12 +1867,20 @@ def apply_platform_decision_gates(
                     "detail": (f"Size supports min exit notional with required_size_usd={required_size_usd:.2f}"),
                 }
             )
-        else:
+        elif not min_exit_guard_enabled:
             platform_gates.append(
                 {
                     "gate": "min_exit_notional",
                     "status": "skipped",
                     "detail": "Skipped because enforce_min_exit_notional=false",
+                }
+            )
+        else:
+            platform_gates.append(
+                {
+                    "gate": "min_exit_notional",
+                    "status": "skipped",
+                    "detail": f"Skipped because decision is '{final_decision}'",
                 }
             )
     else:
@@ -1945,29 +2207,37 @@ def apply_platform_decision_gates(
             }
         )
 
-    if final_decision == "selected" and not allow_averaging:
+    live_single_market_guard = execution_mode == "live"
+    if final_decision == "selected" and (live_single_market_guard or not allow_averaging):
         signal_market_id = str(getattr(runtime_signal, "market_id", "") or "").strip()
         stacking_blocked = bool(signal_market_id) and signal_market_id in occupied_market_ids
         checks_payload.append(
             {
                 "check_key": "stacking_guard",
-                "check_label": "One active entry per market",
+                "check_label": "One active live entry per market" if live_single_market_guard else "One active entry per market",
                 "passed": not stacking_blocked,
                 "score": None,
                 "detail": (
-                    "allow_averaging=false and market is already occupied by an open position or active order"
+                    "live execution permits only one active entry per market"
+                    if stacking_blocked and live_single_market_guard
+                    else "allow_averaging=false and market is already occupied by an open position or active order"
                     if stacking_blocked
-                    else "allow_averaging=false and market is not occupied"
+                    else "Market is not occupied"
                 ),
                 "payload": {
-                    "allow_averaging": False,
+                    "allow_averaging": allow_averaging,
+                    "live_single_market_guard": live_single_market_guard,
                     "market_id": signal_market_id or None,
                 },
             }
         )
         if stacking_blocked:
             final_decision = "blocked"
-            final_reason = "Stacking guard: market already occupied while allow_averaging=false"
+            final_reason = (
+                "Live exposure guard: market already occupied"
+                if live_single_market_guard
+                else "Stacking guard: market already occupied while allow_averaging=false"
+            )
             platform_gates.append(
                 {
                     "gate": "stacking_guard",
@@ -1992,8 +2262,8 @@ def apply_platform_decision_gates(
                 "gate": "stacking_guard",
                 "status": "skipped",
                 "detail": (
-                    "Skipped because allow_averaging=true"
-                    if allow_averaging
+                    "Skipped because allow_averaging=true outside live execution"
+                    if allow_averaging and not live_single_market_guard
                     else f"Skipped because decision is '{final_decision}'"
                 ),
             }

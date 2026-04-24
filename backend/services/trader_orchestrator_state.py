@@ -133,6 +133,17 @@ DEFAULT_LIVE_PROVIDER_HEALTH = {
     "min_errors": 2,
     "block_seconds": 120,
 }
+DEFAULT_LIVE_RISK_CLAMPS = {
+    "enforce_allow_averaging_off": True,
+    "min_cooldown_seconds": 60,
+    "max_consecutive_losses_cap": 3,
+    "max_open_orders_cap": 6,
+    "max_open_positions_cap": 8,
+    "max_trade_notional_usd_cap": 10.0,
+    "max_per_market_exposure_usd_cap": 10.0,
+    "max_orders_per_cycle_cap": 3,
+    "enforce_halt_on_consecutive_losses": True,
+}
 LIVE_PROVIDER_CANCEL_TIMEOUT_SECONDS = 8.0
 DEFAULT_TIMEOUT_TAKER_RESCUE_PRICE_BPS = 35.0
 DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE = "IOC"
@@ -245,10 +256,9 @@ def _normalize_pending_live_exit_guard(value: Any) -> dict[str, Any]:
 
 
 def _normalize_live_risk_clamps(value: Any) -> dict[str, Any]:
-    """Normalize live risk clamps.  Only fields explicitly present in *value*
-    are included -- missing fields mean "no clamp"."""
+    """Normalize live risk clamps with production live-trading safety defaults."""
     source = value if isinstance(value, dict) else {}
-    out: dict[str, Any] = {}
+    out: dict[str, Any] = dict(DEFAULT_LIVE_RISK_CLAMPS)
     if "enforce_allow_averaging_off" in source:
         out["enforce_allow_averaging_off"] = bool(source["enforce_allow_averaging_off"])
     if "min_cooldown_seconds" in source:
@@ -261,6 +271,8 @@ def _normalize_live_risk_clamps(value: Any) -> dict[str, Any]:
         out["max_open_positions_cap"] = max(1, min(1000, safe_int(source["max_open_positions_cap"], 1000)))
     if "max_trade_notional_usd_cap" in source:
         out["max_trade_notional_usd_cap"] = max(1.0, min(1_000_000.0, safe_float(source["max_trade_notional_usd_cap"], 1_000_000.0)))
+    if "max_per_market_exposure_usd_cap" in source:
+        out["max_per_market_exposure_usd_cap"] = max(1.0, min(1_000_000.0, safe_float(source["max_per_market_exposure_usd_cap"], 1_000_000.0)))
     if "max_orders_per_cycle_cap" in source:
         out["max_orders_per_cycle_cap"] = max(1, min(1000, safe_int(source["max_orders_per_cycle_cap"], 1000)))
     if "enforce_halt_on_consecutive_losses" in source:
@@ -8888,18 +8900,7 @@ async def compose_trader_orchestrator_config(
                     or DEFAULT_PENDING_LIVE_EXIT_GUARD["terminal_statuses"]
                 ),
             },
-            "live_risk_clamps": {
-                "enforce_allow_averaging_off": bool(live_risk_clamps.get("enforce_allow_averaging_off", True)),
-                "min_cooldown_seconds": int(live_risk_clamps.get("min_cooldown_seconds", 0) or 0),
-                "max_consecutive_losses_cap": int(live_risk_clamps.get("max_consecutive_losses_cap", 1) or 1),
-                "max_open_orders_cap": int(live_risk_clamps.get("max_open_orders_cap", 1) or 1),
-                "max_open_positions_cap": int(live_risk_clamps.get("max_open_positions_cap", 1) or 1),
-                "max_trade_notional_usd_cap": float(live_risk_clamps.get("max_trade_notional_usd_cap", 1.0) or 1.0),
-                "max_orders_per_cycle_cap": int(live_risk_clamps.get("max_orders_per_cycle_cap", 1) or 1),
-                "enforce_halt_on_consecutive_losses": bool(
-                    live_risk_clamps.get("enforce_halt_on_consecutive_losses", True)
-                ),
-            },
+            "live_risk_clamps": dict(live_risk_clamps),
             "live_market_context": {
                 "enabled": bool(live_market_context.get("enabled", True)),
                 "history_window_seconds": int(live_market_context.get("history_window_seconds", 7200) or 7200),

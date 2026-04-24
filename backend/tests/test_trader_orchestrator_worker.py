@@ -900,6 +900,7 @@ def test_live_risk_clamps_tighten_aggressive_limits():
         "max_open_orders": 20,
         "max_open_positions": 12,
         "max_trade_notional_usd": 500.0,
+        "max_per_market_exposure_usd": 500.0,
         "max_orders_per_cycle": 50,
     }
     changes = trader_orchestrator_worker._apply_live_risk_clamps(
@@ -911,6 +912,7 @@ def test_live_risk_clamps_tighten_aggressive_limits():
             "max_open_orders_cap": 6,
             "max_open_positions_cap": 4,
             "max_trade_notional_usd_cap": 200.0,
+            "max_per_market_exposure_usd_cap": 150.0,
             "max_orders_per_cycle_cap": 4,
             "enforce_halt_on_consecutive_losses": True,
         },
@@ -922,6 +924,7 @@ def test_live_risk_clamps_tighten_aggressive_limits():
     assert limits["max_open_orders"] == 6
     assert limits["max_open_positions"] == 4
     assert limits["max_trade_notional_usd"] == 200.0
+    assert limits["max_per_market_exposure_usd"] == 150.0
     assert limits["max_orders_per_cycle"] == 4
     assert limits["halt_on_consecutive_losses"] is True
     assert "allow_averaging" in changes
@@ -936,6 +939,7 @@ def test_live_risk_clamps_honor_configured_caps():
         "max_open_orders": 20,
         "max_open_positions": 12,
         "max_trade_notional_usd": 500.0,
+        "max_per_market_exposure_usd": 500.0,
         "max_orders_per_cycle": 50,
         "halt_on_consecutive_losses": False,
     }
@@ -948,6 +952,7 @@ def test_live_risk_clamps_honor_configured_caps():
             "max_open_orders_cap": 9,
             "max_open_positions_cap": 8,
             "max_trade_notional_usd_cap": 420.0,
+            "max_per_market_exposure_usd_cap": 300.0,
             "max_orders_per_cycle_cap": 11,
             "enforce_halt_on_consecutive_losses": False,
         },
@@ -958,12 +963,12 @@ def test_live_risk_clamps_honor_configured_caps():
     assert limits["max_open_orders"] == 9
     assert limits["max_open_positions"] == 8
     assert limits["max_trade_notional_usd"] == 420.0
+    assert limits["max_per_market_exposure_usd"] == 300.0
     assert limits["max_orders_per_cycle"] == 11
     assert limits["halt_on_consecutive_losses"] is False
 
 
-def test_live_risk_clamps_empty_means_no_clamp():
-    """Missing clamp fields should leave trader limits untouched."""
+def test_live_risk_clamps_empty_applies_production_defaults():
     limits = {
         "allow_averaging": True,
         "cooldown_seconds": 0,
@@ -971,36 +976,43 @@ def test_live_risk_clamps_empty_means_no_clamp():
         "max_open_orders": 50,
         "max_open_positions": 25,
         "max_trade_notional_usd": 5000.0,
+        "max_per_market_exposure_usd": 5000.0,
         "max_orders_per_cycle": 80,
         "halt_on_consecutive_losses": False,
     }
     changes = trader_orchestrator_worker._apply_live_risk_clamps(limits, {})
 
-    assert changes == {}
-    assert limits["allow_averaging"] is True
-    assert limits["cooldown_seconds"] == 0
-    assert limits["max_consecutive_losses"] == 100
-    assert limits["max_open_orders"] == 50
-    assert limits["max_open_positions"] == 25
-    assert limits["max_trade_notional_usd"] == 5000.0
-    assert limits["max_orders_per_cycle"] == 80
-    assert limits["halt_on_consecutive_losses"] is False
+    assert limits["allow_averaging"] is False
+    assert limits["cooldown_seconds"] == 60
+    assert limits["max_consecutive_losses"] == 3
+    assert limits["max_open_orders"] == 6
+    assert limits["max_open_positions"] == 8
+    assert limits["max_trade_notional_usd"] == 10.0
+    assert limits["max_per_market_exposure_usd"] == 10.0
+    assert limits["max_orders_per_cycle"] == 3
+    assert limits["halt_on_consecutive_losses"] is True
+    assert "max_per_market_exposure_usd" in changes
 
 
-def test_live_risk_clamps_partial_only_applies_present():
-    """Only clamp fields that are explicitly set."""
+def test_live_risk_clamps_explicit_fields_override_production_defaults():
     limits = {
         "max_open_positions": 25,
         "max_open_orders": 50,
         "max_trade_notional_usd": 5000.0,
+        "max_per_market_exposure_usd": 5000.0,
     }
     changes = trader_orchestrator_worker._apply_live_risk_clamps(
-        limits, {"max_open_positions_cap": 10}
+        limits, {
+            "max_open_positions_cap": 10,
+            "max_trade_notional_usd_cap": 25.0,
+            "max_per_market_exposure_usd_cap": 30.0,
+        }
     )
 
     assert limits["max_open_positions"] == 10
-    assert limits["max_open_orders"] == 50
-    assert limits["max_trade_notional_usd"] == 5000.0
+    assert limits["max_open_orders"] == 6
+    assert limits["max_trade_notional_usd"] == 25.0
+    assert limits["max_per_market_exposure_usd"] == 30.0
     assert "max_open_positions" in changes
 
 
@@ -1670,6 +1682,9 @@ class _DummySession:
 
         def scalar_one_or_none(self):
             return None
+
+        def scalar_one(self):
+            return 0
 
         def scalars(self):
             return self
