@@ -39,10 +39,10 @@ SIGNAL_REACTIVATABLE_STATUSES = {"selected", "submitted", "executed", "skipped",
 
 
 def _scanner_skipped_reactivation_cooldown_seconds() -> float:
-    raw = getattr(settings, "SCANNER_SKIPPED_SIGNAL_REACTIVATION_COOLDOWN_SECONDS", 180.0)
+    raw = getattr(settings, "SCANNER_SKIPPED_SIGNAL_REACTIVATION_COOLDOWN_SECONDS", 0.0)
     return max(
         0.0,
-        float(180.0 if raw is None else raw),
+        float(0.0 if raw is None else raw),
     )
 _SKIPPED_REACTIVATION_VOLATILE_KEYS = {
     "bridge_run_at",
@@ -141,7 +141,10 @@ def _should_reactivate_unchanged_skipped_scanner_signal(row: TradeSignal, *, sou
     now = _to_utc_naive(_utc_now())
     if now is None:
         return False
-    return (now - updated_at).total_seconds() >= _scanner_skipped_reactivation_cooldown_seconds()
+    cooldown_seconds = _scanner_skipped_reactivation_cooldown_seconds()
+    if cooldown_seconds <= 0.0:
+        return False
+    return (now - updated_at).total_seconds() >= cooldown_seconds
 
 
 def _has_signal_material_change(

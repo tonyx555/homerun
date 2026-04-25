@@ -15,6 +15,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from workers import trader_orchestrator_worker
+from services import trader_orchestrator_state
 from services.runtime_status import runtime_status
 from services.trader_orchestrator.strategies.base import StrategyDecision
 
@@ -968,7 +969,7 @@ def test_live_risk_clamps_honor_configured_caps():
     assert limits["halt_on_consecutive_losses"] is False
 
 
-def test_live_risk_clamps_empty_applies_production_defaults():
+def test_live_risk_clamps_empty_does_not_override_trader_limits():
     limits = {
         "allow_averaging": True,
         "cooldown_seconds": 0,
@@ -982,19 +983,19 @@ def test_live_risk_clamps_empty_applies_production_defaults():
     }
     changes = trader_orchestrator_worker._apply_live_risk_clamps(limits, {})
 
-    assert limits["allow_averaging"] is False
-    assert limits["cooldown_seconds"] == 60
-    assert limits["max_consecutive_losses"] == 3
-    assert limits["max_open_orders"] == 6
-    assert limits["max_open_positions"] == 8
-    assert limits["max_trade_notional_usd"] == 10.0
-    assert limits["max_per_market_exposure_usd"] == 10.0
-    assert limits["max_orders_per_cycle"] == 3
-    assert limits["halt_on_consecutive_losses"] is True
-    assert "max_per_market_exposure_usd" in changes
+    assert limits["allow_averaging"] is True
+    assert limits["cooldown_seconds"] == 0
+    assert limits["max_consecutive_losses"] == 100
+    assert limits["max_open_orders"] == 50
+    assert limits["max_open_positions"] == 25
+    assert limits["max_trade_notional_usd"] == 5000.0
+    assert limits["max_per_market_exposure_usd"] == 5000.0
+    assert limits["max_orders_per_cycle"] == 80
+    assert limits["halt_on_consecutive_losses"] is False
+    assert changes == {}
 
 
-def test_live_risk_clamps_explicit_fields_override_production_defaults():
+def test_live_risk_clamps_explicit_fields_only_clamp_configured_limits():
     limits = {
         "max_open_positions": 25,
         "max_open_orders": 50,
@@ -1010,10 +1011,24 @@ def test_live_risk_clamps_explicit_fields_override_production_defaults():
     )
 
     assert limits["max_open_positions"] == 10
-    assert limits["max_open_orders"] == 6
+    assert limits["max_open_orders"] == 50
     assert limits["max_trade_notional_usd"] == 25.0
     assert limits["max_per_market_exposure_usd"] == 30.0
     assert "max_open_positions" in changes
+    assert "max_open_orders" not in changes
+
+
+def test_live_risk_clamps_normalization_drops_legacy_implicit_defaults():
+    assert trader_orchestrator_state._normalize_live_risk_clamps(
+        trader_orchestrator_state.LEGACY_IMPLICIT_LIVE_RISK_CLAMPS
+    ) == {}
+
+
+def test_live_risk_clamps_normalization_preserves_explicit_legacy_values():
+    assert trader_orchestrator_state._normalize_live_risk_clamps(
+        trader_orchestrator_state.LEGACY_IMPLICIT_LIVE_RISK_CLAMPS,
+        explicit=True,
+    ) == trader_orchestrator_state.LEGACY_IMPLICIT_LIVE_RISK_CLAMPS
 
 
 def test_live_provider_infra_error_detection_excludes_allowance_rejections():
@@ -3824,7 +3839,7 @@ async def test_run_trader_once_persists_blocked_decision_when_db_stacking_verifi
     assert "db verification" in decisions[0]["reason"].lower()
     assert "status:selected" not in call_log
     assert "consumption:claiming" not in call_log
-    assert "status:skipped" in call_log
+    assert "status:skipped" not in call_log
     assert "consumption:blocked" in call_log
 
 

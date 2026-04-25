@@ -227,6 +227,7 @@ async def update_orchestrator_settings(
         runtime_dump = request.global_runtime.model_dump()
         # Only persist clamp fields that were explicitly set (non-None)
         runtime_dump["live_risk_clamps"] = request.global_runtime.live_risk_clamps.model_dump(exclude_none=True)
+        runtime_dump["live_risk_clamps_explicit"] = True
         settings_updates["global_runtime"] = runtime_dump
     if settings_updates:
         update_kwargs["settings_json"] = settings_updates

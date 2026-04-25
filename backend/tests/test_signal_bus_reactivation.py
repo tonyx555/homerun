@@ -335,7 +335,7 @@ async def test_upsert_reactivates_skipped_signal_on_material_change(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_upsert_reactivates_unchanged_skipped_scanner_signal_after_cooldown(tmp_path):
+async def test_upsert_keeps_unchanged_skipped_scanner_signal_skipped(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     signal_id = uuid.uuid4().hex
     try:
@@ -389,9 +389,8 @@ async def test_upsert_reactivates_unchanged_skipped_scanner_signal_after_cooldow
 
             refreshed = await session.get(TradeSignal, signal_id)
             assert refreshed is not None
-            assert refreshed.status == "pending"
-            assert refreshed.updated_at is not None
-            assert refreshed.updated_at > prior
+            assert refreshed.status == "skipped"
+            assert refreshed.updated_at == prior
 
             emissions = (
                 (
@@ -404,9 +403,7 @@ async def test_upsert_reactivates_unchanged_skipped_scanner_signal_after_cooldow
                 .scalars()
                 .all()
             )
-            assert emissions
-            assert emissions[-1].event_type == "upsert_reactivated"
-            assert emissions[-1].reason == "reactivated_from:skipped"
+            assert not emissions
     finally:
         await engine.dispose()
 

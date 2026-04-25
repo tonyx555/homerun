@@ -77,7 +77,6 @@ from services.trader_orchestrator_state import (
     DEFAULT_TIMEOUT_TAKER_RESCUE_TIME_IN_FORCE,
     DEFAULT_LIVE_MARKET_CONTEXT,
     DEFAULT_LIVE_PROVIDER_HEALTH,
-    DEFAULT_LIVE_RISK_CLAMPS,
     DEFAULT_PENDING_LIVE_EXIT_GUARD,
     ORCHESTRATOR_SNAPSHOT_ID,
     ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS,
@@ -3352,12 +3351,9 @@ def _apply_live_risk_clamps(
     effective_risk_limits: dict[str, Any],
     live_risk_clamps: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    """Apply production live-risk clamps to trader effective limits."""
+    """Apply explicitly configured live-risk clamps to trader effective limits."""
     changes: dict[str, dict[str, Any]] = {}
-    live_risk_clamps = {
-        **DEFAULT_LIVE_RISK_CLAMPS,
-        **(live_risk_clamps if isinstance(live_risk_clamps, dict) else {}),
-    }
+    live_risk_clamps = live_risk_clamps if isinstance(live_risk_clamps, dict) else {}
 
     if live_risk_clamps.get("enforce_allow_averaging_off"):
         configured_allow_averaging = bool(effective_risk_limits.get("allow_averaging", False))
@@ -4252,6 +4248,8 @@ async def _run_trader_once(
         )
         pre_maintenance_open_order_count = 0
         if stream_trigger_mode and effective_process_signals:
+            run_trader_maintenance = False
+        elif effective_process_signals and prefetched_signals:
             run_trader_maintenance = False
         if run_trader_maintenance:
             pre_maintenance_open_order_count = int(
@@ -7076,13 +7074,20 @@ async def _run_trader_once(
                                 commit=False,
                             )
                     else:
-                        signal_status = "failed" if final_decision == "failed" else "skipped"
-                        await set_trade_signal_status(
-                            session,
-                            signal_id=signal_id,
-                            status=signal_status,
-                            commit=False,
-                        )
+                        status_update: str | None = None
+                        if final_decision == "failed":
+                            status_update = "failed"
+                        elif final_decision == "skipped":
+                            status_update = "skipped"
+                        elif isinstance(final_reason, str) and final_reason.startswith("Signal stale:"):
+                            status_update = "skipped"
+                        if status_update is not None:
+                            await set_trade_signal_status(
+                                session,
+                                signal_id=signal_id,
+                                status=status_update,
+                                commit=False,
+                            )
                         # If the block reason is signal staleness, also mark
                         # the signal as expired so the scanner's continuous
                         # re-publishes cannot reactivate it through

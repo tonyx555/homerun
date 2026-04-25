@@ -25,6 +25,7 @@ def test_reconciliation_lifecycle_params_include_runtime_live_risk_clamps():
         },
         {
             "global_runtime": {
+                "live_risk_clamps_explicit": True,
                 "live_risk_clamps": {
                     "max_trade_notional_usd_cap": 10.0,
                     "max_per_market_exposure_usd_cap": 10.0,

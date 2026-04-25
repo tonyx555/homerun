@@ -134,7 +134,7 @@ DEFAULT_LIVE_PROVIDER_HEALTH = {
     "min_errors": 2,
     "block_seconds": 120,
 }
-DEFAULT_LIVE_RISK_CLAMPS = {
+LEGACY_IMPLICIT_LIVE_RISK_CLAMPS = {
     "enforce_allow_averaging_off": True,
     "min_cooldown_seconds": 60,
     "max_consecutive_losses_cap": 3,
@@ -256,27 +256,43 @@ def _normalize_pending_live_exit_guard(value: Any) -> dict[str, Any]:
     }
 
 
-def _normalize_live_risk_clamps(value: Any) -> dict[str, Any]:
-    """Normalize live risk clamps with production live-trading safety defaults."""
+def _live_risk_clamp_was_legacy_implicit(key: str, value: Any) -> bool:
+    if key not in LEGACY_IMPLICIT_LIVE_RISK_CLAMPS:
+        return False
+    legacy_value = LEGACY_IMPLICIT_LIVE_RISK_CLAMPS[key]
+    if isinstance(legacy_value, bool):
+        return bool(value) is legacy_value
+    if isinstance(legacy_value, int):
+        return safe_int(value, -1) == legacy_value
+    return abs(safe_float(value, -1.0) - float(legacy_value)) < 0.000001
+
+
+def _normalize_live_risk_clamps(value: Any, *, explicit: bool = False) -> dict[str, Any]:
+    """Normalize explicitly configured live risk clamps."""
     source = value if isinstance(value, dict) else {}
-    out: dict[str, Any] = dict(DEFAULT_LIVE_RISK_CLAMPS)
-    if "enforce_allow_averaging_off" in source:
+    out: dict[str, Any] = {}
+    source_is_explicit = bool(explicit or source.get("_explicit"))
+
+    def should_apply(key: str) -> bool:
+        return key in source and (source_is_explicit or not _live_risk_clamp_was_legacy_implicit(key, source[key]))
+
+    if should_apply("enforce_allow_averaging_off"):
         out["enforce_allow_averaging_off"] = bool(source["enforce_allow_averaging_off"])
-    if "min_cooldown_seconds" in source:
+    if should_apply("min_cooldown_seconds"):
         out["min_cooldown_seconds"] = max(0, min(86400, safe_int(source["min_cooldown_seconds"], 0)))
-    if "max_consecutive_losses_cap" in source:
+    if should_apply("max_consecutive_losses_cap"):
         out["max_consecutive_losses_cap"] = max(1, min(1000, safe_int(source["max_consecutive_losses_cap"], 1000)))
-    if "max_open_orders_cap" in source:
+    if should_apply("max_open_orders_cap"):
         out["max_open_orders_cap"] = max(1, min(1000, safe_int(source["max_open_orders_cap"], 1000)))
-    if "max_open_positions_cap" in source:
+    if should_apply("max_open_positions_cap"):
         out["max_open_positions_cap"] = max(1, min(1000, safe_int(source["max_open_positions_cap"], 1000)))
-    if "max_trade_notional_usd_cap" in source:
+    if should_apply("max_trade_notional_usd_cap"):
         out["max_trade_notional_usd_cap"] = max(1.0, min(1_000_000.0, safe_float(source["max_trade_notional_usd_cap"], 1_000_000.0)))
-    if "max_per_market_exposure_usd_cap" in source:
+    if should_apply("max_per_market_exposure_usd_cap"):
         out["max_per_market_exposure_usd_cap"] = max(1.0, min(1_000_000.0, safe_float(source["max_per_market_exposure_usd_cap"], 1_000_000.0)))
-    if "max_orders_per_cycle_cap" in source:
+    if should_apply("max_orders_per_cycle_cap"):
         out["max_orders_per_cycle_cap"] = max(1, min(1000, safe_int(source["max_orders_per_cycle_cap"], 1000)))
-    if "enforce_halt_on_consecutive_losses" in source:
+    if should_apply("enforce_halt_on_consecutive_losses"):
         out["enforce_halt_on_consecutive_losses"] = bool(source["enforce_halt_on_consecutive_losses"])
     return out
 
@@ -348,7 +364,11 @@ def _normalize_global_runtime_settings(value: Any) -> dict[str, Any]:
     trader_cycle_timeout_seconds = None if timeout_value <= 0 else max(3.0, min(120.0, float(timeout_value)))
     return {
         "pending_live_exit_guard": _normalize_pending_live_exit_guard(source.get("pending_live_exit_guard")),
-        "live_risk_clamps": _normalize_live_risk_clamps(source.get("live_risk_clamps")),
+        "live_risk_clamps": _normalize_live_risk_clamps(
+            source.get("live_risk_clamps"),
+            explicit=bool(source.get("live_risk_clamps_explicit")),
+        ),
+        "live_risk_clamps_explicit": bool(source.get("live_risk_clamps_explicit", False)),
         "live_market_context": _normalize_live_market_context(source.get("live_market_context")),
         "live_provider_health": _normalize_live_provider_health(source.get("live_provider_health")),
         "trader_cycle_timeout_seconds": trader_cycle_timeout_seconds,
@@ -8945,7 +8965,10 @@ async def compose_trader_orchestrator_config(
     pending_live_exit_guard = dict(
         global_runtime.get("pending_live_exit_guard") or _normalize_pending_live_exit_guard({})
     )
-    live_risk_clamps = dict(global_runtime.get("live_risk_clamps") or _normalize_live_risk_clamps({}))
+    live_risk_clamps = _normalize_live_risk_clamps(
+        global_runtime.get("live_risk_clamps"),
+        explicit=bool(global_runtime.get("live_risk_clamps_explicit")),
+    )
     live_market_context = dict(global_runtime.get("live_market_context") or _normalize_live_market_context({}))
     live_provider_health = dict(global_runtime.get("live_provider_health") or _normalize_live_provider_health({}))
     return {

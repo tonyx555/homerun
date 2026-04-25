@@ -27,6 +27,7 @@ from services.trader_orchestrator.position_lifecycle import (
 )
 from services.trader_orchestrator_state import (
     _dedupe_live_authority_rows,
+    _normalize_live_risk_clamps,
     create_trader_event,
     get_open_order_count_for_trader,
     list_traders,
@@ -182,8 +183,10 @@ def _clamped_live_lifecycle_params(trader: dict[str, Any], control_settings: dic
 
     global_runtime = control_settings.get("global_runtime")
     global_runtime = global_runtime if isinstance(global_runtime, dict) else {}
-    live_risk_clamps = global_runtime.get("live_risk_clamps")
-    live_risk_clamps = live_risk_clamps if isinstance(live_risk_clamps, dict) else {}
+    live_risk_clamps = _normalize_live_risk_clamps(
+        global_runtime.get("live_risk_clamps"),
+        explicit=bool(global_runtime.get("live_risk_clamps_explicit")),
+    )
 
     trade_cap = safe_float(live_risk_clamps.get("max_trade_notional_usd_cap"))
     if trade_cap is not None and trade_cap > 0.0:
