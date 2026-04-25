@@ -535,7 +535,7 @@ async def test_project_upserts_skip_nonreactivable_existing_rows(monkeypatch):
     class _Session:
         async def execute(self, statement):
             del statement
-            return _Result([("dedupe-frozen-1", "filtered")])
+            return _Result([("dedupe-frozen-1", "filtered", None, None)])
 
         async def commit(self) -> None:
             return None
