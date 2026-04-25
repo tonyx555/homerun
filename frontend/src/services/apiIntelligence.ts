@@ -1338,7 +1338,7 @@ export async function listAvailableTools(): Promise<{ tools: { name: string; des
 
 export interface ChatStreamEvent {
   event: 'session' | 'token' | 'thinking' | 'tool_start' | 'tool_end' | 'tool_error' | 'done' | 'error'
-    | 'experiment_start' | 'iteration_start' | 'proposal' | 'decision'
+    | 'experiment_start' | 'iteration_start' | 'agent_progress' | 'proposal' | 'decision'
   data: Record<string, unknown>
 }
 
@@ -1810,6 +1810,7 @@ export interface AutoresearchIteration {
   backtest_result: Record<string, unknown> | null
   source_diff?: string | null
   validation_result?: Record<string, unknown> | null
+  source_diff_lines?: number
   duration_seconds: number
   tokens_used: number
   created_at: string

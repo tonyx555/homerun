@@ -84,6 +84,8 @@ interface StreamIteration {
   source_diff?: string | null
   source_diff_lines?: number
   validation_passed?: boolean | null
+  validation_result?: Record<string, unknown> | null
+  backtest_result?: Record<string, unknown> | null
 }
 
 // ---------------------------------------------------------------------------
@@ -198,12 +200,15 @@ export default function AutoresearchView({
         changed_params: i.changed_params,
         duration_seconds: i.duration_seconds,
         source_diff: i.source_diff,
-        source_diff_lines: i.source_diff ? i.source_diff.split('\n').length : 0,
-        validation_passed: i.validation_result?.valid as boolean | undefined,
+        source_diff_lines: i.source_diff_lines ?? (i.source_diff ? i.source_diff.split('\n').length : 0),
+        validation_passed: typeof i.validation_result?.valid === 'boolean' ? i.validation_result.valid : null,
+        validation_result: i.validation_result ?? null,
+        backtest_result: i.backtest_result,
       } as StreamIteration))
-  const displayIterations = allIterations.filter(iter => {
-    if (arMode === 'code') return iter.source_diff != null || iter.validation_passed != null
-    return iter.source_diff == null  // params iterations don't have source_diff
+  const latestExperimentMode = isModeStreaming ? streamingMode : (status?.mode ?? 'params')
+  const displayIterations = allIterations.filter(() => {
+    if (arMode === 'code') return latestExperimentMode === 'code'
+    return latestExperimentMode !== 'code'
   })
 
   // Derived — use isModeStreaming so stats reflect the current tab's experiment
@@ -237,27 +242,74 @@ export default function AutoresearchView({
             break
           case 'iteration_start':
             setStreamPhase(`iteration ${data.iteration}/${data.total}`)
+            setStreamIterations(prev => {
+              const iteration = Number(data.iteration)
+              const score = Number(data.baseline_score ?? 0)
+              return [
+                {
+                  iteration,
+                  decision: 'pending',
+                  new_score: Number.isFinite(score) ? score : 0,
+                  score_delta: 0,
+                  reasoning: 'Iteration started; waiting for proposal.',
+                  changed_params: null,
+                  duration_seconds: 0,
+                  source_diff: null,
+                  source_diff_lines: 0,
+                  validation_passed: null,
+                  validation_result: null,
+                  backtest_result: null,
+                },
+                ...prev.filter(iter => iter.iteration !== iteration),
+              ]
+            })
+            break
+          case 'agent_progress':
+            setStreamPhase(String(data.message || 'researching...'))
+            setStreamIterations(prev => {
+              const iteration = Number(data.iteration)
+              const message = String(data.message || '')
+              return prev.map(iter => iter.iteration === iteration ? {
+                ...iter,
+                reasoning: message || iter.reasoning,
+              } : iter)
+            })
             break
           case 'proposal':
             setStreamPhase('evaluating proposal...')
+            setStreamIterations(prev => {
+              const iteration = Number(data.iteration)
+              const proposedChanges = data.proposed_changes as Record<string, unknown> | undefined
+              const reasoning = String(data.reasoning || '')
+              return prev.map(iter => iter.iteration === iteration ? {
+                ...iter,
+                reasoning: reasoning || iter.reasoning,
+                changed_params: proposedChanges ?? iter.changed_params,
+              } : iter)
+            })
             break
-          case 'decision':
+          case 'decision': {
+            const iteration = Number(data.iteration)
             setStreamIterations(prev => [
               {
-                iteration: data.iteration as number,
+                iteration,
                 decision: data.decision as 'kept' | 'reverted',
                 new_score: data.new_score as number,
                 score_delta: data.score_delta as number,
                 reasoning: (data.reasoning as string) || '',
                 changed_params: (data.changed_params as Record<string, unknown>) || null,
                 duration_seconds: data.duration_seconds as number,
+                source_diff: (data.source_diff as string | null) || null,
                 source_diff_lines: (data.source_diff_lines as number) || 0,
                 validation_passed: data.validation_passed as boolean | null,
+                validation_result: (data.validation_result as Record<string, unknown> | null) || null,
+                backtest_result: (data.backtest_result as Record<string, unknown> | null) || null,
               },
-              ...prev,
+              ...prev.filter(iter => iter.iteration !== iteration),
             ])
             setStreamPhase(`iteration ${data.iteration} — ${data.decision}`)
             break
+          }
           case 'error':
             setStreamError(String(data.error || 'Unknown error'))
             break
@@ -303,6 +355,12 @@ export default function AutoresearchView({
     failed: 'bg-red-500',
     idle: 'bg-muted-foreground',
   }[experimentStatus] ?? 'bg-muted-foreground'
+  const expandedCodeIteration = expandedIteration === null
+    ? null
+    : displayIterations.find(iter => iter.iteration === expandedIteration) ?? null
+  const expandedValidationErrors = Array.isArray(expandedCodeIteration?.validation_result?.errors)
+    ? expandedCodeIteration.validation_result.errors
+    : []
 
   // ---------------------------------------------------------------------------
   // Render
@@ -676,57 +734,89 @@ export default function AutoresearchView({
                           </tr>
                         </thead>
                         <tbody>
-                          {displayIterations.map((iter, idx) => (
-                            <tr key={idx}
-                              className={cn('border-t border-border/30 hover:bg-muted/30', iter.decision === 'kept' && 'bg-emerald-500/5')}
-                              title={iter.reasoning}>
-                              <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.iteration}</td>
-                              <td className="px-1.5 py-1 font-mono">{iter.new_score.toFixed(2)}</td>
-                              <td className={cn('px-1.5 py-1 font-mono',
-                                iter.score_delta > 0 ? 'text-emerald-500' : iter.score_delta < 0 ? 'text-red-400' : 'text-muted-foreground')}>
-                                {iter.score_delta > 0 ? '+' : ''}{iter.score_delta.toFixed(3)}
-                              </td>
-                              <td className="px-1.5 py-1">
-                                {iter.decision === 'kept' ? <Check className="w-3.5 h-3.5 text-emerald-500" />
-                                  : iter.decision === 'reverted' ? <X className="w-3.5 h-3.5 text-red-400" />
-                                  : <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
-                              </td>
-                              <td className="px-1.5 py-1">
-                                {iter.validation_passed === true ? <Check className="w-3 h-3 text-emerald-500" />
-                                  : iter.validation_passed === false ? <X className="w-3 h-3 text-red-400" />
-                                  : <span className="text-muted-foreground">-</span>}
-                              </td>
-                              <td className="px-1.5 py-1 text-muted-foreground truncate max-w-[200px]">
-                                {iter.source_diff_lines ? (
-                                  <button onClick={() => setExpandedIteration(expandedIteration === iter.iteration ? null : iter.iteration)}
-                                    className="text-[10px] text-purple-400 hover:underline">
-                                    {iter.source_diff_lines} lines
-                                  </button>
-                                ) : <span className="italic">none</span>}
-                              </td>
-                              <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.duration_seconds.toFixed(0)}s</td>
-                            </tr>
-                          ))}
+                          {displayIterations.map((iter, idx) => {
+                            const hasDetails = Boolean(iter.reasoning || iter.source_diff || iter.validation_result)
+                            return (
+                              <tr key={idx}
+                                className={cn('border-t border-border/30 hover:bg-muted/30', iter.decision === 'kept' && 'bg-emerald-500/5')}
+                                title={iter.reasoning}>
+                                <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.iteration}</td>
+                                <td className="px-1.5 py-1 font-mono">{iter.new_score.toFixed(2)}</td>
+                                <td className={cn('px-1.5 py-1 font-mono',
+                                  iter.score_delta > 0 ? 'text-emerald-500' : iter.score_delta < 0 ? 'text-red-400' : 'text-muted-foreground')}>
+                                  {iter.score_delta > 0 ? '+' : ''}{iter.score_delta.toFixed(3)}
+                                </td>
+                                <td className="px-1.5 py-1">
+                                  {iter.decision === 'kept' ? <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                    : iter.decision === 'reverted' ? <X className="w-3.5 h-3.5 text-red-400" />
+                                    : <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+                                </td>
+                                <td className="px-1.5 py-1">
+                                  {iter.validation_passed === true ? <Check className="w-3 h-3 text-emerald-500" />
+                                    : iter.validation_passed === false ? <X className="w-3 h-3 text-red-400" />
+                                    : <span className="text-muted-foreground">-</span>}
+                                </td>
+                                <td className="px-1.5 py-1 text-muted-foreground truncate max-w-[200px]">
+                                  {iter.source_diff_lines ? (
+                                    <button onClick={() => setExpandedIteration(expandedIteration === iter.iteration ? null : iter.iteration)}
+                                      className="text-[10px] text-purple-400 hover:underline">
+                                      {iter.source_diff_lines} lines
+                                    </button>
+                                  ) : hasDetails ? (
+                                    <button onClick={() => setExpandedIteration(expandedIteration === iter.iteration ? null : iter.iteration)}
+                                      className="text-[10px] text-purple-400 hover:underline">
+                                      details
+                                    </button>
+                                  ) : <span className="italic">none</span>}
+                                </td>
+                                <td className="px-1.5 py-1 font-mono text-muted-foreground">{iter.duration_seconds.toFixed(0)}s</td>
+                              </tr>
+                            )
+                          })}
                         </tbody>
                       </table>
 
-                      {/* Expanded diff viewer */}
-                      {expandedIteration !== null &&
-                        Boolean(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff) && (
+                      {/* Expanded code iteration detail */}
+                      {expandedCodeIteration && (
                         <div className="rounded border border-purple-500/30 bg-background/90 p-2">
                           <div className="flex items-center justify-between mb-1">
-                            <span className="text-[9px] text-muted-foreground">Diff for iteration {expandedIteration}</span>
+                            <span className="text-[9px] text-muted-foreground">Iteration {expandedCodeIteration.iteration} details</span>
                             <button onClick={() => setExpandedIteration(null)} className="text-[9px] text-muted-foreground hover:text-foreground">close</button>
                           </div>
-                          <pre className="text-[9px] font-mono overflow-auto max-h-[150px] leading-tight">
-                            {(displayIterations.find(i => i.iteration === expandedIteration)?.source_diff ?? '').split('\n').map((line: string, i: number) => (
-                              <div key={i} className={cn(
-                                line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400' :
-                                line.startsWith('-') && !line.startsWith('---') ? 'text-red-400' :
-                                'text-muted-foreground'
-                              )}>{line}</div>
-                            ))}
-                          </pre>
+                          {expandedCodeIteration.reasoning && (
+                            <div className="mb-2">
+                              <p className="mb-0.5 text-[9px] font-medium text-muted-foreground">Reasoning</p>
+                              <p className="whitespace-pre-wrap text-[10px] leading-relaxed text-foreground/90">{expandedCodeIteration.reasoning}</p>
+                            </div>
+                          )}
+                          {expandedCodeIteration.validation_result && (
+                            <div className="mb-2">
+                              <p className="mb-0.5 text-[9px] font-medium text-muted-foreground">Validation</p>
+                              <p className="text-[10px] text-foreground/90">
+                                {expandedCodeIteration.validation_passed === true
+                                  ? 'passed'
+                                  : expandedCodeIteration.validation_passed === false
+                                  ? 'failed'
+                                  : 'not run'}
+                              </p>
+                              {expandedValidationErrors.length > 0 && (
+                                <pre className="mt-1 max-h-[80px] overflow-auto rounded bg-muted/30 p-1 text-[9px] leading-tight text-red-400">
+                                  {expandedValidationErrors.map(String).join('\n')}
+                                </pre>
+                              )}
+                            </div>
+                          )}
+                          {expandedCodeIteration.source_diff && (
+                            <pre className="text-[9px] font-mono overflow-auto max-h-[150px] leading-tight">
+                              {expandedCodeIteration.source_diff.split('\n').map((line: string, i: number) => (
+                                <div key={i} className={cn(
+                                  line.startsWith('+') && !line.startsWith('+++') ? 'text-emerald-400' :
+                                  line.startsWith('-') && !line.startsWith('---') ? 'text-red-400' :
+                                  'text-muted-foreground'
+                                )}>{line}</div>
+                              ))}
+                            </pre>
+                          )}
                         </div>
                       )}
 

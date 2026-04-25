@@ -32,7 +32,7 @@ from models.database import (
     Strategy,
     Trader,
 )
-from services.ai.agent import AgentTool, run_agent_to_completion
+from services.ai.agent import Agent, AgentEventType, AgentTool, run_agent_to_completion
 from services.param_optimizer import (
     DEFAULT_PARAM_SPECS,
     BacktestResult,
@@ -130,6 +130,83 @@ async def save_autoresearch_settings(updates: dict[str, Any]) -> dict[str, Any]:
                 setattr(row, col, value)
         await session.commit()
     return await load_autoresearch_settings()
+
+
+async def _run_agent_to_completion_streaming(
+    *,
+    system_prompt: str,
+    query: str,
+    tools: list[AgentTool],
+    model: str | None,
+    max_iterations: int,
+    session_type: str,
+    iteration_num: int,
+) -> AsyncGenerator[dict[str, Any], None]:
+    """Run an agent and forward progress events before yielding the final result."""
+    agent = Agent(
+        system_prompt=system_prompt,
+        tools=tools,
+        model=model,
+        max_iterations=max_iterations,
+        session_type=session_type,
+    )
+
+    result: dict[str, Any] | None = None
+    async for agent_event in agent.run(query):
+        if agent_event.type == AgentEventType.THINKING:
+            content = str(agent_event.data.get("content") or "").strip()
+            if content:
+                yield {
+                    "event": "agent_progress",
+                    "data": {
+                        "iteration": iteration_num,
+                        "phase": "thinking",
+                        "message": content[:1000],
+                    },
+                }
+        elif agent_event.type == AgentEventType.TOOL_START:
+            tool_name = str(agent_event.data.get("tool") or "tool")
+            yield {
+                "event": "agent_progress",
+                "data": {
+                    "iteration": iteration_num,
+                    "phase": "tool_start",
+                    "tool": tool_name,
+                    "message": f"Using {tool_name}",
+                },
+            }
+        elif agent_event.type == AgentEventType.TOOL_END:
+            tool_name = str(agent_event.data.get("tool") or "tool")
+            yield {
+                "event": "agent_progress",
+                "data": {
+                    "iteration": iteration_num,
+                    "phase": "tool_end",
+                    "tool": tool_name,
+                    "message": f"Finished {tool_name}",
+                },
+            }
+        elif agent_event.type == AgentEventType.TOOL_ERROR:
+            tool_name = str(agent_event.data.get("tool") or "tool")
+            error = str(agent_event.data.get("error") or "tool error")
+            yield {
+                "event": "agent_progress",
+                "data": {
+                    "iteration": iteration_num,
+                    "phase": "tool_error",
+                    "tool": tool_name,
+                    "message": f"{tool_name}: {error}"[:1000],
+                },
+            }
+        elif agent_event.type == AgentEventType.DONE:
+            result = agent_event.data
+        elif agent_event.type == AgentEventType.ERROR:
+            raise RuntimeError(str(agent_event.data.get("error") or "Agent failed"))
+
+    if result is None:
+        raise RuntimeError("Agent completed without producing a result")
+
+    yield {"event": "agent_done", "data": result}
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +608,8 @@ class AutoresearchService:
                 "reasoning": r.reasoning,
                 "changed_params": r.changed_params_json,
                 "backtest_result": r.backtest_result_json,
+                "source_diff": r.source_diff,
+                "validation_result": r.validation_result_json,
                 "duration_seconds": r.duration_seconds,
                 "tokens_used": r.tokens_used,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -1138,14 +1217,22 @@ class AutoresearchService:
                 tokens_used = 0
 
                 try:
-                    result = await run_agent_to_completion(
+                    result = None
+                    async for agent_event in _run_agent_to_completion_streaming(
                         system_prompt=system_prompt,
                         query=f"Propose code improvements for strategy '{strategy_slug}' (iteration {iteration_num}). Current score: {best_score:.4f}. Use propose_code_change to submit your modified source code.",
                         tools=tools,
                         model=model,
                         max_iterations=10,
                         session_type="autoresearch_code",
-                    )
+                        iteration_num=iteration_num,
+                    ):
+                        if agent_event["event"] == "agent_done":
+                            result = agent_event["data"]
+                        else:
+                            yield agent_event
+                    if result is None:
+                        raise RuntimeError("Agent completed without producing a result")
                     answer = result.get("result", {}).get("answer", "")
                     tokens_used = result.get("result", {}).get("tokens_used", 0) or 0
 
@@ -1318,8 +1405,11 @@ class AutoresearchService:
                         "new_score": round(new_score, 4),
                         "score_delta": score_delta,
                         "best_score": round(best_score, 4),
+                        "source_diff": source_diff[:20_000] if source_diff else None,
                         "source_diff_lines": len(source_diff.splitlines()) if source_diff else 0,
                         "validation_passed": validation_result.get("valid", False) if validation_result else None,
+                        "validation_result": validation_result or None,
+                        "backtest_result": backtest_result_dict or None,
                         "reasoning": reasoning[:300],
                         "duration_seconds": duration,
                         "kept_count": kept_count,
