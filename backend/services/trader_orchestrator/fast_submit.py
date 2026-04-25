@@ -11,8 +11,8 @@ Key differences vs. SessionEngine:
   ``execution_session_legs`` / ``execution_session_events`` rows.
 * No pre-submit placeholder with a 45s ack timeout.
 * No leg-wave / reprice orchestration — one attempt, one result.
-* A single DB transaction writes one ``TraderOrder`` row; position
-  inventory is rolled into the same commit via ``sync_trader_position_inventory``.
+* A single short DB transaction writes one ``TraderOrder`` row and its
+  verification event; inventory rebuilds are left to the slower workers.
 
 The low-level submission to the provider still flows through the
 well-tested ``submit_execution_leg`` primitive in ``order_manager``, so
@@ -32,12 +32,17 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import services.trader_hot_state as hot_state
+from services.trader_order_verification import (
+    TRADER_ORDER_VERIFICATION_LOCAL,
+    append_trader_order_verification_event,
+)
 from services.trader_orchestrator.order_manager import LegSubmitResult, submit_execution_leg
 from services.signal_bus import set_trade_signal_status
 from services.trader_orchestrator_state import (
+    _is_active_order_status,
     _now,
+    build_trader_order_row,
     create_trader_decision,
-    create_trader_order,
     record_signal_consumption,
     upsert_trader_signal_cursor,
 )
@@ -181,10 +186,10 @@ async def execute_fast_signal(
 ) -> FastSubmitResult:
     """Fast-tier single-leg direct submit.
 
-    Writes exactly one ``TraderOrder`` row (plus the verification event
-    that ``create_trader_order`` already appends and the
-    ``sync_trader_position_inventory`` upsert that fires inside the same
-    commit).  Returns a ``FastSubmitResult`` for the caller to record.
+    Writes exactly one ``TraderOrder`` row plus its verification event.
+    It deliberately bypasses ``create_trader_order`` because that general
+    helper performs a full inventory rebuild, which is too expensive for
+    the fast-tier pool.
     """
     now = _now()
     now_iso = now.isoformat()
@@ -264,8 +269,7 @@ async def execute_fast_signal(
                 trace_id=decision_audit.get("trace_id"),
                 commit=False,
             )
-        order = await create_trader_order(
-            session,
+        order = build_trader_order_row(
             trader_id=trader_id,
             signal=signal,
             decision_id=decision_id,
@@ -278,8 +282,40 @@ async def execute_fast_signal(
             reason=reason,
             payload=order_payload,
             error_message=leg_result.error_message,
-            commit=False,
         )
+        session.add(order)
+        event_payload = dict(order.payload_json or {})
+        event_payload.update({"status": str(order.status or ""), "mode": str(order.mode or "")})
+        append_trader_order_verification_event(
+            session,
+            trader_order_id=str(order.id),
+            verification_status=str(order.verification_status or TRADER_ORDER_VERIFICATION_LOCAL),
+            source=order.verification_source,
+            event_type="order_created",
+            reason=order.verification_reason,
+            provider_order_id=order.provider_order_id,
+            provider_clob_order_id=order.provider_clob_order_id,
+            execution_wallet_address=order.execution_wallet_address,
+            tx_hash=order.verification_tx_hash,
+            payload_json=event_payload,
+            created_at=now,
+        )
+        await session.flush()
+        if _is_active_order_status(mode_key, order_status):
+            hot_state.upsert_active_order(
+                trader_id=trader_id,
+                mode=mode_key,
+                order_id=str(order.id),
+                status=order_status,
+                market_id=str(order.market_id or ""),
+                direction=str(order.direction or ""),
+                source=str(order.source or ""),
+                notional_usd=safe_float(leg_result.notional_usd, notional) or 0.0,
+                entry_price=safe_float(leg_result.effective_price, safe_float(order.entry_price, 0.0)) or 0.0,
+                token_id=str(leg.get("token_id") or ""),
+                filled_shares=safe_float(leg_result.shares, 0.0) or 0.0,
+                payload=order_payload,
+            )
     except Exception as exc:
         try:
             await session.rollback()
@@ -290,7 +326,7 @@ async def execute_fast_signal(
             session_id="",
             status="failed",
             effective_price=leg_result.effective_price,
-            error_message=f"create_trader_order raised: {type(exc).__name__}: {exc}",
+            error_message=f"fast order persist raised: {type(exc).__name__}: {exc}",
             orders_written=0,
             payload={"fast_tier": True, "reason": "persist_failed"},
         )

@@ -522,11 +522,11 @@ async def test_execute_fast_signal_rolls_back_partial_decision_when_order_persis
             notional_usd=3.0,
         )
 
-    async def fake_create_trader_order(*_args, **_kwargs):
+    def fake_build_trader_order_row(**_kwargs):
         raise RuntimeError("order write failed")
 
     monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
-    monkeypatch.setattr(fast_submit, "create_trader_order", fake_create_trader_order)
+    monkeypatch.setattr(fast_submit, "build_trader_order_row", fake_build_trader_order_row)
 
     try:
         async with session_factory() as session:

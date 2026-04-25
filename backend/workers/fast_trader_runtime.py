@@ -36,12 +36,11 @@ from sqlalchemy.exc import DBAPIError
 from models.database import AsyncSessionLocal, FastAsyncSessionLocal, Trader, TraderSignalCursor
 from services.event_bus import event_bus
 from services.intent_runtime import get_intent_runtime
-from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
+from services.live_pressure import is_db_pressure_active
 from services.strategy_loader import strategy_loader
 import services.trader_hot_state as hot_state
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
 from services.trader_orchestrator.fast_submit import (
-    advance_fast_trader_cursor,
     execute_fast_signal,
 )
 from services.trader_orchestrator_state import (
@@ -49,7 +48,6 @@ from services.trader_orchestrator_state import (
     list_fast_traders,
     list_unconsumed_trade_signals,
     read_orchestrator_control,
-    update_trader_decision,
 )
 from services.worker_state import _is_retryable_db_error, write_worker_snapshot
 from utils.converters import safe_int
@@ -184,7 +182,6 @@ class _FastTraderTask:
             except Exception as exc:
                 self._last_cycle_error = type(exc).__name__
                 if _is_retryable_db_error(exc):
-                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
                     logger.warning(
                         "Fast trader cycle hit retryable DB error",
                         trader_id=trader_id,
@@ -520,7 +517,7 @@ class _FastTraderTask:
                     )
                 except Exception as exc:
                     if _is_retryable_db_error(exc):
-                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                        logger.debug("Fast trader signal processing hit retryable DB error", exc_info=exc)
                     logger.warning(
                         "Fast trader signal processing failed",
                         trader_id=trader_id,
@@ -572,22 +569,8 @@ class _FastTraderTask:
                     try:
                         await asyncio.shield(session.commit())
                     except Exception as exc:
-                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
                         logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
                 return
-
-        async with FastAsyncSessionLocal() as session:
-            try:
-                if await self._touch_trader_run(session, force=True):
-                    await asyncio.shield(session.commit())
-            except Exception as exc:
-                try:
-                    await session.rollback()
-                except Exception as rollback_exc:
-                    logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
-                if _is_retryable_db_error(exc):
-                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
-                logger.warning("Fast trader last-run touch failed", trader_id=trader_id, exc_info=exc)
 
         mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
         risk_limits = dict(self._trader.get("risk_limits") or {})
@@ -603,7 +586,7 @@ class _FastTraderTask:
                 )
             except Exception as exc:
                 if _is_retryable_db_error(exc):
-                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                    logger.debug("Fast trader signal processing hit retryable DB error", exc_info=exc)
                 logger.warning(
                     "Fast trader signal processing failed",
                     trader_id=trader_id,
@@ -973,26 +956,9 @@ class _FastTraderTask:
                 )
                 return
 
-            await update_trader_decision(
-                active_session,
-                decision_id=decision_id,
-                decision=None if result_status in _FAST_ORDER_SUCCESS_STATUSES else "failed",
-                reason=(
-                    None
-                    if result_status in _FAST_ORDER_SUCCESS_STATUSES
-                    else (result.error_message or reason or f"fast_submit:{result.status}")
-                ),
-                payload_patch={
-                    "orders_written": result.orders_written,
-                    "created_orders": result.created_orders,
-                    "submit_result": result.payload,
-                },
-                commit=False,
-            )
-            await advance_fast_trader_cursor(
-                active_session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
+                mode=mode,
                 decision_id=decision_id,
                 outcome=outcome_for_cursor,
                 reason=result.error_message or reason,
