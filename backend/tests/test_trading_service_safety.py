@@ -112,6 +112,11 @@ class _NoOpenOrdersClient:
         return []
 
 
+class _FailingOpenOrdersClient:
+    def get_orders(self):
+        raise TimeoutError("simulated provider timeout")
+
+
 class _CachedSnapshotClient:
     def __init__(self):
         self.get_orders_calls = 0
@@ -557,6 +562,65 @@ async def test_sync_provider_open_orders_closes_absent_local_active_orders(monke
     assert open_orders == []
     assert service.get_order("local-open-order") is not None
     assert service.get_order("local-open-order").status == OrderStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_sync_provider_open_orders_preserves_cached_active_orders_on_provider_failure(monkeypatch):
+    _configure_limits(monkeypatch)
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = _FailingOpenOrdersClient()
+
+    open_order = Order(
+        id="local-open-provider-down",
+        token_id="token-provider-down",
+        side=OrderSide.BUY,
+        price=0.705,
+        size=6.15,
+        order_type=live_execution_module.OrderType.GTC,
+        status=OrderStatus.OPEN,
+        filled_size=0.0,
+        clob_order_id="clob-provider-down",
+        created_at=datetime(2026, 4, 4, 2, 16, 5),
+        updated_at=datetime(2026, 4, 4, 2, 16, 5),
+    )
+    service._remember_order(open_order)
+
+    open_orders = await service.get_open_orders()
+
+    assert [order.id for order in open_orders] == ["local-open-provider-down"]
+    assert service.get_order("local-open-provider-down").status == OrderStatus.OPEN
+
+
+@pytest.mark.asyncio
+async def test_sync_provider_open_orders_preserves_cached_active_orders_when_circuit_open(monkeypatch):
+    _configure_limits(monkeypatch)
+
+    service = LiveExecutionService()
+    service._initialized = True
+    service._client = _NoOpenOrdersClient()
+    service._clob_read_circuit_open_until = live_execution_module._time.monotonic() + 30.0
+
+    open_order = Order(
+        id="local-open-circuit",
+        token_id="token-circuit",
+        side=OrderSide.BUY,
+        price=0.5,
+        size=10.0,
+        order_type=live_execution_module.OrderType.GTC,
+        status=OrderStatus.OPEN,
+        filled_size=0.0,
+        clob_order_id="clob-circuit",
+        created_at=datetime(2026, 4, 4, 2, 16, 5),
+        updated_at=datetime(2026, 4, 4, 2, 16, 5),
+    )
+    service._remember_order(open_order)
+
+    open_orders = await service.get_open_orders()
+
+    assert [order.id for order in open_orders] == ["local-open-circuit"]
+    assert service.get_order("local-open-circuit").status == OrderStatus.OPEN
 
 
 @pytest.mark.asyncio

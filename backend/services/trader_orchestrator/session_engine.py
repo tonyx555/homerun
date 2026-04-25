@@ -2692,6 +2692,7 @@ class ExecutionSessionEngine:
         cancelled = 0
         session_ids = [str(row.id) for row in sessions if str(row.id or "").strip()]
         leg_rollups = await get_execution_session_leg_rollups(self.db, session_ids)
+        provider_reads_unavailable = mode == "live" and live_execution_service.clob_read_circuit_open()
         for row in sessions:
             row_id = str(row.id or "").strip()
             row_type = type(row)
@@ -2717,6 +2718,7 @@ class ExecutionSessionEngine:
                         mode == "live"
                         and resolved_trader_id
                         and hasattr(self.db, "execute")
+                        and not provider_reads_unavailable
                         and placing_age_seconds <= _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS
                     ):
                         try:
@@ -2749,7 +2751,10 @@ class ExecutionSessionEngine:
                         session_id=row_id,
                         reason=timeout_reason,
                         terminal_status="failed",
-                        skip_provider_io=placing_age_seconds > _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS,
+                        skip_provider_io=(
+                            provider_reads_unavailable
+                            or placing_age_seconds > _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS
+                        ),
                     )
                     cancelled += 1
                     continue

@@ -22,6 +22,12 @@ def test_should_suppress_asyncio_exception_for_transport_noise():
     assert host._should_suppress_asyncio_exception("_ProactorBasePipeTransport._loop_reading", None) is True
 
 
+def test_should_suppress_asyncio_exception_for_protocol_invalid_state_noise():
+    exc = asyncio.InvalidStateError("invalid state")
+
+    assert host._should_suppress_asyncio_exception("Fatal error: protocol.data_received() call failed.", exc) is True
+
+
 @pytest.mark.asyncio
 async def test_initialize_services_schedules_live_execution_in_background(monkeypatch):
     worker_host = host.WorkerHost("all")

@@ -2385,6 +2385,21 @@ class LiveExecutionService:
             return False
         return True
 
+    def clob_read_circuit_open(self) -> bool:
+        return self._clob_read_circuit_open()
+
+    def _cached_active_open_orders(self) -> list[Order]:
+        active_statuses = {
+            OrderStatus.PENDING,
+            OrderStatus.OPEN,
+            OrderStatus.PARTIALLY_FILLED,
+        }
+        return [
+            order
+            for order in sorted(self._orders.values(), key=lambda item: item.created_at, reverse=True)
+            if order.status in active_statuses
+        ]
+
     def _clob_read_record_failure(self, exc: Exception, operation: str) -> None:
         """Record a CLOB API read failure and open circuit breaker if threshold met."""
         now_mono = _time.monotonic()
@@ -2408,6 +2423,8 @@ class LiveExecutionService:
                     operation,
                     consecutive_failures=self._clob_read_consecutive_failures,
                     circuit_open=self._clob_read_circuit_open_until is not None,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
                 )
             else:
                 logger.error(
@@ -2433,7 +2450,7 @@ class LiveExecutionService:
             return []
 
         if self._clob_read_circuit_open():
-            return []
+            return self._cached_active_open_orders()
 
         try:
             provider_response = await self._run_client_io(
@@ -2442,7 +2459,7 @@ class LiveExecutionService:
             )
         except Exception as exc:
             self._clob_read_record_failure(exc, "Provider open orders sync")
-            return []
+            return self._cached_active_open_orders()
 
         self._clob_read_record_success("Provider open orders sync")
 
