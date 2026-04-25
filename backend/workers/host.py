@@ -116,6 +116,8 @@ def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
 def _should_suppress_asyncio_exception(message: str, exc: Exception | None) -> bool:
     if "Proactor" in message or "_loop_reading" in message or "_loop_writing" in message:
         return True
+    if isinstance(exc, ConnectionError) and "unexpected connection_lost() call" in str(exc):
+        return True
     return isinstance(exc, AttributeError) and "backend_pid" in str(exc)
 
 

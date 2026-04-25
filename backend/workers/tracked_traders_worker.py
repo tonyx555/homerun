@@ -19,6 +19,7 @@ from models.database import AppSettings, RetryableAsyncSession
 from services.data_events import DataEvent, EventType
 from services.event_dispatcher import event_dispatcher
 from services.insider_detector import insider_detector
+from services.live_pressure import db_pressure_snapshot, is_db_pressure_active
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_signal_bridge import bridge_opportunities_to_signals
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
@@ -278,6 +279,15 @@ async def _run_full_intelligence(*, include_confluence: bool) -> dict[str, str]:
     )
 
     outcomes: dict[str, str] = {}
+    if is_db_pressure_active():
+        for step_name, _operation, _timeout_seconds in step_specs:
+            outcomes[step_name] = "db_pressure"
+        logger.warning(
+            "Tracked-traders full_intelligence cycle skipped under DB pressure",
+            db_pressure=db_pressure_snapshot(),
+        )
+        return outcomes
+
     for step_name, operation, timeout_seconds in step_specs:
         try:
             await _graceful_timeout(

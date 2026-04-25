@@ -14,7 +14,7 @@ from config import settings
 from models.database import AsyncSessionLocal, TradeSignal, TradeSignalEmission
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
-from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
+from services.live_pressure import db_pressure_remaining_seconds, is_db_pressure_active, maybe_mark_db_pressure
 from services.runtime_signal_queue import publish_signal_batch
 from services.signal_bus import (
     SIGNAL_ACTIVE_STATUSES as BUS_SIGNAL_ACTIVE_STATUSES,
@@ -2082,6 +2082,8 @@ class IntentRuntime:
     async def _retry_projection_payload(self, payload: dict[str, Any]) -> None:
         retry_count = int(payload.get("_projection_retry_count") or 0)
         delay_seconds = _PROJECTION_RETRY_BASE_DELAY_SECONDS * (2 ** max(0, retry_count - 1))
+        if is_db_pressure_active():
+            delay_seconds = max(delay_seconds, min(db_pressure_remaining_seconds() + 0.25, 30.0))
         await asyncio.sleep(delay_seconds)
         await self._projection_queue.put(payload)
 

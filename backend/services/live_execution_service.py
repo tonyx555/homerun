@@ -2394,6 +2394,15 @@ class LiveExecutionService:
         if now_mono - self._clob_read_last_failure_logged >= _CLOB_READ_FAILURE_LOG_INTERVAL:
             self._clob_read_last_failure_logged = now_mono
             if _is_transient_transport_error(exc):
+                if self._clob_read_consecutive_failures < _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD:
+                    logger.debug(
+                        "%s transient failure",
+                        operation,
+                        consecutive_failures=self._clob_read_consecutive_failures,
+                        circuit_open=False,
+                        error_type=type(exc).__name__,
+                    )
+                    return
                 logger.warning(
                     "%s failed",
                     operation,

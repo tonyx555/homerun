@@ -9,6 +9,7 @@ from typing import Any
 
 import asyncpg
 
+from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm.exc import StaleDataError
 
@@ -17,6 +18,7 @@ from services.event_bus import event_bus
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
 from services.live_execution_service import live_execution_service
+from services.live_pressure import db_pressure_snapshot, is_db_pressure_active
 from services.trader_orchestrator.position_lifecycle import (
     reconcile_live_positions,
     register_open_orders as register_exit_orders,
@@ -579,6 +581,9 @@ async def _sync_position_marks_and_exit_registry() -> None:
 _recovery_next_attempt_at: float = 0.0
 _RECOVERY_BACKOFF_SECONDS = 120.0  # back off 2 minutes on failure
 _RECOVERY_SUCCESS_INTERVAL_SECONDS = 300.0
+_RECOVERY_DB_PRESSURE_BACKOFF_SECONDS = 180.0
+_AUTHORITY_RECOVERY_STATEMENT_TIMEOUT_MS = 8000
+_AUTHORITY_RECOVERY_LOCK_TIMEOUT_MS = 1000
 _live_order_cleanup_next_at: float = 0.0
 
 
@@ -593,42 +598,56 @@ async def _run_reconciliation_cycle(
     summary = _empty_cycle_summary()
     now_mono = time.monotonic()
     if now_mono >= _recovery_next_attempt_at:
-        try:
-            async def _authority_recovery() -> None:
-                async with AsyncSessionLocal() as session:
-                    await recover_missing_live_trader_orders(
-                        session,
-                        trader_ids=None,
-                        commit=True,
-                        broadcast=True,
-                    )
+        if is_db_pressure_active():
+            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_DB_PRESSURE_BACKOFF_SECONDS
+            logger.warning(
+                "Skipping live order authority recovery under DB pressure; backing off %.0fs",
+                _RECOVERY_DB_PRESSURE_BACKOFF_SECONDS,
+                db_pressure=db_pressure_snapshot(),
+            )
+        else:
+            try:
+                async def _authority_recovery() -> None:
+                    async with AsyncSessionLocal() as session:
+                        await session.execute(
+                            text(f"SET LOCAL statement_timeout = '{_AUTHORITY_RECOVERY_STATEMENT_TIMEOUT_MS}'")
+                        )
+                        await session.execute(
+                            text(f"SET LOCAL lock_timeout = '{_AUTHORITY_RECOVERY_LOCK_TIMEOUT_MS}'")
+                        )
+                        await recover_missing_live_trader_orders(
+                            session,
+                            trader_ids=None,
+                            commit=True,
+                            broadcast=True,
+                        )
 
-            await _graceful_timeout(
-                _authority_recovery(),
-                label="authority_recovery",
-                timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
-            )
-            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_SUCCESS_INTERVAL_SECONDS
-        except _TimedTaskStillRunningError:
-            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
-            logger.warning(
-                "Live order authority recovery is still finishing from the prior timeout; backing off %.0fs",
-                _RECOVERY_BACKOFF_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
-            logger.warning(
-                "Live order authority recovery timed out after %.0fs; backing off %.0fs",
-                _TRADER_RECONCILE_TIMEOUT_SECONDS,
-                _RECOVERY_BACKOFF_SECONDS,
-            )
-        except Exception as exc:
-            _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
-            logger.warning(
-                "Live order authority recovery failed; backing off %.0fs",
-                _RECOVERY_BACKOFF_SECONDS,
-                exc_info=exc,
-            )
+                await _graceful_timeout(
+                    _authority_recovery(),
+                    label="authority_recovery",
+                    timeout=_TRADER_RECONCILE_TIMEOUT_SECONDS,
+                )
+                _recovery_next_attempt_at = time.monotonic() + _RECOVERY_SUCCESS_INTERVAL_SECONDS
+            except _TimedTaskStillRunningError:
+                _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+                logger.warning(
+                    "Live order authority recovery is still finishing from the prior timeout; backing off %.0fs",
+                    _RECOVERY_BACKOFF_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+                logger.warning(
+                    "Live order authority recovery timed out after %.0fs; backing off %.0fs",
+                    _TRADER_RECONCILE_TIMEOUT_SECONDS,
+                    _RECOVERY_BACKOFF_SECONDS,
+                )
+            except Exception as exc:
+                _recovery_next_attempt_at = time.monotonic() + _RECOVERY_BACKOFF_SECONDS
+                logger.warning(
+                    "Live order authority recovery failed; backing off %.0fs",
+                    _RECOVERY_BACKOFF_SECONDS,
+                    exc_info=exc,
+                )
     # Periodic cleanup of stale live_trading_orders (once per hour).
     # These accumulate from CLOB order syncs and the recovery function
     # loads ALL of them — keeping the table small prevents memory spikes.

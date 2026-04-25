@@ -27,6 +27,43 @@ from utils.retry import is_retryable_db_error, db_retry_delay
 logger = get_logger("discovery_worker")
 PRIORITY_BACKLOG_INTERVAL_MINUTES = 10
 _DISCOVERY_DB_RETRY_ATTEMPTS = 3
+_ACTIVE_DISCOVERY_HEARTBEAT_SECONDS = 60.0
+
+
+async def _active_discovery_heartbeat(
+    stop_event: asyncio.Event,
+    *,
+    interval_minutes: int,
+    enabled: bool,
+    priority_backlog_mode: bool,
+    priority_backlog_count: int,
+) -> None:
+    while True:
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=_ACTIVE_DISCOVERY_HEARTBEAT_SECONDS)
+            return
+        except asyncio.TimeoutError:
+            pass
+        try:
+            async with AsyncSessionLocal() as session:
+                await write_worker_snapshot(
+                    session,
+                    "discovery",
+                    running=True,
+                    enabled=enabled,
+                    current_activity="Scanning trader wallets...",
+                    interval_seconds=interval_minutes * 60,
+                    last_run_at=None,
+                    last_error=None,
+                    stats={
+                        "wallets_discovered_last_run": wallet_discovery._wallets_discovered_last_run,
+                        "wallets_analyzed_last_run": wallet_discovery._wallets_analyzed_last_run,
+                        "priority_backlog_mode": priority_backlog_mode,
+                        "priority_backlog_count": priority_backlog_count,
+                    },
+                )
+        except Exception:
+            pass
 
 
 async def _run_loop() -> None:
@@ -159,6 +196,17 @@ async def _run_loop() -> None:
 
             discovery_exc: Exception | None = None
             for _db_attempt in range(_DISCOVERY_DB_RETRY_ATTEMPTS):
+                heartbeat_stop = asyncio.Event()
+                heartbeat_task = asyncio.create_task(
+                    _active_discovery_heartbeat(
+                        heartbeat_stop,
+                        interval_minutes=interval_minutes,
+                        enabled=not paused,
+                        priority_backlog_mode=priority_backlog_mode,
+                        priority_backlog_count=priority_backlog_count,
+                    ),
+                    name="discovery-active-heartbeat",
+                )
                 try:
                     await wallet_discovery.run_discovery()
                     discovery_exc = None
@@ -175,6 +223,12 @@ async def _run_loop() -> None:
                     )
                     discovery_exc = db_exc
                     await asyncio.sleep(delay)
+                finally:
+                    heartbeat_stop.set()
+                    try:
+                        await heartbeat_task
+                    except Exception:
+                        pass
             if discovery_exc is not None:
                 raise discovery_exc
 
