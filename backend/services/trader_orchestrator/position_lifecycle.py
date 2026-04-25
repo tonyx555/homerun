@@ -4949,7 +4949,6 @@ async def reconcile_live_positions(
                 continue
             payload = dict(row.payload_json or {})
             _mark_terminal_reopen_audited(row, payload, now, "no_reopen_authority")
-            state_updates += 1
 
     if wallet_positions_loaded and candidates:
         active_by_wallet_key: dict[str, list[tuple[TraderOrder, dict[str, Any], dict[str, Any]]]] = {}
