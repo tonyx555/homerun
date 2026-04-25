@@ -13,6 +13,7 @@ from services.trader_orchestrator.position_lifecycle import (
     _position_close_underfills_entry,
     _row_can_recover_entry_from_wallet_history,
     _row_has_wallet_trade_fill_authority,
+    _terminal_reopen_blocks_wallet_close,
 )
 from services.trader_order_verification import (
     append_trader_order_verification_event,
@@ -287,6 +288,53 @@ def test_strategy_exit_is_not_fallback_manual_exit():
             "close_trigger": "strategy:Smart take profit",
             "reason": "reconciliation_worker",
         }
+    )
+
+
+def test_reopened_terminal_close_blocks_same_wallet_activity():
+    payload = {
+        "terminal_close_reopen": {
+            "reopen_reason": "terminal_close_underfilled_entry",
+            "reopened_at": "2026-04-24T12:00:00Z",
+            "rejected_close_evidence_key": "wallet_activity|token-1|transactionHash:0xabc",
+        },
+    }
+
+    assert _terminal_reopen_blocks_wallet_close(
+        payload,
+        source="wallet_activity",
+        evidence_key="wallet_activity|token-1|transactionHash:0xabc",
+        evidence_timestamp="2026-04-24T12:05:00Z",
+    )
+
+
+def test_reopened_terminal_close_blocks_stale_wallet_activity_without_key():
+    payload = {
+        "terminal_close_reopen": {
+            "reopen_reason": "terminal_close_underfilled_entry",
+            "reopened_at": "2026-04-24T12:00:00Z",
+        },
+    }
+
+    assert _terminal_reopen_blocks_wallet_close(
+        payload,
+        source="wallet_activity",
+        evidence_timestamp="2026-04-24T11:59:59Z",
+    )
+
+
+def test_reopened_terminal_close_allows_newer_wallet_activity():
+    payload = {
+        "terminal_close_reopen": {
+            "reopen_reason": "terminal_close_underfilled_entry",
+            "reopened_at": "2026-04-24T12:00:00Z",
+        },
+    }
+
+    assert not _terminal_reopen_blocks_wallet_close(
+        payload,
+        source="wallet_activity",
+        evidence_timestamp="2026-04-24T12:00:02Z",
     )
 
 

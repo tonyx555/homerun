@@ -2690,13 +2690,22 @@ class ExecutionSessionEngine:
         expired = 0
         completed = 0
         cancelled = 0
-        leg_rollups = await get_execution_session_leg_rollups(self.db, [row.id for row in sessions])
+        session_ids = [str(row.id) for row in sessions if str(row.id or "").strip()]
+        leg_rollups = await get_execution_session_leg_rollups(self.db, session_ids)
         for row in sessions:
+            row_id = str(row.id or "").strip()
+            row_type = type(row)
             status_key = str(row.status or "").strip().lower()
+            row_created_at = row.created_at
+            row_updated_at = row.updated_at
+            row_expires_at = row.expires_at
+            row_payload = dict(row.payload_json or {}) if isinstance(row.payload_json, dict) else {}
+            if not row_id:
+                continue
             if status_key == "paused":
                 continue
             if status_key == "placing":
-                baseline_ts = row.updated_at or row.created_at or now
+                baseline_ts = row_updated_at or row_created_at or now
                 if baseline_ts.tzinfo is None:
                     baseline_ts = baseline_ts.replace(tzinfo=timezone.utc)
                 else:
@@ -2722,7 +2731,7 @@ class ExecutionSessionEngine:
                         refreshed_row = None
                         if hasattr(self.db, "get"):
                             try:
-                                refreshed_row = await self.db.get(type(row), row.id)
+                                refreshed_row = await self.db.get(row_type, row_id)
                             except Exception:
                                 refreshed_row = None
                         refreshed_status = str(getattr(refreshed_row, "status", "") or "").strip().lower()
@@ -2737,21 +2746,21 @@ class ExecutionSessionEngine:
                         f"{int(_STALE_PRE_SUBMIT_SESSION_TIMEOUT_SECONDS)}s."
                     )
                     await self.cancel_session(
-                        session_id=row.id,
+                        session_id=row_id,
                         reason=timeout_reason,
                         terminal_status="failed",
                         skip_provider_io=placing_age_seconds > _LIVE_PRE_SUBMIT_AUTHORITY_RECOVERY_MAX_AGE_SECONDS,
                     )
                     cancelled += 1
                     continue
-            if row.expires_at is not None and now > row.expires_at:
-                expires_at = row.expires_at
+            if row_expires_at is not None and now > row_expires_at:
+                expires_at = row_expires_at
                 if expires_at.tzinfo is None:
                     expires_at = expires_at.replace(tzinfo=timezone.utc)
                 else:
                     expires_at = expires_at.astimezone(timezone.utc)
                 await self.cancel_session(
-                    session_id=row.id,
+                    session_id=row_id,
                     reason="Session timed out before all legs completed.",
                     terminal_status="expired",
                     skip_provider_io=(now - expires_at).total_seconds() > _STALE_SESSION_PROVIDER_IO_SKIP_SECONDS,
@@ -2760,11 +2769,11 @@ class ExecutionSessionEngine:
                 continue
 
             if status_key == "hedging":
-                session_payload = dict(row.payload_json or {}) if isinstance(row.payload_json, dict) else {}
+                session_payload = row_payload
                 hedge_timeout_seconds = max(1, safe_int(session_payload.get("hedge_timeout_seconds"), 20))
                 hedging_started_at = _parse_iso_utc(session_payload.get("hedging_started_at"))
                 if hedging_started_at is None:
-                    baseline_ts = row.updated_at or row.created_at or now
+                    baseline_ts = row_updated_at or row_created_at or now
                     if baseline_ts.tzinfo is None:
                         hedging_started_at = baseline_ts.replace(tzinfo=timezone.utc)
                     else:
@@ -2776,7 +2785,7 @@ class ExecutionSessionEngine:
                     timeout_reason = f"Hedge timeout exceeded ({hedge_timeout_seconds}s); escalating session to failed."
                     await create_execution_session_event(
                         self.db,
-                        session_id=row.id,
+                        session_id=row_id,
                         event_type="hedge_timeout",
                         severity="error",
                         message=timeout_reason,
@@ -2788,14 +2797,14 @@ class ExecutionSessionEngine:
                         commit=False,
                     )
                     await self.cancel_session(
-                        session_id=row.id,
+                        session_id=row_id,
                         reason=timeout_reason,
                         terminal_status="failed",
                     )
                     cancelled += 1
                     continue
 
-            leg_rollup = leg_rollups.get(row.id, {})
+            leg_rollup = leg_rollups.get(row_id, {})
             legs_total = safe_int(leg_rollup.get("legs_total"), 0)
             legs_completed = safe_int(leg_rollup.get("legs_completed"), 0)
             legs_failed = safe_int(leg_rollup.get("legs_failed"), 0)
@@ -2803,7 +2812,7 @@ class ExecutionSessionEngine:
             if legs_total > 0 and legs_completed >= legs_total:
                 await update_execution_session_status(
                     self.db,
-                    session_id=row.id,
+                    session_id=row_id,
                     status="completed",
                     commit=False,
                 )
@@ -2811,7 +2820,7 @@ class ExecutionSessionEngine:
             elif legs_failed > 0 and legs_open == 0 and legs_completed == 0:
                 await update_execution_session_status(
                     self.db,
-                    session_id=row.id,
+                    session_id=row_id,
                     status="failed",
                     error_message="All execution legs failed.",
                     commit=False,

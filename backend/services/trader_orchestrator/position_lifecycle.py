@@ -2209,6 +2209,43 @@ def _parse_wallet_trade_time(value: Any) -> Optional[datetime]:
     return _parse_iso_utc_naive(text)
 
 
+def _terminal_reopen_blocks_wallet_close(
+    payload: dict[str, Any],
+    *,
+    source: str,
+    evidence_key: str = "",
+    evidence_timestamp: Any = None,
+) -> bool:
+    if source not in {"wallet_activity", "wallet_trade", "closed_positions_api"}:
+        return False
+    marker = payload.get("terminal_close_reopen")
+    if not isinstance(marker, dict):
+        return False
+    if str(marker.get("reopen_reason") or "").strip().lower() != "terminal_close_underfilled_entry":
+        return False
+
+    rejected_key = str(marker.get("rejected_close_evidence_key") or "").strip()
+    if rejected_key and evidence_key and rejected_key == evidence_key:
+        return True
+
+    reopened_at = _parse_iso_utc_naive(marker.get("reopened_at"))
+    if reopened_at is None:
+        return True
+
+    evidence_at: Optional[datetime]
+    if isinstance(evidence_timestamp, datetime):
+        evidence_at = (
+            evidence_timestamp.astimezone(timezone.utc).replace(tzinfo=None)
+            if evidence_timestamp.tzinfo is not None
+            else evidence_timestamp
+        )
+    else:
+        evidence_at = _parse_wallet_trade_time(evidence_timestamp)
+    if evidence_at is None:
+        return True
+    return evidence_at <= reopened_at + timedelta(seconds=1.0)
+
+
 def _row_entry_anchor_naive(row: TraderOrder) -> Optional[datetime]:
     for value in (getattr(row, "created_at", None), getattr(row, "executed_at", None), getattr(row, "updated_at", None)):
         if not isinstance(value, datetime):
@@ -4540,7 +4577,9 @@ async def reconcile_live_positions(
                         "close_trigger": close_trigger,
                         "price_source": close_price_source,
                         "close_filled_size": float(close_size),
+                        "close_evidence_size": float(close_evidence_size),
                         "required_entry_size": float(entry_size),
+                        "rejected_close_evidence_key": close_evidence_key or None,
                     }
                     row.payload_json = payload
                     state_updates += 1
@@ -5288,6 +5327,27 @@ async def reconcile_live_positions(
         wallet_mark_price = _extract_wallet_mark_price(wallet_position)
         wallet_settlement_price = _extract_wallet_settlement_price(wallet_position)
         latest_wallet_sell_trade = wallet_sell_trades_by_token.get(token_id) if token_id else None
+        latest_wallet_sell_trade_reopen_blocked = False
+        if token_id and isinstance(latest_wallet_sell_trade, dict):
+            latest_wallet_sell_trade_reopen_blocked = _terminal_reopen_blocks_wallet_close(
+                payload,
+                source="wallet_trade",
+                evidence_key=_wallet_close_evidence_key("wallet_trade", token_id, latest_wallet_sell_trade),
+                evidence_timestamp=latest_wallet_sell_trade.get("timestamp")
+                or latest_wallet_sell_trade.get("created_at")
+                or latest_wallet_sell_trade.get("createdAt")
+                or latest_wallet_sell_trade.get("time"),
+            )
+        closed_position_reopen_blocked = False
+        if token_id and isinstance(closed_position, dict):
+            closed_position_reopen_blocked = _terminal_reopen_blocks_wallet_close(
+                payload,
+                source="closed_positions_api",
+                evidence_timestamp=closed_position.get("timestamp")
+                or closed_position.get("created_at")
+                or closed_position.get("createdAt")
+                or closed_position.get("time"),
+            )
         provider_reconciliation = payload.get("provider_reconciliation")
         provider_reconciliation = provider_reconciliation if isinstance(provider_reconciliation, dict) else {}
         provider_snapshot = provider_reconciliation.get("snapshot")
@@ -5490,6 +5550,27 @@ async def reconcile_live_positions(
                 state_updates += 1
         entry_anchor = wallet_entry_trade_timestamp or _row_entry_anchor_naive(row)
         wallet_activity_close_underfilled_entry = False
+        terminal_reopen_blocked_wallet_close = False
+        if closed_position_reopen_blocked:
+            details.append(
+                {
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": "wallet_summary_recovery",
+                    "next_status": row.status,
+                    "note": "ignored_rejected_terminal_close_closed_position",
+                }
+            )
+        if latest_wallet_sell_trade_reopen_blocked:
+            details.append(
+                {
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": "external_wallet_flatten",
+                    "next_status": row.status,
+                    "note": "ignored_rejected_terminal_close_wallet_trade",
+                }
+            )
         if token_id and wallet_position_size <= _WALLET_SIZE_EPSILON and isinstance(wallet_close_activity, dict):
             activity_timestamp = _parse_wallet_activity_time(wallet_close_activity)
             activity_after_entry = True
@@ -5537,7 +5618,25 @@ async def reconcile_live_positions(
                     payload,
                     wallet_activity_position_close,
                 )
-                if wallet_activity_close_underfilled_entry:
+                if _terminal_reopen_blocks_wallet_close(
+                    payload,
+                    source="wallet_activity",
+                    evidence_key=wallet_activity_evidence_key,
+                    evidence_timestamp=activity_timestamp,
+                ):
+                    terminal_reopen_blocked_wallet_close = True
+                    wallet_activity_close_underfilled_entry = True
+                    details.append(
+                        {
+                            "order_id": row.id,
+                            "market_id": row.market_id,
+                            "close_trigger": "wallet_activity",
+                            "wallet_activity_type": activity_type,
+                            "next_status": row.status,
+                            "note": "ignored_rejected_terminal_close_wallet_activity",
+                        }
+                    )
+                elif wallet_activity_close_underfilled_entry:
                     details.append(
                         {
                             "order_id": row.id,
@@ -5694,6 +5793,8 @@ async def reconcile_live_positions(
             and wallet_closed_positions_loaded
             and isinstance(closed_position, dict)
             and not wallet_activity_close_underfilled_entry
+            and not terminal_reopen_blocked_wallet_close
+            and not closed_position_reopen_blocked
         ):
             aggregate_realized_pnl = safe_float(closed_position.get("realizedPnl"), None)
             closed_position_total_size = max(
@@ -5917,6 +6018,7 @@ async def reconcile_live_positions(
             and pending_winning_idx is None
             and wallet_settlement_price is None
             and isinstance(latest_wallet_sell_trade, dict)
+            and not latest_wallet_sell_trade_reopen_blocked
         ):
             latest_wallet_sell_trade_has_identity = bool(
                 str(
