@@ -45,7 +45,7 @@ from api.routes_news_workflow import router as news_workflow_router
 from api.routes_weather_workflow import router as weather_workflow_router
 from api.routes_events import router as events_router
 from api.routes_signals import router as signals_router
-from api.routes_workers import router as workers_router
+from api.routes_workers import get_workers_status_cached_or_fallback, router as workers_router
 from api.routes_validation import router as validation_router
 from api.routes_trader_orchestrator import router as trader_orchestrator_router
 from api.routes_trader_sources import router as trader_sources_router
@@ -1086,31 +1086,26 @@ async def readiness_check():
 _gui_health_cache: Optional[dict] = None
 _gui_health_cache_updated_at: datetime | None = None
 _GUI_HEALTH_CACHE_TTL_SECONDS = 5.0
-_GUI_HEALTH_WORKER_NAMES = (
-    "scanner",
-    "scanner_slo",
-    "discovery",
-    "weather",
-    "news",
-    "crypto",
-    "tracked_traders",
-    "trader_orchestrator",
-    "trader_reconciliation",
-    "redeemer",
-    "events",
-)
 
 
 async def _gui_health_db_queries() -> dict:
     """DB-dependent portion of the GUI health check."""
     async with AsyncSessionLocal() as session:
         scanner_status = await shared_state.get_scanner_status_from_db(session)
-        worker_status_rows = await list_worker_snapshots(
-            session,
-            include_stats=False,
-            worker_names=_GUI_HEALTH_WORKER_NAMES,
-        )
-        orchestrator_snapshot = await read_orchestrator_snapshot(session)
+    workers_payload = await get_workers_status_cached_or_fallback()
+    worker_status_rows = [
+        dict(row)
+        for row in workers_payload.get("workers", [])
+        if isinstance(row, dict)
+    ]
+    orchestrator_snapshot = next(
+        (
+            dict(row)
+            for row in worker_status_rows
+            if str(row.get("worker_name") or "") == "trader_orchestrator"
+        ),
+        {},
+    )
     return {
         "scanner_status": scanner_status,
         "worker_status_rows": worker_status_rows,

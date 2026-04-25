@@ -319,6 +319,30 @@ async def _set_all_workers_paused(session: AsyncSession, paused: bool) -> None:
         global_pause_state.resume()
 
 
+async def get_workers_status_cached_or_fallback() -> dict:
+    global _workers_status_cache, _workers_status_cache_updated_at, _workers_status_refresh_task
+    if _workers_status_refresh_task is not None and _workers_status_refresh_task.done():
+        try:
+            _workers_status_cache = _workers_status_refresh_task.result()
+            _workers_status_cache_updated_at = utcnow()
+        except Exception:
+            pass
+        finally:
+            _workers_status_refresh_task = None
+    if (
+        _workers_status_cache is not None
+        and _workers_status_cache_updated_at is not None
+        and (utcnow() - _workers_status_cache_updated_at).total_seconds() <= _WORKERS_STATUS_CACHE_TTL_SECONDS
+    ):
+        return _workers_status_cache
+    if _workers_status_refresh_task is None:
+        _workers_status_refresh_task = asyncio.create_task(
+            _refresh_workers_status_payload(),
+            name="workers-status-refresh",
+        )
+    return _workers_status_cache or _workers_status_fallback_payload()
+
+
 @router.get("/status")
 async def get_workers_status():
     global _workers_status_cache, _workers_status_cache_updated_at, _workers_status_refresh_task

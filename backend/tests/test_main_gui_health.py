@@ -16,6 +16,49 @@ from utils.utcnow import utcnow
 
 
 @pytest.mark.asyncio
+async def test_gui_health_db_queries_use_workers_status_cache(monkeypatch) -> None:
+    class EmptySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_scanner_status(session) -> dict:
+        assert session is not None
+        return {"running": True, "last_scan": "scan", "opportunities_count": 4}
+
+    async def fake_workers_status() -> dict:
+        return {
+            "workers": [
+                {
+                    "worker_name": "scanner",
+                    "running": True,
+                    "enabled": True,
+                    "current_activity": "Scanning",
+                },
+                {
+                    "worker_name": "trader_orchestrator",
+                    "running": False,
+                    "enabled": False,
+                    "current_activity": "Disabled",
+                },
+            ]
+        }
+
+    monkeypatch.setattr(main, "AsyncSessionLocal", lambda: EmptySession())
+    monkeypatch.setattr(main.shared_state, "get_scanner_status_from_db", fake_scanner_status)
+    monkeypatch.setattr(main, "get_workers_status_cached_or_fallback", fake_workers_status)
+
+    db = await main._gui_health_db_queries()
+    response = main._build_gui_health_response(db)
+
+    assert response["workers"]["scanner"]["running"] is True
+    assert response["workers"]["scanner"]["current_activity"] == "Scanning"
+    assert response["services"]["trader_orchestrator"]["current_activity"] == "Disabled"
+
+
+@pytest.mark.asyncio
 async def test_gui_health_check_refreshes_stale_cache_synchronously(monkeypatch) -> None:
     stale_db = {
         "database": True,
