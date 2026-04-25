@@ -510,35 +510,23 @@ class _FastTraderTask:
             mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
             risk_limits = dict(self._trader.get("risk_limits") or {})
             default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
-            async with FastAsyncSessionLocal() as session:
-                for signal in runtime_signals:
-                    try:
-                        await self._process_one(
-                            session,
-                            signal=signal,
-                            mode=mode,
-                            default_size_usd=default_size_usd,
-                        )
-                        if session.in_transaction():
-                            await asyncio.shield(session.commit())
-                    except Exception as exc:
-                        try:
-                            await session.rollback()
-                        except Exception as rollback_exc:
-                            logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
-                        if _is_retryable_db_error(exc):
-                            maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
-                        logger.warning(
-                            "Fast trader signal processing failed",
-                            trader_id=trader_id,
-                            signal_id=getattr(signal, "id", None),
-                            exc_info=exc,
-                        )
-                    finally:
-                        try:
-                            await session.reset()
-                        except Exception:
-                            pass
+            for signal in runtime_signals:
+                try:
+                    await self._process_one(
+                        None,
+                        signal=signal,
+                        mode=mode,
+                        default_size_usd=default_size_usd,
+                    )
+                except Exception as exc:
+                    if _is_retryable_db_error(exc):
+                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                    logger.warning(
+                        "Fast trader signal processing failed",
+                        trader_id=trader_id,
+                        signal_id=getattr(signal, "id", None),
+                        exc_info=exc,
+                    )
             return
         if cursor_runtime_sequence is not None:
             if is_db_pressure_active():
@@ -588,33 +576,40 @@ class _FastTraderTask:
                         logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
                 return
 
-            await self._touch_trader_run(session, force=True)
-            mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
-            risk_limits = dict(self._trader.get("risk_limits") or {})
-            default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
-
-            for signal in signals:
-                try:
-                    await self._process_one(
-                        session,
-                        signal=signal,
-                        mode=mode,
-                        default_size_usd=default_size_usd,
-                    )
+        async with FastAsyncSessionLocal() as session:
+            try:
+                if await self._touch_trader_run(session, force=True):
                     await asyncio.shield(session.commit())
-                except Exception as exc:
-                    try:
-                        await session.rollback()
-                    except Exception as rollback_exc:
-                        logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
-                    if _is_retryable_db_error(exc):
-                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
-                    logger.warning(
-                        "Fast trader signal processing failed",
-                        trader_id=trader_id,
-                        signal_id=getattr(signal, "id", None),
-                        exc_info=exc,
-                    )
+            except Exception as exc:
+                try:
+                    await session.rollback()
+                except Exception as rollback_exc:
+                    logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
+                if _is_retryable_db_error(exc):
+                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                logger.warning("Fast trader last-run touch failed", trader_id=trader_id, exc_info=exc)
+
+        mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
+        risk_limits = dict(self._trader.get("risk_limits") or {})
+        default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
+
+        for signal in signals:
+            try:
+                await self._process_one(
+                    None,
+                    signal=signal,
+                    mode=mode,
+                    default_size_usd=default_size_usd,
+                )
+            except Exception as exc:
+                if _is_retryable_db_error(exc):
+                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                logger.warning(
+                    "Fast trader signal processing failed",
+                    trader_id=trader_id,
+                    signal_id=getattr(signal, "id", None),
+                    exc_info=exc,
+                )
 
     async def _process_one(
         self,
@@ -863,122 +858,123 @@ class _FastTraderTask:
             ),
         }
 
-        try:
-            submit_started_at = time.monotonic()
-            result = await execute_fast_signal(
-                session,
-                trader_id=trader_id,
-                signal=signal,
-                decision_id=decision_id,
-                decision_audit=selected_decision_audit,
-                strategy_key=strategy_key,
-                strategy_version=None,
-                strategy_params=strategy_params,
-                mode=mode,
-                size_usd=evaluated_size,
-                reason=reason or None,
-            )
-            submit_duration_seconds = time.monotonic() - submit_started_at
-            if submit_duration_seconds > _SUBMIT_BUDGET_SECONDS:
+        async def _submit_and_persist(active_session) -> None:
+            try:
+                submit_started_at = time.monotonic()
+                result = await execute_fast_signal(
+                    active_session,
+                    trader_id=trader_id,
+                    signal=signal,
+                    decision_id=decision_id,
+                    decision_audit=selected_decision_audit,
+                    strategy_key=strategy_key,
+                    strategy_version=None,
+                    strategy_params=strategy_params,
+                    mode=mode,
+                    size_usd=evaluated_size,
+                    reason=reason or None,
+                )
+                submit_duration_seconds = time.monotonic() - submit_started_at
+                if submit_duration_seconds > _SUBMIT_BUDGET_SECONDS:
+                    logger.warning(
+                        "Fast trader submit exceeded budget",
+                        trader_id=trader_id,
+                        signal_id=getattr(signal, "id", None),
+                        duration_s=round(submit_duration_seconds, 3),
+                        budget_s=_SUBMIT_BUDGET_SECONDS,
+                    )
+            except Exception as exc:
+                failed_decision_id = await self._buffer_decision(
+                    signal=signal,
+                    source_key=source_key,
+                    strategy_key=strategy_key,
+                    mode=mode,
+                    decision="failed",
+                    reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
+                    score=getattr(decision, "score", None),
+                    checks_summary=self._checks_summary(decision),
+                    risk_snapshot={"fast_tier": True},
+                    payload=self._decision_payload(
+                        signal=signal,
+                        source_key=source_key,
+                        strategy_key=strategy_key,
+                        mode=mode,
+                        evaluated_size=evaluated_size,
+                        result_payload={"submit_exception": type(exc).__name__},
+                    ),
+                )
+                await self._record_signal_event(
+                    active_session,
+                    signal=signal,
+                    event_type="fast_submit_error",
+                    severity="warning",
+                    source_key=source_key,
+                    strategy_key=strategy_key,
+                    message="Fast submit raised.",
+                    reason=f"{type(exc).__name__}: {exc}",
+                )
+                await self._advance_cursor_buffered(
+                    signal=signal,
+                    mode=mode,
+                    decision_id=failed_decision_id,
+                    outcome="failed",
+                    reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
+                )
                 logger.warning(
-                    "Fast trader submit exceeded budget",
+                    "Fast trader submit raised",
                     trader_id=trader_id,
                     signal_id=getattr(signal, "id", None),
-                    duration_s=round(submit_duration_seconds, 3),
-                    budget_s=_SUBMIT_BUDGET_SECONDS,
+                    exc_info=exc,
                 )
-        except Exception as exc:
-            failed_decision_id = await self._buffer_decision(
-                signal=signal,
-                source_key=source_key,
-                strategy_key=strategy_key,
-                mode=mode,
-                decision="failed",
-                reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
-                score=getattr(decision, "score", None),
-                checks_summary=self._checks_summary(decision),
-                risk_snapshot={"fast_tier": True},
-                payload=self._decision_payload(
-                    signal=signal,
-                    source_key=source_key,
-                    strategy_key=strategy_key,
-                    mode=mode,
-                    evaluated_size=evaluated_size,
-                    result_payload={"submit_exception": type(exc).__name__},
-                ),
-            )
-            await self._record_signal_event(
-                session,
-                signal=signal,
-                event_type="fast_submit_error",
-                severity="warning",
-                source_key=source_key,
-                strategy_key=strategy_key,
-                message="Fast submit raised.",
-                reason=f"{type(exc).__name__}: {exc}",
-            )
-            await self._advance_cursor_buffered(
-                signal=signal,
-                mode=mode,
-                decision_id=failed_decision_id,
-                outcome="failed",
-                reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
-            )
-            logger.warning(
-                "Fast trader submit raised",
-                trader_id=trader_id,
-                signal_id=getattr(signal, "id", None),
-                exc_info=exc,
-            )
-            return
+                return
 
-        result_status = str(result.status or "").strip().lower()
-        outcome_for_cursor = (
-            "executed"
-            if result.orders_written > 0 and result_status in _FAST_ORDER_SUCCESS_STATUSES
-            else result_status
-        )
-        if result.orders_written <= 0:
-            no_order_decision_id = await self._buffer_decision(
-                signal=signal,
-                source_key=source_key,
-                strategy_key=strategy_key,
-                mode=mode,
-                decision="failed" if result.status == "failed" else "skipped",
-                reason=result.error_message or reason or f"fast_submit:{result.status}",
-                score=getattr(decision, "score", None),
-                checks_summary=self._checks_summary(decision),
-                risk_snapshot={"fast_tier": True},
-                payload=self._decision_payload(
+            result_status = str(result.status or "").strip().lower()
+            outcome_for_cursor = (
+                "executed"
+                if result.orders_written > 0 and result_status in _FAST_ORDER_SUCCESS_STATUSES
+                else result_status
+            )
+            if result.orders_written <= 0:
+                no_order_decision_id = await self._buffer_decision(
                     signal=signal,
                     source_key=source_key,
                     strategy_key=strategy_key,
                     mode=mode,
-                    evaluated_size=evaluated_size,
-                    result_payload=result.payload,
-                ),
-            )
-            await self._record_signal_event(
-                session,
-                signal=signal,
-                event_type="fast_submit_no_order",
-                severity="warning",
-                source_key=source_key,
-                strategy_key=strategy_key,
-                message="Fast submit did not write an order.",
-                reason=result.error_message or result.status,
-            )
-            await self._advance_cursor_buffered(
-                signal=signal,
-                mode=mode,
-                decision_id=no_order_decision_id,
-                outcome=outcome_for_cursor,
-                reason=result.error_message or reason,
-            )
-            return
-        else:
+                    decision="failed" if result.status == "failed" else "skipped",
+                    reason=result.error_message or reason or f"fast_submit:{result.status}",
+                    score=getattr(decision, "score", None),
+                    checks_summary=self._checks_summary(decision),
+                    risk_snapshot={"fast_tier": True},
+                    payload=self._decision_payload(
+                        signal=signal,
+                        source_key=source_key,
+                        strategy_key=strategy_key,
+                        mode=mode,
+                        evaluated_size=evaluated_size,
+                        result_payload=result.payload,
+                    ),
+                )
+                await self._record_signal_event(
+                    active_session,
+                    signal=signal,
+                    event_type="fast_submit_no_order",
+                    severity="warning",
+                    source_key=source_key,
+                    strategy_key=strategy_key,
+                    message="Fast submit did not write an order.",
+                    reason=result.error_message or result.status,
+                )
+                await self._advance_cursor_buffered(
+                    signal=signal,
+                    mode=mode,
+                    decision_id=no_order_decision_id,
+                    outcome=outcome_for_cursor,
+                    reason=result.error_message or reason,
+                )
+                return
+
             await update_trader_decision(
-                session,
+                active_session,
                 decision_id=decision_id,
                 decision=None if result_status in _FAST_ORDER_SUCCESS_STATUSES else "failed",
                 reason=(
@@ -993,14 +989,29 @@ class _FastTraderTask:
                 },
                 commit=False,
             )
-        await advance_fast_trader_cursor(
-            session,
-            trader_id=trader_id,
-            signal=signal,
-            decision_id=decision_id,
-            outcome=outcome_for_cursor,
-            reason=result.error_message or reason,
-        )
+            await advance_fast_trader_cursor(
+                active_session,
+                trader_id=trader_id,
+                signal=signal,
+                decision_id=decision_id,
+                outcome=outcome_for_cursor,
+                reason=result.error_message or reason,
+            )
+
+        if session is None:
+            async with FastAsyncSessionLocal() as active_session:
+                try:
+                    await _submit_and_persist(active_session)
+                    if active_session.in_transaction():
+                        await asyncio.shield(active_session.commit())
+                except Exception:
+                    try:
+                        await active_session.rollback()
+                    except Exception as rollback_exc:
+                        logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
+                    raise
+        else:
+            await _submit_and_persist(session)
 
 
 # Module-level reference to the currently-active _FastRuntime instance.
