@@ -1282,6 +1282,20 @@ class AIGenerateStrategyDraftRequest(BaseModel):
     model: Optional[str] = None
 
 
+class AIModifyStrategyCodeRequest(BaseModel):
+    instruction: str = Field(..., min_length=4, max_length=12000)
+    strategy_id: Optional[str] = Field(default=None, max_length=128)
+    slug: str = Field(..., min_length=1, max_length=128)
+    name: str = Field(..., min_length=1, max_length=200)
+    source_key: str = Field(default="scanner", min_length=2, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=4000)
+    source_code: str = Field(..., min_length=1, max_length=120000)
+    config: dict[str, Any] = Field(default_factory=dict)
+    config_schema: dict[str, Any] = Field(default_factory=dict)
+    aliases: list[str] = Field(default_factory=list)
+    model: Optional[str] = None
+
+
 class AIGenerateDataSourceDraftRequest(BaseModel):
     description: str = Field(..., min_length=8, max_length=12000)
     source_key: Optional[str] = Field(default=None, min_length=2, max_length=64)
@@ -1479,6 +1493,245 @@ async def generate_strategy_draft_with_ai(
         "tokens_used": {
             "input_tokens": response.usage.input_tokens if response.usage else 0,
             "output_tokens": response.usage.output_tokens if response.usage else 0,
+        },
+    }
+
+
+@router.post("/ai/modify/strategy-code")
+async def modify_strategy_code_with_ai(
+    request: AIModifyStrategyCodeRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    from sqlalchemy import select
+
+    from api.routes_strategies import (
+        _detect_capabilities,
+        _infer_strategy_type,
+        _merge_config_schemas,
+        _normalize_strategy_config_for_source,
+        get_unified_docs,
+    )
+    from models.database import DataSource, Strategy
+    from services.ai import get_llm_manager
+    from services.ai.llm_provider import LLMMessage
+    from services.strategy_loader import validate_strategy_source
+    from services.strategy_sdk import StrategySDK
+
+    manager = get_llm_manager()
+    if not manager.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="No AI provider configured. Configure an LLM provider in Settings.",
+        )
+
+    strategy_rows = (
+        await session.execute(
+            select(Strategy).order_by(Strategy.source_key.asc(), Strategy.sort_order.asc(), Strategy.slug.asc())
+        )
+    ).scalars().all()
+    source_rows = (
+        await session.execute(
+            select(DataSource).where(DataSource.enabled == True).order_by(DataSource.source_key.asc(), DataSource.slug.asc())  # noqa: E712
+        )
+    ).scalars().all()
+
+    source_key_requested = str(request.source_key or "scanner").strip().lower() or "scanner"
+    current_slug = _slugify_identifier(request.slug, default_prefix="strategy")
+    current_name = str(request.name or "").strip() or current_slug.replace("_", " ").title()
+    current_description = str(request.description or "").strip()
+    current_source_code = str(request.source_code or "").strip()
+    current_validation = validate_strategy_source(current_source_code)
+    docs_payload = _compact_strategy_docs_for_prompt(_coerce_json_object(await get_unified_docs()))
+
+    generation_context = {
+        "strategy_source_keys": sorted(
+            {
+                "scanner",
+                "news",
+                "weather",
+                "crypto",
+                "traders",
+                "events",
+                source_key_requested,
+                *[
+                    str(row.source_key or "").strip().lower()
+                    for row in strategy_rows
+                    if str(row.source_key or "").strip()
+                ],
+            }
+        ),
+        "existing_strategy_slugs": [
+            str(row.slug or "").strip().lower()
+            for row in strategy_rows[:400]
+            if str(getattr(row, "id", "") or "") != str(request.strategy_id or "")
+        ],
+        "available_data_sources": [
+            {
+                "slug": row.slug,
+                "source_key": row.source_key,
+                "source_kind": row.source_kind,
+                "name": row.name,
+            }
+            for row in source_rows[:400]
+        ],
+        "strategy_docs": docs_payload,
+    }
+
+    system_prompt = (
+        "You modify existing Homerun strategy Python source code. "
+        "Return STRICT JSON with keys: "
+        "name, slug, source_key, description, source_code, config, config_schema, aliases, change_summary. "
+        "Preserve the existing slug, source_key, and class identity unless the user explicitly asks to rename or move it. "
+        "source_code must be complete production Python defining a BaseStrategy subclass; "
+        "only use allowed imports from docs; no placeholders, no TODOs, no pass stubs."
+    )
+    user_payload = {
+        "task": "Modify this existing strategy source according to the user instruction.",
+        "user_instruction": request.instruction,
+        "existing_strategy": {
+            "id": request.strategy_id,
+            "name": current_name,
+            "slug": current_slug,
+            "source_key": source_key_requested,
+            "description": current_description,
+            "source_code": current_source_code,
+            "config": _coerce_json_object(request.config),
+            "config_schema": _coerce_json_object(request.config_schema, {"param_fields": []}),
+            "aliases": _coerce_string_list(request.aliases),
+            "validation": {
+                "valid": bool(current_validation.get("valid")),
+                "class_name": current_validation.get("class_name"),
+                "errors": current_validation.get("errors") or [],
+                "warnings": current_validation.get("warnings") or [],
+            },
+        },
+        "context": generation_context,
+        "required_output": {
+            "name": "final display name",
+            "slug": "final strategy key",
+            "source_key": "final source key",
+            "description": "final concise description",
+            "source_code": "full modified Python source code",
+            "config": "JSON object preserving compatible current config values",
+            "config_schema": "JSON object with param_fields for configurable inputs",
+            "aliases": "string array",
+            "change_summary": "short human-readable summary of the modifications",
+        },
+    }
+
+    response = await manager.chat(
+        messages=[
+            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="user", content=json.dumps(user_payload, ensure_ascii=True)),
+        ],
+        model=request.model,
+        max_tokens=5000,
+        purpose="ai_strategy_code_modification",
+    )
+
+    parsed = _extract_json_payload(response.content or "")
+    if not isinstance(parsed, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="AI returned a non-JSON strategy modification. Retry with a more specific instruction.",
+        )
+
+    name = str(parsed.get("name") or "").strip() or current_name
+    slug = _slugify_identifier(parsed.get("slug") or current_slug, default_prefix="strategy")
+    source_key = str(parsed.get("source_key") or source_key_requested).strip().lower() or source_key_requested
+    description = str(parsed.get("description") or "").strip() or current_description
+    source_code = str(parsed.get("source_code") or "").strip()
+    if not source_code:
+        raise HTTPException(
+            status_code=422,
+            detail="AI did not return modified source_code. Retry with a narrower instruction.",
+        )
+
+    config = _normalize_strategy_config_for_source(
+        source_key,
+        _coerce_json_object(parsed.get("config"), _coerce_json_object(request.config)),
+    )
+    config_schema = _merge_config_schemas(
+        _coerce_json_object(parsed.get("config_schema"), _coerce_json_object(request.config_schema, {"param_fields": []})),
+        StrategySDK.strategy_retention_config_schema(),
+    )
+    aliases = _coerce_string_list(parsed.get("aliases")) or _coerce_string_list(request.aliases)
+    change_summary = str(parsed.get("change_summary") or "").strip() or "AI modified strategy source."
+
+    validation = validate_strategy_source(source_code)
+    repaired = False
+    repair_usage_input = 0
+    repair_usage_output = 0
+    if not bool(validation.get("valid")):
+        repair_payload = {
+            "task": "Repair this modified strategy source to satisfy Homerun validation.",
+            "user_instruction": request.instruction,
+            "errors": validation.get("errors") or [],
+            "warnings": validation.get("warnings") or [],
+            "draft": {
+                "name": name,
+                "slug": slug,
+                "source_key": source_key,
+                "description": description,
+                "source_code": source_code,
+            },
+            "required_output": {"source_code": "valid Python strategy source extending BaseStrategy"},
+        }
+        repair_response = await manager.chat(
+            messages=[
+                LLMMessage(
+                    role="system",
+                    content=(
+                        "Return STRICT JSON with one key: source_code. "
+                        "Produce complete valid strategy source code only."
+                    ),
+                ),
+                LLMMessage(role="user", content=json.dumps(repair_payload, ensure_ascii=True)),
+            ],
+            model=request.model,
+            max_tokens=5000,
+            purpose="ai_strategy_code_modification_repair",
+        )
+        repaired_payload = _extract_json_payload(repair_response.content or "")
+        repaired_source = str((repaired_payload or {}).get("source_code") or "").strip()
+        if repair_response.usage:
+            repair_usage_input = repair_response.usage.input_tokens
+            repair_usage_output = repair_response.usage.output_tokens
+        if repaired_source:
+            source_code = repaired_source
+            validation = validate_strategy_source(source_code)
+            repaired = True
+
+    capabilities = validation.get("capabilities") if isinstance(validation.get("capabilities"), dict) else None
+    if not capabilities:
+        capabilities = _detect_capabilities(source_code)
+    inferred_type = _infer_strategy_type(capabilities)
+    class_name = str(validation.get("class_name") or "").strip() or _strategy_class_name_from_slug(slug)
+
+    return {
+        "name": name,
+        "slug": slug,
+        "source_key": source_key,
+        "description": description,
+        "source_code": source_code,
+        "class_name": class_name,
+        "config": config,
+        "config_schema": config_schema,
+        "aliases": aliases,
+        "change_summary": change_summary,
+        "validation": {
+            "valid": bool(validation.get("valid")),
+            "class_name": validation.get("class_name"),
+            "errors": validation.get("errors") or [],
+            "warnings": validation.get("warnings") or [],
+            "capabilities": capabilities,
+            "inferred_type": inferred_type,
+        },
+        "used_repair_pass": repaired,
+        "model": response.model or "",
+        "tokens_used": {
+            "input_tokens": (response.usage.input_tokens if response.usage else 0) + repair_usage_input,
+            "output_tokens": (response.usage.output_tokens if response.usage else 0) + repair_usage_output,
         },
     }
 

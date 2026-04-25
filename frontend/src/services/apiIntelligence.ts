@@ -194,6 +194,27 @@ export const generateAIStrategyDraft = async (params: {
   return unwrapApiData(data)
 }
 
+export interface AIModifyStrategyCodeResponse extends AIStrategyDraftGenerationResponse {
+  change_summary: string
+}
+
+export const modifyAIStrategyCode = async (params: {
+  instruction: string
+  strategy_id?: string
+  slug: string
+  name: string
+  source_key: string
+  description?: string
+  source_code: string
+  config?: Record<string, unknown>
+  config_schema?: Record<string, unknown>
+  aliases?: string[]
+  model?: string
+}): Promise<AIModifyStrategyCodeResponse> => {
+  const { data } = await api.post('/ai/modify/strategy-code', params, AI_TIMEOUT)
+  return unwrapApiData(data)
+}
+
 export interface AIDataSourceDraftGenerationResponse {
   name: string
   slug: string

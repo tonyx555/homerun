@@ -20,6 +20,7 @@ import {
   Settings2,
   Sparkles,
   Trash2,
+  Wand2,
   X,
   Zap,
 } from 'lucide-react'
@@ -47,9 +48,11 @@ import {
   restoreUnifiedStrategyVersion,
   clearValidationStrategyOverride,
   generateAIStrategyDraft,
+  modifyAIStrategyCode,
   UnifiedStrategy,
   UnifiedStrategyVersion,
   AIStrategyDraftGenerationResponse,
+  AIModifyStrategyCodeResponse,
 } from '../services/api'
 import StrategyApiDocsFlyout from './StrategyApiDocsFlyout'
 import StrategyBacktestFlyout from './StrategyBacktestFlyout'
@@ -403,6 +406,7 @@ export default function UnifiedStrategiesManager({
   const [showApiDocs, setShowApiDocs] = useState(false)
   const [showBacktest, setShowBacktest] = useState(false)
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [showModifyModal, setShowModifyModal] = useState(false)
 
   // Filters
   const [searchQuery, setSearchQuery] = useState('')
@@ -421,6 +425,9 @@ export default function UnifiedStrategiesManager({
   const [newStrategyAiPrompt, setNewStrategyAiPrompt] = useState('')
   const [newStrategyAiDraft, setNewStrategyAiDraft] = useState<AIStrategyDraftGenerationResponse | null>(null)
   const [newStrategyUseAiDraft, setNewStrategyUseAiDraft] = useState(false)
+  const [modifyStrategyAiPrompt, setModifyStrategyAiPrompt] = useState('')
+  const [modifyStrategyAiDraft, setModifyStrategyAiDraft] = useState<AIModifyStrategyCodeResponse | null>(null)
+  const [modifyStrategyAiError, setModifyStrategyAiError] = useState<string | null>(null)
 
   // Editor state
   const [editorSlug, setEditorSlug] = useState('')
@@ -799,11 +806,15 @@ export default function UnifiedStrategiesManager({
   }, [newStrategyTemplates, newStrategyTemplateKey])
 
   useEffect(() => {
-    if (!showCreateModal || typeof document === 'undefined') return
+    if ((!showCreateModal && !showModifyModal) || typeof document === 'undefined') return
     const previousOverflow = document.body.style.overflow
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
-        setShowCreateModal(false)
+        if (showModifyModal) {
+          setShowModifyModal(false)
+        } else {
+          setShowCreateModal(false)
+        }
       }
     }
     document.body.style.overflow = 'hidden'
@@ -812,7 +823,7 @@ export default function UnifiedStrategiesManager({
       document.body.style.overflow = previousOverflow
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [showCreateModal])
+  }, [showCreateModal, showModifyModal])
 
   // ── Refresh helper ──
 
@@ -1023,10 +1034,53 @@ export default function UnifiedStrategiesManager({
     },
   })
 
+  const modifyStrategyMutation = useMutation({
+    mutationFn: async () => {
+      const instruction = String(modifyStrategyAiPrompt || '').trim()
+      if (!instruction) throw new Error('Describe how the AI should modify this strategy.')
+      if (!editorCode.trim()) throw new Error('Strategy source code is empty.')
+
+      const parsedConfig = parseJsonObject(editorConfigJson || '{}')
+      if (!parsedConfig.value) {
+        throw new Error(`Config JSON error: ${parsedConfig.error || 'invalid object'}`)
+      }
+      const parsedSchema = parseJsonObject(editorSchemaJson || '{}')
+      if (!parsedSchema.value) {
+        throw new Error(`Schema JSON error: ${parsedSchema.error || 'invalid object'}`)
+      }
+
+      const normalizedSlug = normalizeSlug(editorSlug || selectedStrategy?.slug || 'strategy')
+      const normalizedName = String(editorName || selectedStrategy?.name || normalizedSlug).trim()
+      if (!normalizedSlug) throw new Error('Strategy key is required before AI modification.')
+      if (!normalizedName) throw new Error('Strategy name is required before AI modification.')
+
+      return modifyAIStrategyCode({
+        instruction,
+        strategy_id: selectedStrategy?.id,
+        slug: normalizedSlug,
+        name: normalizedName,
+        source_key: normalizeStrategySourceFilter(editorSourceKey || selectedStrategy?.source_key || 'scanner'),
+        description: String(editorDescription || '').trim() || undefined,
+        source_code: editorCode,
+        config: parsedConfig.value,
+        config_schema: parsedSchema.value,
+        aliases: parseAliases(editorAliasesCsv),
+      })
+    },
+    onSuccess: (draft) => {
+      setModifyStrategyAiDraft(draft)
+      setModifyStrategyAiError(null)
+    },
+    onError: (error: unknown) => {
+      setModifyStrategyAiError(errorMessage(error, 'AI modification failed'))
+    },
+  })
+
   const healthBusy = overrideStrategyMutation.isPending || clearOverrideMutation.isPending
 
   const busy =
     generateDraftMutation.isPending ||
+    modifyStrategyMutation.isPending ||
     saveMutation.isPending ||
     validateMutation.isPending ||
     reloadMutation.isPending ||
@@ -1124,6 +1178,35 @@ export default function UnifiedStrategiesManager({
   }
 
   // ── Derived display state ──
+
+  const openModifyModal = () => {
+    setModifyStrategyAiPrompt('')
+    setModifyStrategyAiDraft(null)
+    setModifyStrategyAiError(null)
+    setShowModifyModal(true)
+  }
+
+  const applyModifyDraftToEditor = () => {
+    const draft = modifyStrategyAiDraft
+    if (!draft) return
+    setEditorSlug(normalizeSlug(draft.slug || editorSlug))
+    setEditorName(String(draft.name || editorName).trim())
+    setEditorDescription(String(draft.description || editorDescription).trim())
+    setEditorSourceKey(normalizeStrategySourceFilter(draft.source_key || editorSourceKey))
+    setEditorCode(String(draft.source_code || editorCode))
+    setEditorConfigJson(JSON.stringify(draft.config || {}, null, 2))
+    setEditorSchemaJson(JSON.stringify(draft.config_schema || {}, null, 2))
+    setEditorAliasesCsv(Array.isArray(draft.aliases) ? draft.aliases.join(', ') : editorAliasesCsv)
+    setValidation({
+      valid: Boolean(draft.validation?.valid),
+      class_name: draft.validation?.class_name || null,
+      errors: draft.validation?.errors || [],
+      warnings: draft.validation?.warnings || [],
+    })
+    setEditorError(null)
+    setModifyStrategyAiError(null)
+    setShowModifyModal(false)
+  }
 
   const hasSelection = Boolean(selectedStrategy || draftToken)
   const displayStatus = selectedStrategy?.status || 'draft'
@@ -1524,6 +1607,21 @@ export default function UnifiedStrategiesManager({
                     <Zap className="w-3 h-3" />
                   )}
                   Reload
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 px-2 text-[11px]"
+                  onClick={openModifyModal}
+                  disabled={busy || !editorCode.trim()}
+                >
+                  {modifyStrategyMutation.isPending ? (
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                  ) : (
+                    <Wand2 className="w-3 h-3" />
+                  )}
+                  AI Modify
                 </Button>
                 <Button
                   type="button"
@@ -2236,6 +2334,182 @@ export default function UnifiedStrategiesManager({
       )}
 
       {/* ── Flyouts ── */}
+      {typeof document !== 'undefined' && createPortal(
+        <AnimatePresence>
+          {showModifyModal && (
+            <motion.div
+              className="fixed inset-0 z-[80] flex items-center justify-center bg-black/70 px-4 py-6 backdrop-blur-sm"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowModifyModal(false)}
+            >
+              <motion.div
+                className="flex max-h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-border/70 bg-card shadow-2xl"
+                initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 18, scale: 0.98 }}
+                transition={{ duration: 0.16 }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-start justify-between gap-4 border-b border-border/60 px-4 py-3">
+                  <div className="flex items-center gap-2">
+                    <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-violet-500/15 text-violet-300">
+                      <Wand2 className="h-4 w-4" />
+                    </span>
+                    <div>
+                      <h3 className="text-sm font-semibold">Modify Strategy With AI</h3>
+                      <p className="text-[11px] text-muted-foreground">
+                        Generate a revised source draft, review it, then apply it to the editor before saving.
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 w-7 p-0"
+                    onClick={() => setShowModifyModal(false)}
+                  >
+                    <X className="h-4 w-4" />
+                  </Button>
+                </div>
+
+                <div className="grid min-h-0 flex-1 gap-4 overflow-auto p-4 lg:grid-cols-[360px_minmax(0,1fr)]">
+                  <div className="space-y-4">
+                    <div className="rounded-xl border border-border/60 bg-muted/25 p-3">
+                      <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Current Strategy
+                      </p>
+                      <p className="mt-2 text-sm font-semibold">{editorName || selectedStrategy?.name || 'Draft strategy'}</p>
+                      <p className="mt-1 font-mono text-[11px] text-muted-foreground">
+                        {normalizeSlug(editorSlug || selectedStrategy?.slug || 'strategy')} · {normalizeStrategySourceFilter(editorSourceKey)}
+                      </p>
+                    </div>
+
+                    <div>
+                      <Label className="text-[11px] text-muted-foreground">Modification Instructions</Label>
+                      <textarea
+                        value={modifyStrategyAiPrompt}
+                        onChange={(event) => {
+                          setModifyStrategyAiPrompt(event.target.value)
+                          setModifyStrategyAiError(null)
+                        }}
+                        className="mt-1 min-h-[170px] w-full rounded-md border border-input bg-background px-3 py-2 text-xs leading-5 text-foreground outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                        placeholder="Example: tighten the exit logic, reduce risk after two losses, and only select positions when liquidity is above the configured threshold."
+                      />
+                    </div>
+
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="w-full gap-2 bg-violet-600 text-white hover:bg-violet-500"
+                      onClick={() => modifyStrategyMutation.mutate()}
+                      disabled={busy || !modifyStrategyAiPrompt.trim() || !editorCode.trim()}
+                    >
+                      {modifyStrategyMutation.isPending ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      Generate Modified Draft
+                    </Button>
+
+                    {modifyStrategyAiError && (
+                      <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                        {modifyStrategyAiError}
+                      </div>
+                    )}
+
+                    {modifyStrategyAiDraft && (
+                      <div className="space-y-3 rounded-xl border border-border/60 bg-muted/25 p-3">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                            Draft Result
+                          </span>
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'text-[10px]',
+                              modifyStrategyAiDraft.validation.valid
+                                ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                                : 'border-red-500/30 bg-red-500/10 text-red-300'
+                            )}
+                          >
+                            {modifyStrategyAiDraft.validation.valid ? 'Valid' : 'Needs Fix'}
+                          </Badge>
+                        </div>
+                        <p className="text-xs leading-5 text-muted-foreground">
+                          {modifyStrategyAiDraft.change_summary || 'AI generated a modified source draft.'}
+                        </p>
+                        {modifyStrategyAiDraft.validation.errors.length > 0 && (
+                          <div className="space-y-1 rounded-md border border-red-500/20 bg-red-500/10 px-2 py-2 text-[11px] text-red-300">
+                            {modifyStrategyAiDraft.validation.errors.slice(0, 4).map((error, index) => (
+                              <p key={`${error}-${index}`}>{error}</p>
+                            ))}
+                          </div>
+                        )}
+                        {modifyStrategyAiDraft.validation.warnings.length > 0 && (
+                          <div className="space-y-1 rounded-md border border-amber-500/20 bg-amber-500/10 px-2 py-2 text-[11px] text-amber-300">
+                            {modifyStrategyAiDraft.validation.warnings.slice(0, 4).map((warning, index) => (
+                              <p key={`${warning}-${index}`}>{warning}</p>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="min-h-0 rounded-xl border border-border/60 bg-muted/30 dark:bg-black/30">
+                    <div className="flex items-center justify-between border-b border-border/60 px-3 py-2">
+                      <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Modified Source Preview
+                      </span>
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        {modifyStrategyAiDraft ? 'Editable before apply' : 'Generate a draft to preview changes'}
+                      </span>
+                    </div>
+                    <div className="p-3">
+                      {modifyStrategyAiDraft ? (
+                        <CodeEditor
+                          value={modifyStrategyAiDraft.source_code}
+                          onChange={(value) =>
+                            setModifyStrategyAiDraft((current) =>
+                              current ? { ...current, source_code: value } : current
+                            )
+                          }
+                          minHeight="520px"
+                        />
+                      ) : (
+                        <div className="flex min-h-[520px] items-center justify-center rounded-md border border-dashed border-border/70 bg-background/30 px-8 text-center text-xs text-muted-foreground">
+                          Describe the modification you want, then generate a revised strategy source draft.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-end gap-2 border-t border-border/60 px-4 py-3">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setShowModifyModal(false)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    className="bg-violet-600 text-white hover:bg-violet-500"
+                    onClick={applyModifyDraftToEditor}
+                    disabled={!modifyStrategyAiDraft || !modifyStrategyAiDraft.source_code.trim()}
+                  >
+                    Apply to Editor
+                  </Button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+
       <StrategyApiDocsFlyout open={showApiDocs} onOpenChange={setShowApiDocs} variant={flyoutVariant} />
       <StrategyBacktestFlyout
         open={showBacktest}
