@@ -263,6 +263,34 @@ async def _refresh_workers_status_payload() -> dict:
     raise HTTPException(status_code=503, detail="Database is busy; please retry.")
 
 
+def _workers_status_fallback_payload() -> dict:
+    workers = []
+    for worker_name in WORKER_DISPLAY_ORDER:
+        workers.append(
+            summarize_worker_snapshot(
+                {
+                    "worker_name": worker_name,
+                    "running": False,
+                    "enabled": True,
+                    "current_activity": "Waiting for DB telemetry",
+                    "interval_seconds": None,
+                    "last_run_at": None,
+                    "lag_seconds": None,
+                    "last_error": None,
+                    "updated_at": None,
+                    "stats": {},
+                    "control": {
+                        "is_enabled": True,
+                        "is_paused": False,
+                        "interval_seconds": 60,
+                        "requested_run_at": None,
+                    },
+                }
+            )
+        )
+    return {"workers": workers}
+
+
 async def _set_all_workers_paused(session: AsyncSession, paused: bool) -> None:
     await shared_state.set_scanner_paused(session, paused)
     await news_shared_state.set_news_paused(session, paused)
@@ -322,10 +350,12 @@ async def get_workers_status():
         _workers_status_refresh_task = None
         return payload
     except Exception as exc:
+        if _workers_status_refresh_task is not None and _workers_status_refresh_task.done():
+            _workers_status_refresh_task = None
         if _workers_status_cache is not None:
             return _workers_status_cache
-        if isinstance(exc, HTTPException):
-            raise
+        if isinstance(exc, (asyncio.TimeoutError, HTTPException)):
+            return _workers_status_fallback_payload()
         raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
 
 

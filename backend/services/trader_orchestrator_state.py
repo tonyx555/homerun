@@ -4676,6 +4676,7 @@ async def list_fast_traders(session: AsyncSession) -> list[dict[str, Any]]:
     query = (
         select(Trader)
         .where(func.lower(func.coalesce(Trader.latency_class, "normal")) == "fast")
+        .where(Trader.is_enabled.is_(True), Trader.is_paused.is_(False))
         .order_by(Trader.name.asc())
     )
     rows = (await session.execute(query)).scalars().all()

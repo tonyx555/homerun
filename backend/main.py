@@ -1119,6 +1119,12 @@ async def _gui_health_db_queries() -> dict:
     }
 
 
+async def _gui_health_database_ping() -> bool:
+    async with AsyncSessionLocal() as session:
+        await session.execute(select(1))
+    return True
+
+
 def _build_gui_health_response(db: dict) -> dict:
     scanner_status = db.get("scanner_status", {})
     worker_status_rows = db.get("worker_status_rows", [])
@@ -1208,13 +1214,18 @@ async def gui_health_check():
     if cache_is_fresh:
         return _build_gui_health_response(_gui_health_cache or {"database": False})
     try:
-        db = await asyncio.wait_for(_gui_health_db_queries(), timeout=2.0)
+        db = await asyncio.wait_for(_gui_health_db_queries(), timeout=1.25)
         _gui_health_cache = db
         _gui_health_cache_updated_at = utcnow()
-    except asyncio.TimeoutError:
-        db = _gui_health_cache or {"database": False}
     except Exception:
-        db = _gui_health_cache or {"database": False}
+        if _gui_health_cache is not None:
+            db = _gui_health_cache
+        else:
+            try:
+                database_reachable = await asyncio.wait_for(_gui_health_database_ping(), timeout=0.5)
+            except Exception:
+                database_reachable = False
+            db = {"database": database_reachable}
     return _build_gui_health_response(db)
 
 

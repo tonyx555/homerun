@@ -19,6 +19,7 @@ from models.database import (  # noqa: E402
     TraderSignalConsumption,
 )
 from services.strategies.base import StrategyDecision  # noqa: E402
+from services.trader_orchestrator_state import list_fast_traders  # noqa: E402
 from tests.postgres_test_db import build_postgres_session_factory  # noqa: E402
 from utils.utcnow import utcnow  # noqa: E402
 from workers import fast_trader_runtime  # noqa: E402
@@ -291,6 +292,17 @@ async def test_fast_runtime_restarts_dead_per_trader_task(monkeypatch):
         return asyncio.get_running_loop().create_future()
 
     monkeypatch.setattr(fast_trader_runtime, "AsyncSessionLocal", lambda: EmptySession())
+
+    async def fake_control_enabled(session):
+        assert session is not None
+        return {
+            "is_enabled": True,
+            "is_paused": False,
+            "kill_switch": False,
+            "mode": "live",
+        }
+
+    monkeypatch.setattr(fast_trader_runtime, "read_orchestrator_control", fake_control_enabled)
     monkeypatch.setattr(fast_trader_runtime, "list_fast_traders", fake_list_fast_traders)
     monkeypatch.setattr(fast_trader_runtime.asyncio, "create_task", fake_create_task)
 
@@ -300,6 +312,85 @@ async def test_fast_runtime_restarts_dead_per_trader_task(monkeypatch):
     assert created["count"] == 1
     assert runtime._task_objs["fast-trader"] is not old_runner
     assert runtime._tasks["fast-trader"] is not old_task
+
+
+@pytest.mark.asyncio
+async def test_fast_runtime_stops_trader_tasks_when_orchestrator_is_paused(monkeypatch):
+    runtime = fast_trader_runtime._FastRuntime()
+    old_wake = asyncio.Event()
+    old_runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), old_wake)
+    old_task = asyncio.get_running_loop().create_future()
+    runtime._wake_events["fast-trader"] = old_wake
+    runtime._task_objs["fast-trader"] = old_runner
+    runtime._tasks["fast-trader"] = old_task
+
+    class EmptySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_list_fast_traders(session):
+        raise AssertionError("paused orchestrator must not list fast traders")
+
+    monkeypatch.setattr(fast_trader_runtime, "AsyncSessionLocal", lambda: EmptySession())
+
+    async def fake_control_paused(session):
+        assert session is not None
+        return {
+            "is_enabled": False,
+            "is_paused": True,
+            "kill_switch": False,
+            "mode": "live",
+        }
+
+    monkeypatch.setattr(fast_trader_runtime, "read_orchestrator_control", fake_control_paused)
+    monkeypatch.setattr(fast_trader_runtime, "list_fast_traders", fake_list_fast_traders)
+
+    await runtime._refresh_roster()
+
+    assert old_runner._stopped is True
+    assert old_task.cancelled() is True
+    assert "fast-trader" not in runtime._task_objs
+    assert "fast-trader" not in runtime._tasks
+    assert "fast-trader" not in runtime._wake_events
+
+
+@pytest.mark.asyncio
+async def test_list_fast_traders_excludes_disabled_and_paused_traders():
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_enabled_filter")
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(tzinfo=None)
+            for trader_id, enabled, paused in (
+                ("fast-enabled", True, False),
+                ("fast-disabled", False, False),
+                ("fast-paused", True, True),
+            ):
+                session.add(
+                    Trader(
+                        id=trader_id,
+                        name=trader_id,
+                        source_configs_json=_fast_trader_config()["source_configs"],
+                        risk_limits_json={},
+                        metadata_json={},
+                        mode="live",
+                        latency_class="fast",
+                        is_enabled=enabled,
+                        is_paused=paused,
+                        interval_seconds=1,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            await session.commit()
+
+            traders = await list_fast_traders(session)
+
+        assert [trader["id"] for trader in traders] == ["fast-enabled"]
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -336,6 +427,17 @@ async def test_fast_runtime_restarts_stale_per_trader_task(monkeypatch):
         return asyncio.get_running_loop().create_future()
 
     monkeypatch.setattr(fast_trader_runtime, "AsyncSessionLocal", lambda: EmptySession())
+
+    async def fake_control_enabled(session):
+        assert session is not None
+        return {
+            "is_enabled": True,
+            "is_paused": False,
+            "kill_switch": False,
+            "mode": "live",
+        }
+
+    monkeypatch.setattr(fast_trader_runtime, "read_orchestrator_control", fake_control_enabled)
     monkeypatch.setattr(fast_trader_runtime, "list_fast_traders", fake_list_fast_traders)
     monkeypatch.setattr(fast_trader_runtime.asyncio, "create_task", fake_create_task)
 

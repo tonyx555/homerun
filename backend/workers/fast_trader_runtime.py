@@ -46,6 +46,7 @@ from services.trader_orchestrator_state import (
     get_trader_signal_cursor,
     list_fast_traders,
     list_unconsumed_trade_signals,
+    read_orchestrator_control,
     update_trader_decision,
 )
 from services.worker_state import _is_retryable_db_error, write_worker_snapshot
@@ -447,22 +448,18 @@ class _FastTraderTask:
                         mode=mode,
                         default_size_usd=default_size_usd,
                     )
+                    await asyncio.shield(session.commit())
                 except Exception as exc:
+                    try:
+                        await session.rollback()
+                    except Exception as rollback_exc:
+                        logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
                     logger.warning(
                         "Fast trader signal processing failed",
                         trader_id=trader_id,
                         signal_id=getattr(signal, "id", None),
                         exc_info=exc,
                     )
-
-            # Shield the cycle commit: the surrounding asyncio.wait_for
-            # hard budget can cancel mid-commit and leave asyncpg with a
-            # half-sent extended-protocol INSERT, which poisons the
-            # connection until worker restart.
-            try:
-                await asyncio.shield(session.commit())
-            except Exception as exc:
-                logger.warning("Fast trader cycle commit failed", trader_id=trader_id, exc_info=exc)
 
     async def _process_one(
         self,
@@ -712,57 +709,31 @@ class _FastTraderTask:
             ),
             commit=False,
         )
+        await asyncio.shield(session.commit())
 
         try:
-            result = await asyncio.wait_for(
-                execute_fast_signal(
-                    session,
-                    trader_id=trader_id,
-                    signal=signal,
-                    decision_id=decision_row.id,
-                    strategy_key=strategy_key,
-                    strategy_version=None,
-                    strategy_params=strategy_params,
-                    mode=mode,
-                    size_usd=evaluated_size,
-                    reason=reason or None,
-                ),
-                timeout=_SUBMIT_BUDGET_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            await update_trader_decision(
+            submit_started_at = time.monotonic()
+            result = await execute_fast_signal(
                 session,
-                decision_id=decision_row.id,
-                decision="failed",
-                reason=f"Fast submit exceeded budget ({_SUBMIT_BUDGET_SECONDS}s).",
-                payload_patch={"submit_timeout_seconds": _SUBMIT_BUDGET_SECONDS},
-                commit=False,
-            )
-            await self._record_signal_event(
-                session,
+                trader_id=trader_id,
                 signal=signal,
-                event_type="fast_submit_timeout",
-                severity="warning",
-                source_key=source_key,
+                decision_id=decision_row.id,
                 strategy_key=strategy_key,
-                message="Fast submit exceeded budget.",
-                reason=f"submit_timeout:{_SUBMIT_BUDGET_SECONDS}",
+                strategy_version=None,
+                strategy_params=strategy_params,
+                mode=mode,
+                size_usd=evaluated_size,
+                reason=reason or None,
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
-                signal=signal,
-                decision_id=decision_row.id,
-                outcome="failed",
-                reason=f"Fast submit exceeded budget ({_SUBMIT_BUDGET_SECONDS}s).",
-            )
-            logger.warning(
-                "Fast trader submit exceeded budget",
-                trader_id=trader_id,
-                signal_id=getattr(signal, "id", None),
-                budget_s=_SUBMIT_BUDGET_SECONDS,
-            )
-            return
+            submit_duration_seconds = time.monotonic() - submit_started_at
+            if submit_duration_seconds > _SUBMIT_BUDGET_SECONDS:
+                logger.warning(
+                    "Fast trader submit exceeded budget",
+                    trader_id=trader_id,
+                    signal_id=getattr(signal, "id", None),
+                    duration_s=round(submit_duration_seconds, 3),
+                    budget_s=_SUBMIT_BUDGET_SECONDS,
+                )
         except Exception as exc:
             await update_trader_decision(
                 session,
@@ -945,7 +916,19 @@ class _FastRuntime:
             # main pool so we do not touch the tight fast-tier pool for
             # anything other than the per-trader trading loop.
             async with AsyncSessionLocal() as session:
-                traders = await list_fast_traders(session)
+                control = await read_orchestrator_control(session)
+                control_enabled = bool(control.get("is_enabled", False))
+                control_paused = bool(control.get("is_paused", True))
+                control_kill_switch = bool(control.get("kill_switch", False))
+                control_mode = str(control.get("mode") or "shadow").strip().lower()
+                if not control_enabled or control_paused or control_kill_switch:
+                    traders = []
+                else:
+                    traders = [
+                        trader
+                        for trader in await list_fast_traders(session)
+                        if str(trader.get("mode") or "shadow").strip().lower() == control_mode
+                    ]
             seen_ids: set[str] = set()
             now_mono = time.monotonic()
             for trader in traders:

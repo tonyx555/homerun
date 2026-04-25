@@ -13,6 +13,23 @@ from api import routes_workers
 
 
 @pytest.mark.asyncio
+async def test_workers_status_returns_fallback_when_initial_refresh_is_busy(monkeypatch):
+    async def fail_refresh():
+        raise HTTPException(status_code=503, detail="Database is busy; please retry.")
+
+    monkeypatch.setattr(routes_workers, "_workers_status_cache", None)
+    monkeypatch.setattr(routes_workers, "_workers_status_cache_updated_at", None)
+    monkeypatch.setattr(routes_workers, "_workers_status_refresh_task", None)
+    monkeypatch.setattr(routes_workers, "_refresh_workers_status_payload", fail_refresh)
+
+    response = await routes_workers.get_workers_status()
+
+    assert len(response["workers"]) == len(routes_workers.WORKER_DISPLAY_ORDER)
+    assert {worker["worker_name"] for worker in response["workers"]} == set(routes_workers.WORKER_DISPLAY_ORDER)
+    assert all(worker["current_activity"] == "Waiting for DB telemetry" for worker in response["workers"])
+
+
+@pytest.mark.asyncio
 async def test_set_all_workers_paused_true_clears_requests(monkeypatch):
     fake_session = object()
 

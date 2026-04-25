@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from datetime import timedelta
 from pathlib import Path
@@ -51,3 +52,22 @@ async def test_gui_health_check_refreshes_stale_cache_synchronously(monkeypatch)
     assert response["services"]["trader_orchestrator"]["running"] is True
     assert response["services"]["trader_orchestrator"]["current_activity"] == "fresh"
     assert response["services"]["scanner"]["opportunities_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_gui_health_check_reports_database_online_when_summary_times_out(monkeypatch) -> None:
+    async def _fake_gui_health_db_queries() -> dict:
+        raise asyncio.TimeoutError
+
+    async def _fake_gui_health_database_ping() -> bool:
+        return True
+
+    monkeypatch.setattr(main, "_gui_health_cache", None)
+    monkeypatch.setattr(main, "_gui_health_cache_updated_at", None)
+    monkeypatch.setattr(main, "_gui_health_db_queries", _fake_gui_health_db_queries)
+    monkeypatch.setattr(main, "_gui_health_database_ping", _fake_gui_health_database_ping)
+
+    response = await main.gui_health_check()
+
+    assert response["checks"]["database"] is True
+    assert response["services"]["scanner"]["opportunities_count"] == 0
