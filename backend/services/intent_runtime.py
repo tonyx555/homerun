@@ -14,6 +14,7 @@ from config import settings
 from models.database import AsyncSessionLocal, TradeSignal, TradeSignalEmission
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
+from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
 from services.runtime_signal_queue import publish_signal_batch
 from services.signal_bus import (
     SIGNAL_ACTIVE_STATUSES as BUS_SIGNAL_ACTIVE_STATUSES,
@@ -34,6 +35,7 @@ logger = get_logger(__name__)
 _SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 _SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 _STATUS_PROJECTION_BATCH_MAX = 64
+_UPSERT_PROJECTION_BATCH_MAX = 8
 _PROJECTION_RETRY_MAX_ATTEMPTS = 3
 _PROJECTION_RETRY_BASE_DELAY_SECONDS = 0.25
 _PROJECTION_STATEMENT_TIMEOUT_MS = 5000
@@ -2105,11 +2107,31 @@ class IntentRuntime:
                     await self._project_status_batch(status_payloads)
                     if carry_payload is not None:
                         await self._dispatch_projection_payload(carry_payload)
+                elif kind == "upsert":
+                    upsert_payloads = [payload]
+                    carry_payload: dict[str, Any] | None = None
+                    source = str(payload.get("source") or "").strip().lower()
+                    while len(upsert_payloads) < _UPSERT_PROJECTION_BATCH_MAX:
+                        try:
+                            queued = self._projection_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        queued_kind = str(queued.get("kind") or "").strip().lower()
+                        queued_source = str(queued.get("source") or "").strip().lower()
+                        if queued_kind == "upsert" and queued_source == source:
+                            upsert_payloads.append(queued)
+                            continue
+                        carry_payload = queued
+                        break
+                    await self._project_upsert_batch(self._coalesce_upsert_payloads(upsert_payloads))
+                    if carry_payload is not None:
+                        await self._dispatch_projection_payload(carry_payload)
                 else:
                     await self._dispatch_projection_payload(payload)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                maybe_mark_db_pressure(exc, component="intent_projection", ttl_seconds=60.0)
                 retry_count = int(payload.get("_projection_retry_count") or 0)
                 if retry_count < _PROJECTION_RETRY_MAX_ATTEMPTS:
                     payload["_projection_retry_count"] = retry_count + 1
@@ -2123,6 +2145,34 @@ class IntentRuntime:
                     retry_count=retry_count,
                     exc_info=exc,
                 )
+
+    def _coalesce_upsert_payloads(self, payloads: list[dict[str, Any]]) -> dict[str, Any]:
+        if not payloads:
+            return {"kind": "upsert", "source": "", "snapshots": {}, "sweep_missing": False, "keep_dedupe_keys": []}
+        merged = dict(payloads[-1])
+        snapshots: dict[str, Any] = {}
+        keep_dedupe_keys: set[str] = set()
+        sweep_missing = False
+        retry_count = 0
+        for payload in payloads:
+            raw_snapshots = payload.get("snapshots")
+            if isinstance(raw_snapshots, dict):
+                snapshots.update(raw_snapshots)
+            keep_dedupe_keys.update(
+                str(key)
+                for key in (payload.get("keep_dedupe_keys") or [])
+                if str(key).strip()
+            )
+            sweep_missing = sweep_missing or bool(payload.get("sweep_missing"))
+            retry_count = max(retry_count, int(payload.get("_projection_retry_count") or 0))
+        merged["snapshots"] = snapshots
+        merged["keep_dedupe_keys"] = sorted(keep_dedupe_keys)
+        merged["sweep_missing"] = sweep_missing
+        if retry_count > 0:
+            merged["_projection_retry_count"] = retry_count
+        else:
+            merged.pop("_projection_retry_count", None)
+        return merged
 
     async def _dispatch_projection_payload(self, payload: dict[str, Any]) -> None:
         kind = str(payload.get("kind") or "").strip().lower()
@@ -2141,7 +2191,7 @@ class IntentRuntime:
         if not snapshots and not sweep_missing:
             return
 
-        _UPSERT_CHUNK_SIZE = 20
+        _UPSERT_CHUNK_SIZE = 5 if is_db_pressure_active() else 20
         snapshot_items = list(snapshots.values())
         signal_types_in_batch: set[str] = set()
         strategy_types_in_batch: set[str] = set()
@@ -2169,19 +2219,35 @@ class IntentRuntime:
                 if chunk_dedupe_keys:
                     existing_rows = (
                         await session.execute(
-                            select(TradeSignal.dedupe_key, TradeSignal.status).where(
+                            select(
+                                TradeSignal.dedupe_key,
+                                TradeSignal.status,
+                                TradeSignal.runtime_sequence,
+                                TradeSignal.effective_price,
+                            ).where(
                                 TradeSignal.source == source,
                                 TradeSignal.dedupe_key.in_(chunk_dedupe_keys),
                             )
                         )
                     ).all()
                     updatable_statuses = BUS_SIGNAL_ACTIVE_STATUSES | BUS_SIGNAL_REACTIVATABLE_STATUSES
+                    existing_by_dedupe_key = {
+                        str(existing_dedupe_key or "").strip(): {
+                            "status": str(existing_status or "").strip().lower(),
+                            "runtime_sequence": _normalize_runtime_sequence(existing_runtime_sequence),
+                            "effective_price": _safe_float(existing_effective_price),
+                        }
+                        for existing_dedupe_key, existing_status, existing_runtime_sequence, existing_effective_price in existing_rows
+                        if str(existing_dedupe_key or "").strip()
+                    }
                     nonreactivable_dedupe_keys = {
                         str(existing_dedupe_key or "").strip()
-                        for existing_dedupe_key, existing_status in existing_rows
+                        for existing_dedupe_key, existing_status, _existing_runtime_sequence, _existing_effective_price in existing_rows
                         if str(existing_dedupe_key or "").strip()
                         and str(existing_status or "").strip().lower() not in updatable_statuses
                     }
+                else:
+                    existing_by_dedupe_key = {}
                 for snapshot in chunk:
                     signal_type = str(snapshot.get("signal_type") or "").strip().lower()
                     if signal_type:
@@ -2191,6 +2257,22 @@ class IntentRuntime:
                         strategy_types_in_batch.add(strategy_type)
                     dedupe_key = str(snapshot.get("dedupe_key") or "").strip()
                     if dedupe_key and dedupe_key in nonreactivable_dedupe_keys:
+                        continue
+                    existing = existing_by_dedupe_key.get(dedupe_key) if dedupe_key else None
+                    incoming_runtime_sequence = _normalize_runtime_sequence(snapshot.get("runtime_sequence"))
+                    incoming_effective_price = _safe_float(snapshot.get("effective_price"))
+                    desired_status = str(snapshot.get("status") or "").strip().lower()
+                    if (
+                        existing
+                        and incoming_runtime_sequence is not None
+                        and existing["runtime_sequence"] is not None
+                        and incoming_runtime_sequence <= existing["runtime_sequence"]
+                        and (not desired_status or desired_status == existing["status"])
+                        and (
+                            incoming_effective_price is None
+                            or incoming_effective_price == existing["effective_price"]
+                        )
+                    ):
                         continue
                     row = await upsert_trade_signal(
                         session,
@@ -2215,7 +2297,6 @@ class IntentRuntime:
                         runtime_sequence=snapshot.get("runtime_sequence"),
                         commit=False,
                     )
-                    desired_status = str(snapshot.get("status") or "").strip().lower()
                     if desired_status and desired_status != str(getattr(row, "status", "") or "").strip().lower():
                         row.status = desired_status
                         row.updated_at = _normalize_datetime(snapshot.get("updated_at")) or utcnow()

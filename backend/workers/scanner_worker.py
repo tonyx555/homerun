@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import math
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -32,6 +33,7 @@ from sqlalchemy.exc import DBAPIError
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
 from services.quality_filter import quality_filter
+from services.live_pressure import db_pressure_snapshot, is_db_pressure_active, maybe_mark_db_pressure
 from services.scanner import scanner
 from services.runtime_signal_queue import get_queue_depth
 from services.shared_state import (
@@ -54,6 +56,8 @@ logger = get_logger("scanner_worker")
 _CANCEL_GRACE_SECONDS = 5.0
 _abandoned_tasks: set[asyncio.Task] = set()
 _inflight_timed_tasks: dict[str, asyncio.Task] = {}
+_last_pressure_snapshot_skip_log_at = 0.0
+_last_pressure_heavy_skip_log_at = 0.0
 
 
 class _TimedTaskStillRunningError(RuntimeError):
@@ -232,6 +236,8 @@ async def _enqueue_detection_batch(
     quality_reports: Optional[dict] = None,
 ) -> tuple[str | None, int, int]:
     """Persist scanner truth and emit runtime signals directly."""
+    global _last_pressure_snapshot_skip_log_at
+
     batch_id = utcnow().strftime("%Y%m%d%H%M%S%f")
     effective_quality_reports: dict = dict(quality_reports or {})
     for opportunity in opportunities:
@@ -249,24 +255,40 @@ async def _enqueue_detection_batch(
         refresh_prices=False,
     )
 
+    if is_db_pressure_active():
+        now_mono = time.monotonic()
+        if now_mono - _last_pressure_snapshot_skip_log_at >= 60.0:
+            logger.warning(
+                "Skipping scanner snapshot persist under DB pressure after runtime publish",
+                db_pressure=db_pressure_snapshot(),
+            )
+            _last_pressure_snapshot_skip_log_at = now_mono
+    else:
+        try:
+            async with AsyncSessionLocal() as session:
+                await write_scanner_snapshot(
+                    session,
+                    opportunities,
+                    {**status, "batch_kind": str(batch_kind or "scan_cycle")},
+                )
+        except Exception as exc:
+            maybe_mark_db_pressure(exc, component="scanner_snapshot", ttl_seconds=45.0)
+            logger.warning("Scanner snapshot persist failed after runtime publish", exc_info=exc)
+
     try:
         async with AsyncSessionLocal() as session:
-            await write_scanner_snapshot(
-                session,
-                opportunities,
-                {**status, "batch_kind": str(batch_kind or "scan_cycle")},
-            )
+            await clear_scan_request(session)
     except Exception as exc:
-        logger.warning("Scanner snapshot persist failed after runtime publish", exc_info=exc)
-
-    async with AsyncSessionLocal() as session:
-        await clear_scan_request(session)
+        maybe_mark_db_pressure(exc, component="scanner_clear_request", ttl_seconds=30.0)
+        logger.warning("Scanner scan-request clear failed after runtime publish", exc_info=exc)
 
     return batch_id, 0, 0
 
 
 async def _run_scan_loop() -> None:
     """Load scanner then run detection loop and enqueue aggregation batches."""
+    global _last_pressure_heavy_skip_log_at
+
     await scanner.load_settings()
     await scanner.load_plugins(source_keys=["scanner"])
     restored_count = await _hydrate_scanner_pool_from_snapshot()
@@ -405,6 +427,7 @@ async def _run_scan_loop() -> None:
                         price_history_points=mem_stats["price_history_points"],
                     )
             except Exception as exc:
+                maybe_mark_db_pressure(exc, component="scanner_heartbeat", ttl_seconds=30.0)
                 heartbeat_state["last_error"] = str(exc)
                 logger.warning("Scanner heartbeat snapshot write failed: %s", exc)
             try:
@@ -537,6 +560,7 @@ async def _run_scan_loop() -> None:
                 if hydrated_market_count > 0 and pending_heavy_targeted_ids is None:
                     pending_heavy_targeted_ids = []
             except Exception as exc:
+                maybe_mark_db_pressure(exc, component="scanner_catalog_sync", ttl_seconds=45.0)
                 logger.warning("Scanner catalog sync from DB failed: %s", exc)
 
             targeted_ids = pop_targeted_condition_ids() if requested else []
@@ -631,6 +655,21 @@ async def _run_scan_loop() -> None:
                     scanner._current_activity = f"Heavy lane degraded: {reason}{until_suffix}"
                 if not forced_degrade_enabled:
                     last_forced_degrade_log = None
+                if run_heavy_now and is_db_pressure_active():
+                    run_heavy_now = False
+                    heartbeat_state["phase"] = "degraded"
+                    heartbeat_state["progress"] = 0.6
+                    pressure = db_pressure_snapshot()
+                    now_mono = time.monotonic()
+                    if now_mono - _last_pressure_heavy_skip_log_at >= 60.0:
+                        logger.warning(
+                            "Skipping heavy scan under DB pressure",
+                            db_pressure=pressure,
+                        )
+                        _last_pressure_heavy_skip_log_at = now_mono
+                    scanner._current_activity = (
+                        f"Heavy lane degraded: DB pressure ({pressure.get('component') or pressure.get('reason')})."
+                    )
                 if run_heavy_now and bool(getattr(settings, "SCANNER_DEGRADE_HEAVY_ON_BACKLOG", True)):
                     heavy_backlog_threshold = max(
                         1,
@@ -757,6 +796,7 @@ async def _run_scan_loop() -> None:
                         heartbeat_state["progress"] = 1.0
                         break
                     except (DBAPIError, asyncio.TimeoutError) as exc:
+                        maybe_mark_db_pressure(exc, component="scanner_enqueue", ttl_seconds=45.0)
                         if enqueue_attempt < DB_RETRY_ATTEMPTS - 1 and (
                             isinstance(exc, asyncio.TimeoutError) or is_retryable_db_error(exc)
                         ):

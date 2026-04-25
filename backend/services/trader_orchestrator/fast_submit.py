@@ -31,6 +31,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import services.trader_hot_state as hot_state
 from services.trader_orchestrator.order_manager import LegSubmitResult, submit_execution_leg
 from services.signal_bus import set_trade_signal_status
 from services.trader_orchestrator_state import (
@@ -327,12 +328,20 @@ async def advance_fast_trader_cursor(
     try:
         created_at = getattr(signal, "created_at", None) or utcnow()
         runtime_sequence = getattr(signal, "runtime_sequence", None)
+        normalized_runtime_sequence = int(runtime_sequence) if runtime_sequence is not None else None
+        hot_state.update_signal_cursor(
+            trader_id,
+            "live",
+            created_at,
+            signal_id,
+            normalized_runtime_sequence,
+        )
         await upsert_trader_signal_cursor(
             session,
             trader_id=trader_id,
             last_signal_created_at=created_at,
             last_signal_id=signal_id,
-            last_runtime_sequence=int(runtime_sequence) if runtime_sequence is not None else None,
+            last_runtime_sequence=normalized_runtime_sequence,
             commit=False,
         )
     except Exception as exc:

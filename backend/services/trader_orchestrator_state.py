@@ -56,6 +56,7 @@ from services.worker_state import (
 )
 from services.live_execution_adapter import execute_live_order
 from services.live_execution_service import live_execution_service
+from services.live_pressure import maybe_mark_db_pressure
 from services.trader_orchestrator.sources.registry import normalize_source_key
 from services.opportunity_strategy_catalog import (
     build_system_opportunity_strategy_rows,
@@ -3866,7 +3867,11 @@ def _serialize_snapshot(row: TraderOrchestratorSnapshot) -> dict[str, Any]:
 
 
 async def _apply_wallet_live_exposure_floor(session: AsyncSession, snapshot: dict[str, Any]) -> dict[str, Any]:
-    wallet_live_exposure = await get_gross_exposure(session, mode="live")
+    try:
+        wallet_live_exposure = await get_gross_exposure(session, mode="live")
+    except Exception as exc:
+        maybe_mark_db_pressure(exc, component="orchestrator_snapshot_exposure_floor")
+        return snapshot
     current_exposure = safe_float(snapshot.get("gross_exposure_usd"), 0.0) or 0.0
     if wallet_live_exposure <= current_exposure:
         return snapshot
@@ -8615,12 +8620,15 @@ async def get_gross_exposure(session: AsyncSession, mode: Optional[str] = None) 
         TraderOrder.notional_usd,
         TraderOrder.payload_json,
     ).where(_visible_trader_order_query_clause())
+    active_statuses = OPEN_ORDER_STATUSES
     if mode is not None:
         mode_key = _normalize_mode_key(mode)
+        active_statuses = _active_statuses_for_mode(mode_key)
         if mode_key == "other":
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == "")
         else:
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
+    query = query.where(TraderOrder.status.in_(tuple(sorted(active_statuses))))
     rows = (await session.execute(query)).all()
     live_order_exposure = 0.0
     other_order_exposure = 0.0

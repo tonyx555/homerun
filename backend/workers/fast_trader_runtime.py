@@ -34,6 +34,8 @@ from sqlalchemy.exc import DBAPIError
 
 from models.database import AsyncSessionLocal, FastAsyncSessionLocal, Trader, TraderSignalCursor
 from services.event_bus import event_bus
+from services.intent_runtime import get_intent_runtime
+from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
 from services.strategy_loader import strategy_loader
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
 from services.trader_orchestrator.fast_submit import (
@@ -69,8 +71,8 @@ _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _TRADER_REFRESH_INTERVAL_SECONDS = 15.0
 _FAST_TASK_STALE_SECONDS = 30.0
 _MAX_SIGNALS_PER_CYCLE = 4
-_TRADER_LAST_RUN_TOUCH_SECONDS = 5.0
-_IDLE_EVENT_INTERVAL_SECONDS = 60.0
+_TRADER_LAST_RUN_TOUCH_SECONDS = 30.0
+_IDLE_EVENT_INTERVAL_SECONDS = 300.0
 
 # Events that should wake up a fast trader.  Anything that adds a new
 # signal row or changes signal state belongs here.
@@ -180,6 +182,7 @@ class _FastTraderTask:
             except Exception as exc:
                 self._last_cycle_error = type(exc).__name__
                 if _is_retryable_db_error(exc):
+                    maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
                     logger.warning(
                         "Fast trader cycle hit retryable DB error",
                         trader_id=trader_id,
@@ -401,15 +404,58 @@ class _FastTraderTask:
         if not accepted_sources:
             return
 
-        async with FastAsyncSessionLocal() as session:
-            cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
-                session, trader_id=trader_id
+        strategy_types_by_source = self._accepted_strategy_types_by_source()
+        cursor_created_at = None
+        cursor_signal_id = None
+        cursor_runtime_sequence = _get_sequence_cursor(trader_id)
+        signal_ids: list[str] | None = None
+        if cursor_runtime_sequence is not None:
+            runtime_signals = await get_intent_runtime().list_unconsumed_signals(
+                trader_id=trader_id,
+                sources=accepted_sources,
+                strategy_types_by_source=strategy_types_by_source,
+                cursor_runtime_sequence=cursor_runtime_sequence,
+                cursor_created_at=None,
+                cursor_signal_id=None,
+                limit=_MAX_SIGNALS_PER_CYCLE,
             )
-            cursor_runtime_sequence = _get_sequence_cursor(trader_id)
+            signal_ids = [
+                str(getattr(signal, "id", "") or "").strip()
+                for signal in runtime_signals
+                if str(getattr(signal, "id", "") or "").strip()
+            ]
+            if not signal_ids:
+                if is_db_pressure_active():
+                    return
+                now_mono = time.monotonic()
+                touch_due = now_mono - self._last_trader_touch_at >= _TRADER_LAST_RUN_TOUCH_SECONDS
+                idle_due = now_mono - self._last_idle_event_at >= _IDLE_EVENT_INTERVAL_SECONDS
+                if not touch_due and not idle_due:
+                    return
+                async with FastAsyncSessionLocal() as session:
+                    touched = await self._touch_trader_run(session, force=False)
+                    emitted = await self._maybe_emit_idle_event(
+                        session,
+                        accepted_sources=accepted_sources,
+                        cursor_runtime_sequence=cursor_runtime_sequence,
+                        cursor_created_at=None,
+                        cursor_signal_id=None,
+                    )
+                    if touched or emitted:
+                        try:
+                            await asyncio.shield(session.commit())
+                        except Exception as exc:
+                            maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                            logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
+                return
+
+        async with FastAsyncSessionLocal() as session:
             if cursor_runtime_sequence is None:
+                cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
+                    session, trader_id=trader_id
+                )
                 cursor_row = await session.get(TraderSignalCursor, trader_id)
                 cursor_runtime_sequence = safe_int(getattr(cursor_row, "last_runtime_sequence", None), None)
-            strategy_types_by_source = self._accepted_strategy_types_by_source()
             signals = await list_unconsumed_trade_signals(
                 session,
                 trader_id=trader_id,
@@ -418,10 +464,13 @@ class _FastTraderTask:
                 cursor_runtime_sequence=cursor_runtime_sequence,
                 cursor_created_at=cursor_created_at,
                 cursor_signal_id=cursor_signal_id,
+                signal_ids=signal_ids,
                 limit=_MAX_SIGNALS_PER_CYCLE,
             )
-            touched = await self._touch_trader_run(session, force=bool(signals))
             if not signals:
+                if is_db_pressure_active():
+                    return
+                touched = await self._touch_trader_run(session, force=False)
                 emitted = await self._maybe_emit_idle_event(
                     session,
                     accepted_sources=accepted_sources,
@@ -433,9 +482,11 @@ class _FastTraderTask:
                     try:
                         await asyncio.shield(session.commit())
                     except Exception as exc:
+                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
                         logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
                 return
 
+            await self._touch_trader_run(session, force=True)
             mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
             risk_limits = dict(self._trader.get("risk_limits") or {})
             default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
@@ -454,6 +505,8 @@ class _FastTraderTask:
                         await session.rollback()
                     except Exception as rollback_exc:
                         logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
+                    if _is_retryable_db_error(exc):
+                        maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
                     logger.warning(
                         "Fast trader signal processing failed",
                         trader_id=trader_id,

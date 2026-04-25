@@ -256,8 +256,13 @@ def _position_close_fill_evidence(position_close: Any) -> tuple[float, str]:
     if not isinstance(position_close, dict):
         return 0.0, ""
     for key in (
+        "wallet_activity_total_size",
+        "wallet_trade_total_size",
+        "wallet_closed_position_total_size",
         "wallet_activity_size",
         "wallet_trade_size",
+        "evidence_size",
+        "total_size",
         "filled_size",
         "close_size",
         "executed_size",
@@ -1104,7 +1109,22 @@ async def run_monitor(config: MonitorConfig) -> int:
                         required_size = max(0.0, pending_exit_required_size if pending_exit_required_size > 0 else entry_filled_size)
                         threshold_ratio = _pending_exit_fill_threshold(pending_exit) if isinstance(pending_exit, dict) else 0.98
                         position_close_filled_size, position_close_size_source = _position_close_fill_evidence(position_close)
-                        if close_trigger in {"wallet_activity", "wallet_summary_recovery"}:
+                        position_close_uses_wallet_evidence = (
+                            close_trigger in {
+                                "wallet_activity",
+                                "wallet_summary_recovery",
+                                "wallet_flat_override",
+                                "external_wallet_flatten",
+                            }
+                            or str(position_close.get("price_source") or "").strip().lower()
+                            in {
+                                "wallet_activity",
+                                "wallet_trade",
+                                "wallet_flat_override",
+                                "closed_positions_api",
+                            }
+                        )
+                        if position_close_uses_wallet_evidence:
                             if position_close_filled_size > 0.0:
                                 close_filled_size = max(close_filled_size, position_close_filled_size)
                                 if close_provider_status in {"", "missing", "invalid"}:
@@ -1122,8 +1142,15 @@ async def run_monitor(config: MonitorConfig) -> int:
                                 "filled",
                                 "matched",
                                 "executed",
+                                "closed_positions_api",
+                                "wallet_flat_override",
+                                "wallet_activity_total_size",
+                                "wallet_trade_total_size",
+                                "wallet_closed_position_total_size",
                                 "wallet_activity_size",
                                 "wallet_trade_size",
+                                "evidence_size",
+                                "total_size",
                                 "filled_size",
                                 "close_size",
                                 "executed_size",

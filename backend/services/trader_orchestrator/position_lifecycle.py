@@ -17,6 +17,7 @@ from services.signal_bus import make_dedupe_key, upsert_trade_signal
 from services.simulation import simulation_service
 from services.strategy_sdk import StrategySDK
 from services.live_execution_service import live_execution_service
+from services.live_pressure import is_db_pressure_active
 from services.trader_order_verification import (
     TRADER_ORDER_VERIFICATION_LOCAL,
     append_trader_order_verification_event,
@@ -79,12 +80,16 @@ _LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 10.0
 # burn 200+ seconds — blowing the reconciliation worker's 30s per-trader
 # timeout and starving the fast-tier pool.  Processing the N oldest per
 # pass keeps each pass bounded; the rest pick up on the next cycle.
-_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS = 4
+_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS = 2
+_LIVE_EXIT_PRESSURE_MAX_SUBMISSIONS_PER_PASS = 1
 _MARKET_INFO_LOAD_TIMEOUT_SECONDS = 2.5
 _ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 2.0
 _RECONCILE_TIMING_WARN_SECONDS = 20.0
 _TERMINAL_REOPEN_LOOKBACK_HOURS = 72.0
 _NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS = 72.0
+_TERMINAL_REOPEN_AUDIT_COOLDOWN_SECONDS = 1800.0
+_TERMINAL_REOPEN_AUDIT_MAX_ROWS_PER_PASS = 32
+_STALE_PENDING_EXIT_WALLET_ABSENT_SECONDS = 600.0
 _LIVE_FALLBACK_MANUAL_EXIT_REASONS = {
     "circuit_breaker_safe_exit",
     "terminal_market_watchdog",
@@ -190,6 +195,49 @@ def _mark_touch_interval_seconds(params: dict[str, Any], *, mode: str) -> float:
     return _MARK_TOUCH_INTERVAL_SECONDS
 
 
+def _live_exit_submission_cap() -> int:
+    if is_db_pressure_active():
+        return _LIVE_EXIT_PRESSURE_MAX_SUBMISSIONS_PER_PASS
+    return _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS
+
+
+def _terminal_reopen_audit_recent(payload: dict[str, Any], now_naive: datetime) -> bool:
+    marker = payload.get("terminal_reopen_audit")
+    if not isinstance(marker, dict):
+        return False
+    audited_at = _parse_iso_utc_naive(marker.get("audited_at"))
+    if audited_at is None:
+        return False
+    return (now_naive - audited_at).total_seconds() < _TERMINAL_REOPEN_AUDIT_COOLDOWN_SECONDS
+
+
+def _pending_exit_stale_without_provider(pending_exit: Any, now_naive: datetime) -> bool:
+    if not isinstance(pending_exit, dict):
+        return False
+    status = str(pending_exit.get("status") or "").strip().lower()
+    if status not in {"pending", "submitted", "failed", "blocked_min_notional"}:
+        return False
+    if _pending_exit_provider_clob_id(pending_exit):
+        return False
+    retry_count = int(safe_float(pending_exit.get("retry_count"), 0.0) or 0)
+    if retry_count >= _FAILED_EXIT_MAX_RETRIES:
+        return True
+    last_attempt = _parse_iso_utc_naive(pending_exit.get("last_attempt_at") or pending_exit.get("triggered_at"))
+    if last_attempt is None:
+        return False
+    return (now_naive - last_attempt).total_seconds() >= _STALE_PENDING_EXIT_WALLET_ABSENT_SECONDS
+
+
+def _mark_terminal_reopen_audited(row: TraderOrder, payload: dict[str, Any], now: datetime, reason: str) -> None:
+    payload["terminal_reopen_audit"] = {
+        "audited_at": _iso_utc(now),
+        "status": str(getattr(row, "status", "") or ""),
+        "reason": str(reason or "no_reopen"),
+    }
+    row.payload_json = payload
+    row.updated_at = now
+
+
 def _terminal_row_requires_reopen_audit(row: TraderOrder, now_naive: datetime) -> bool:
     payload = dict(getattr(row, "payload_json", None) or {})
     position_close = payload.get("position_close")
@@ -210,6 +258,8 @@ def _terminal_row_requires_reopen_audit(row: TraderOrder, now_naive: datetime) -
         age_anchor = age_anchor.astimezone(timezone.utc).replace(tzinfo=None)
     if _terminal_row_needs_wallet_fill_repair_audit(row, now_naive):
         return True
+    if _terminal_reopen_audit_recent(payload, now_naive):
+        return False
     if isinstance(position_close, dict) and (
         _position_close_underfills_entry(row, payload, position_close)
         or close_trigger in {"wallet_activity", "wallet_summary_recovery", "external_wallet_flatten"}
@@ -1987,6 +2037,7 @@ def _position_close_evidence_size(position_close: dict[str, Any]) -> float:
         (
             "wallet_activity_total_size",
             "wallet_trade_total_size",
+            "wallet_closed_position_total_size",
             "evidence_size",
             "total_size",
             "wallet_activity_size",
@@ -2078,9 +2129,13 @@ def _position_close_evidence_key(
         return "|".join(("wallet_activity", token_id, *parts))
 
     closed_position_timestamp = str(position_close.get("wallet_closed_position_timestamp") or "").strip()
-    if not closed_position_timestamp:
-        return ""
-    return "|".join(("wallet_closed_position", token_id, f"timestamp:{closed_position_timestamp}"))
+    closed_position_total = safe_float(position_close.get("wallet_closed_position_total_size"))
+    if closed_position_timestamp or (closed_position_total is not None and closed_position_total > 0.0):
+        parts = [f"timestamp:{closed_position_timestamp}"] if closed_position_timestamp else []
+        if closed_position_total is not None and closed_position_total > 0.0:
+            parts.append(f"total:{closed_position_total:.8f}")
+        return "|".join(("wallet_closed_position", token_id, *parts))
+    return ""
 
 
 def _position_close_missing_durable_wallet_identity(position_close: dict[str, Any]) -> bool:
@@ -4355,6 +4410,7 @@ async def reconcile_live_positions(
     terminal_rows = list(((await session.execute(terminal_stmt)).scalars().all()))
     if max_age_hours is None:
         terminal_rows = [row for row in terminal_rows if _terminal_row_requires_reopen_audit(row, now_naive)]
+        terminal_rows = terminal_rows[:_TERMINAL_REOPEN_AUDIT_MAX_ROWS_PER_PASS]
     terminal_rows = _dedupe_live_authority_rows(terminal_rows)
 
     await session.commit()
@@ -4545,7 +4601,8 @@ async def reconcile_live_positions(
                 available_size = max(0.0, close_evidence_size - consumed_size)
                 if available_size + _WALLET_SIZE_EPSILON < entry_size * 0.995:
                     close_underfills_entry = True
-                elif not close_underfills_entry:
+                else:
+                    close_underfills_entry = False
                     wallet_terminal_close_consumed_size_by_key[close_evidence_key] = consumed_size + min(
                         entry_size,
                         close_size if close_size > _WALLET_SIZE_EPSILON else close_evidence_size,
@@ -4553,6 +4610,64 @@ async def reconcile_live_positions(
             if close_underfills_entry:
                 pending_exit = payload.get("pending_live_exit")
                 pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
+                if (
+                    wallet_positions_loaded
+                    and token_id
+                    and wallet_position_size <= _WALLET_SIZE_EPSILON
+                ):
+                    resolved_at = _iso_utc(now)
+                    provider_status = _provider_snapshot_status(payload)
+                    provider_remaining_size = _provider_snapshot_remaining_size(payload)
+                    previous_status = str(row.status or "")
+                    if not dry_run:
+                        row.status = "resolved"
+                        row.actual_profit = None
+                        row.updated_at = now
+                        payload.pop("position_close", None)
+                        if pending_exit:
+                            pending_exit["status"] = "superseded_wallet_absent_underfilled_close"
+                            pending_exit["resolved_at"] = resolved_at
+                            pending_exit["terminal_close_filled_size"] = float(close_size)
+                            pending_exit["required_exit_size"] = float(entry_size)
+                            pending_exit["provider_status"] = provider_status or pending_exit.get("provider_status")
+                            if provider_remaining_size is not None:
+                                pending_exit["provider_remaining_size"] = provider_remaining_size
+                            payload["pending_live_exit"] = pending_exit
+                        payload["wallet_absent_resolution"] = {
+                            "resolved_at": resolved_at,
+                            "reason": "terminal_close_underfilled_entry_but_wallet_flat",
+                            "previous_status": previous_status,
+                            "close_trigger": close_trigger,
+                            "price_source": close_price_source,
+                            "close_filled_size": float(close_size),
+                            "close_evidence_size": float(close_evidence_size),
+                            "required_entry_size": float(entry_size),
+                            "provider_status": provider_status,
+                            "provider_remaining_size": provider_remaining_size,
+                        }
+                        row.payload_json = payload
+                        hot_state.record_order_cancelled(
+                            trader_id=trader_id,
+                            mode=str(row.mode or ""),
+                            order_id=str(row.id or ""),
+                            market_id=str(row.market_id or ""),
+                            source=str(row.source or ""),
+                            copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                        )
+                        state_updates += 1
+                    details.append(
+                        {
+                            "order_id": row.id,
+                            "market_id": row.market_id,
+                            "close_trigger": close_trigger,
+                            "price_source": close_price_source,
+                            "filled_size": close_size,
+                            "required_entry_size": entry_size,
+                            "next_status": "resolved",
+                            "note": "neutralized_terminal_close_underfilled_entry_wallet_flat",
+                        }
+                    )
+                    continue
                 reopened_at = _iso_utc(now)
                 if not dry_run:
                     row.status = "open"
@@ -4695,6 +4810,31 @@ async def reconcile_live_positions(
                     and token_id
                     and wallet_position_size <= _WALLET_SIZE_EPSILON
                 ):
+                    if not dry_run:
+                        pending_exit["status"] = "superseded_wallet_absent_unverified_close"
+                        pending_exit["resolved_at"] = _iso_utc(now)
+                        payload["pending_live_exit"] = pending_exit
+                        payload.pop("position_close", None)
+                        payload["wallet_absent_resolution"] = {
+                            "resolved_at": _iso_utc(now),
+                            "reason": f"{close_trigger}_unverified_but_wallet_flat",
+                            "previous_status": row.status,
+                            "provider_status": provider_status,
+                            "provider_remaining_size": provider_remaining_size,
+                        }
+                        row.status = "resolved"
+                        row.actual_profit = None
+                        row.updated_at = now
+                        row.payload_json = payload
+                        hot_state.record_order_cancelled(
+                            trader_id=trader_id,
+                            mode=str(row.mode or ""),
+                            order_id=str(row.id or ""),
+                            market_id=str(row.market_id or ""),
+                            source=str(row.source or ""),
+                            copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                        )
+                        state_updates += 1
                     details.append(
                         {
                             "order_id": row.id,
@@ -4702,8 +4842,8 @@ async def reconcile_live_positions(
                             "close_trigger": close_trigger,
                             "provider_status": provider_status,
                             "provider_remaining_size": provider_remaining_size,
-                            "next_status": row.status,
-                            "note": "kept_terminal_no_wallet_position",
+                            "next_status": "resolved",
+                            "note": "resolved_terminal_unverified_close_wallet_absent",
                         }
                     )
                     continue
@@ -4802,6 +4942,14 @@ async def reconcile_live_positions(
         )
         candidates.append(row)
         candidate_ids.add(row_id)
+
+    if not dry_run and terminal_rows:
+        for row in terminal_rows:
+            if str(row.id) in candidate_ids:
+                continue
+            payload = dict(row.payload_json or {})
+            _mark_terminal_reopen_audited(row, payload, now, "no_reopen_authority")
+            state_updates += 1
 
     if wallet_positions_loaded and candidates:
         active_by_wallet_key: dict[str, list[tuple[TraderOrder, dict[str, Any], dict[str, Any]]]] = {}
@@ -6259,10 +6407,48 @@ async def reconcile_live_positions(
             and not wallet_position_observed
             and pending_winning_idx is None
             and wallet_settlement_price is None
-            and not _has_exit_management
+            and (not _has_exit_management or _pending_exit_stale_without_provider(_pending_exit_tmp, now_naive))
             and not _has_active_provider_exit
             and not _has_working_provider_entry
         ):
+            if _pending_exit_stale_without_provider(_pending_exit_tmp, now_naive):
+                if not dry_run:
+                    stale_pending_exit = dict(_pending_exit_tmp) if isinstance(_pending_exit_tmp, dict) else {}
+                    stale_pending_exit["status"] = "superseded_wallet_absent_no_provider"
+                    stale_pending_exit["resolved_at"] = _iso_utc(now)
+                    payload["pending_live_exit"] = stale_pending_exit
+                    payload["wallet_absent_resolution"] = {
+                        "resolved_at": _iso_utc(now),
+                        "reason": "stale_pending_exit_no_provider_and_wallet_absent",
+                        "retry_count": int(safe_float(stale_pending_exit.get("retry_count"), 0.0) or 0),
+                        "last_error": stale_pending_exit.get("last_error"),
+                    }
+                    row.status = "resolved"
+                    row.actual_profit = None
+                    row.updated_at = now
+                    row.payload_json = payload
+                    hot_state.record_order_cancelled(
+                        trader_id=trader_id,
+                        mode=str(row.mode or ""),
+                        order_id=str(row.id or ""),
+                        market_id=str(row.market_id or ""),
+                        source=str(row.source or ""),
+                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                    )
+                    state_updates += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "next_status": "resolved",
+                        "note": "resolved_stale_pending_exit_wallet_absent",
+                    }
+                )
+                skipped += 1
+                skipped_reasons["stale_pending_exit_wallet_absent"] = (
+                    int(skipped_reasons.get("stale_pending_exit_wallet_absent", 0)) + 1
+                )
+                continue
             details.append(
                 {
                     "order_id": row.id,
@@ -6722,7 +6908,7 @@ async def reconcile_live_positions(
                     wallet_position_size=wallet_position_size,
                 )
                 if token_id and remaining_exit_size > 0.0:
-                    if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                    if exit_submissions_this_pass[0] >= _live_exit_submission_cap():
                         # Budget blown — defer requote.  Do NOT cancel the
                         # working provider order: cancelling here without
                         # resubmitting would leave the position without an
@@ -7169,7 +7355,7 @@ async def reconcile_live_positions(
                         state_updates += 1
                     held += 1
                     continue
-                if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                if exit_submissions_this_pass[0] >= _live_exit_submission_cap():
                     # Defer: this pass already submitted the per-pass cap.
                     # Leave pending_live_exit unchanged so the row picks up on
                     # the next reconcile cycle.  Prevents a 20-order retry
@@ -8289,7 +8475,7 @@ async def reconcile_live_positions(
                         state_updates += 1
                         held += 1
                         continue
-                    if exit_submissions_this_pass[0] >= _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS:
+                    if exit_submissions_this_pass[0] >= _live_exit_submission_cap():
                         # Defer: persist the exit_record as status="pending"
                         # (no provider id yet); the failed-exit retry branch
                         # will pick it up on the next cycle.  But first convert

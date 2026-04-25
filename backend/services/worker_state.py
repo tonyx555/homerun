@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import WorkerControl, WorkerSnapshot
 from services.event_bus import event_bus
+from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
 from utils.converters import to_iso
 from utils.retry import db_retry_delay as _shared_db_retry_delay
 from utils.retry import is_retryable_db_error as _shared_is_retryable_db_error
@@ -469,7 +470,8 @@ async def write_worker_snapshot(
         if interval_seconds is not None
         else _default_interval(worker_name)
     )
-    stats_payload = _with_runtime_process_stats(stats)
+    base_stats = summarize_worker_stats(stats) if is_db_pressure_active() else stats
+    stats_payload = _with_runtime_process_stats(base_stats)
     values = {
         "worker_name": worker_name,
         "updated_at": updated_at,
@@ -483,23 +485,27 @@ async def write_worker_snapshot(
         "stats_json": stats_payload,
     }
     insert_stmt = pg_insert(WorkerSnapshot).values(**values)
-    await session.execute(
-        insert_stmt.on_conflict_do_update(
-            index_elements=[WorkerSnapshot.worker_name],
-            set_={
-                "updated_at": insert_stmt.excluded.updated_at,
-                "last_run_at": insert_stmt.excluded.last_run_at,
-                "running": insert_stmt.excluded.running,
-                "enabled": insert_stmt.excluded.enabled,
-                "current_activity": insert_stmt.excluded.current_activity,
-                "interval_seconds": insert_stmt.excluded.interval_seconds,
-                "lag_seconds": insert_stmt.excluded.lag_seconds,
-                "last_error": insert_stmt.excluded.last_error,
-                "stats_json": insert_stmt.excluded.stats_json,
-            },
+    try:
+        await session.execute(
+            insert_stmt.on_conflict_do_update(
+                index_elements=[WorkerSnapshot.worker_name],
+                set_={
+                    "updated_at": insert_stmt.excluded.updated_at,
+                    "last_run_at": insert_stmt.excluded.last_run_at,
+                    "running": insert_stmt.excluded.running,
+                    "enabled": insert_stmt.excluded.enabled,
+                    "current_activity": insert_stmt.excluded.current_activity,
+                    "interval_seconds": insert_stmt.excluded.interval_seconds,
+                    "lag_seconds": insert_stmt.excluded.lag_seconds,
+                    "last_error": insert_stmt.excluded.last_error,
+                    "stats_json": insert_stmt.excluded.stats_json,
+                },
+            )
         )
-    )
-    await _commit_with_retry(session)
+        await _commit_with_retry(session)
+    except Exception as exc:
+        maybe_mark_db_pressure(exc, component=f"worker_snapshot:{worker_name}")
+        raise
 
     # Publish worker status update event (fire-and-forget, don't hold DB conn).
     if publish_event:
