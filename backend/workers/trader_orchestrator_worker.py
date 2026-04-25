@@ -46,6 +46,7 @@ from services.trader_orchestrator.position_lifecycle import (
 from services.polymarket import polymarket_client
 from services.simulation import simulation_service
 from services.live_execution_service import live_execution_service
+from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
 from services.trader_orchestrator.risk_manager import evaluate_risk
 from services.trader_orchestrator.strategies.base import StrategyDecision
 from services.trader_orchestrator.decision_gates import (
@@ -579,18 +580,51 @@ async def list_unconsumed_trade_signals(
     exclude_market_ids=None,
     limit=200,
 ):
-    return await _list_unconsumed_trade_signals_authoritative(
-        session,
-        trader_id=str(trader_id or ""),
-        sources=list(sources or []),
-        statuses=list(statuses or []),
-        strategy_types_by_source=dict(strategy_types_by_source or {}),
-        cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
-        cursor_created_at=cursor_created_at,
-        cursor_signal_id=cursor_signal_id,
-        exclude_market_ids=list(exclude_market_ids or []),
-        limit=int(limit),
-    )
+    normalized_excluded_market_ids = {
+        str(market_id or "").strip()
+        for market_id in (exclude_market_ids or [])
+        if str(market_id or "").strip()
+    }
+    try:
+        runtime_rows = await get_intent_runtime().list_unconsumed_signals(
+            trader_id=str(trader_id or ""),
+            sources=list(sources or []),
+            statuses=list(statuses or []),
+            strategy_types_by_source=dict(strategy_types_by_source or {}),
+            cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
+            cursor_created_at=cursor_created_at,
+            cursor_signal_id=cursor_signal_id,
+            limit=int(limit),
+        )
+    except Exception as exc:
+        runtime_rows = []
+        logger.debug("Intent runtime signal read failed; falling back to DB", exc_info=exc)
+    if runtime_rows:
+        if normalized_excluded_market_ids:
+            runtime_rows = [
+                row
+                for row in runtime_rows
+                if str(getattr(row, "market_id", "") or "").strip() not in normalized_excluded_market_ids
+            ]
+        return runtime_rows[: max(1, min(int(limit), 5000))]
+    if is_db_pressure_active():
+        return []
+    try:
+        return await _list_unconsumed_trade_signals_authoritative(
+            session,
+            trader_id=str(trader_id or ""),
+            sources=list(sources or []),
+            statuses=list(statuses or []),
+            strategy_types_by_source=dict(strategy_types_by_source or {}),
+            cursor_runtime_sequence=int(cursor_runtime_sequence) if cursor_runtime_sequence is not None else None,
+            cursor_created_at=cursor_created_at,
+            cursor_signal_id=cursor_signal_id,
+            exclude_market_ids=list(normalized_excluded_market_ids),
+            limit=int(limit),
+        )
+    except (OperationalError, DBAPIError, asyncpg.PostgresError, asyncio.TimeoutError, TimeoutError) as exc:
+        maybe_mark_db_pressure(exc, component="trader_orchestrator_signals", ttl_seconds=60.0)
+        raise
 
 
 def _json_safe_runtime_signal_value(value: Any) -> Any:
@@ -1235,19 +1269,23 @@ async def _build_triggered_trade_signals(
     if not ordered_ids:
         return []
 
-    eligible_rows = await _list_unconsumed_trade_signals_authoritative(
-        session,
-        trader_id=trader_id,
-        sources=list(sources or []),
-        statuses=list(statuses or []),
-        strategy_types_by_source=dict(strategy_types_by_source or {}),
-        cursor_runtime_sequence=cursor_runtime_sequence,
-        cursor_created_at=cursor_created_at,
-        cursor_signal_id=cursor_signal_id,
-        signal_ids=ordered_ids,
-        exclude_market_ids=list(exclude_market_ids or []),
-        limit=max(len(ordered_ids), int(limit)),
-    )
+    try:
+        eligible_rows = await _list_unconsumed_trade_signals_authoritative(
+            session,
+            trader_id=trader_id,
+            sources=list(sources or []),
+            statuses=list(statuses or []),
+            strategy_types_by_source=dict(strategy_types_by_source or {}),
+            cursor_runtime_sequence=cursor_runtime_sequence,
+            cursor_created_at=cursor_created_at,
+            cursor_signal_id=cursor_signal_id,
+            signal_ids=ordered_ids,
+            exclude_market_ids=list(exclude_market_ids or []),
+            limit=max(len(ordered_ids), int(limit)),
+        )
+    except (OperationalError, DBAPIError, asyncpg.PostgresError, asyncio.TimeoutError, TimeoutError) as exc:
+        maybe_mark_db_pressure(exc, component="trader_orchestrator_trigger_signals", ttl_seconds=60.0)
+        eligible_rows = []
     eligible_rows_by_id = {
         str(getattr(row, "id", "") or "").strip(): row
         for row in eligible_rows
@@ -3669,55 +3707,6 @@ def _maybe_log_execution_latency_sla_breach(*, lane: str, metrics: dict[str, Any
         worst_trader=worst_trader,
         worst_trader_p95=worst_trader_p95,
     )
-
-
-async def _list_triggered_trade_signals(
-    session: Any,
-    *,
-    trader_id: str,
-    signal_ids_by_source: dict[str, list[str]],
-    sources: list[str],
-    strategy_types_by_source: dict[str, list[str]],
-    cursor_runtime_sequence: int | None,
-    cursor_created_at: datetime | None,
-    cursor_signal_id: str | None,
-    statuses: list[str],
-    limit: int,
-) -> list[Any]:
-    del session
-    if not signal_ids_by_source or not sources:
-        return []
-
-    ordered_ids: list[str] = []
-    seen_ids: set[str] = set()
-    for source_key in ("__all__", *sources):
-        for raw_signal_id in signal_ids_by_source.get(source_key) or []:
-            signal_id = str(raw_signal_id or "").strip()
-            if not signal_id or signal_id in seen_ids:
-                continue
-            seen_ids.add(signal_id)
-            ordered_ids.append(signal_id)
-    if not ordered_ids:
-        return []
-
-    runtime_rows = await get_intent_runtime().list_unconsumed_signals(
-        trader_id=str(trader_id or ""),
-        sources=list(sources or []),
-        statuses=list(statuses or []),
-        strategy_types_by_source=dict(strategy_types_by_source or {}),
-        cursor_runtime_sequence=cursor_runtime_sequence,
-        cursor_created_at=cursor_created_at,
-        cursor_signal_id=cursor_signal_id,
-        limit=max(len(ordered_ids), int(limit)),
-    )
-    rows_by_id = {
-        str(getattr(row, "id", "") or "").strip(): row
-        for row in runtime_rows
-        if str(getattr(row, "id", "") or "").strip()
-    }
-    ordered_rows = [rows_by_id[signal_id] for signal_id in ordered_ids if signal_id in rows_by_id]
-    ordered_rows.sort(key=_signal_sort_key)
-    return ordered_rows[: max(1, min(int(limit), 5000))]
 
 
 async def _emit_cycle_heartbeat_if_due(

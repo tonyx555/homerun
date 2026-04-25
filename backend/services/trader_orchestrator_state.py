@@ -5364,6 +5364,7 @@ async def get_trader_decision_detail(session: AsyncSession, decision_id: str) ->
 async def create_trader_decision(
     session: AsyncSession,
     *,
+    decision_id: str | None = None,
     trader_id: str,
     signal: TradeSignal,
     strategy_key: str,
@@ -5378,7 +5379,7 @@ async def create_trader_decision(
     commit: bool = True,
 ) -> TraderDecision:
     row = TraderDecision(
-        id=_new_id(),
+        id=decision_id or _new_id(),
         trader_id=trader_id,
         signal_id=signal.id,
         source=str(signal.source),

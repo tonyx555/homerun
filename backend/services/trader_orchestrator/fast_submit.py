@@ -36,6 +36,7 @@ from services.trader_orchestrator.order_manager import LegSubmitResult, submit_e
 from services.signal_bus import set_trade_signal_status
 from services.trader_orchestrator_state import (
     _now,
+    create_trader_decision,
     create_trader_order,
     record_signal_consumption,
     upsert_trader_signal_cursor,
@@ -170,6 +171,7 @@ async def execute_fast_signal(
     trader_id: str,
     signal: Any,
     decision_id: str | None,
+    decision_audit: dict[str, Any] | None = None,
     strategy_key: str | None,
     strategy_version: int | None,
     strategy_params: dict[str, Any] | None,
@@ -245,6 +247,23 @@ async def execute_fast_signal(
     order_payload = _result_payload_for_trader_order(leg_result=leg_result, now_iso=now_iso)
 
     try:
+        if decision_audit is not None and decision_id:
+            await create_trader_decision(
+                session,
+                decision_id=decision_id,
+                trader_id=trader_id,
+                signal=signal,
+                strategy_key=strategy_key or str(getattr(signal, "strategy_type", "") or ""),
+                strategy_version=strategy_version,
+                decision=str(decision_audit.get("decision") or "selected"),
+                reason=decision_audit.get("reason"),
+                score=decision_audit.get("score"),
+                checks_summary=decision_audit.get("checks_summary"),
+                risk_snapshot=decision_audit.get("risk_snapshot"),
+                payload=decision_audit.get("payload"),
+                trace_id=decision_audit.get("trace_id"),
+                commit=False,
+            )
         order = await create_trader_order(
             session,
             trader_id=trader_id,
@@ -262,6 +281,10 @@ async def execute_fast_signal(
             commit=False,
         )
     except Exception as exc:
+        try:
+            await session.rollback()
+        except Exception as rollback_exc:
+            logger.debug("Fast-tier trader_order write rollback failed", trader_id=trader_id, exc_info=rollback_exc)
         logger.error("Fast-tier trader_order write failed", trader_id=trader_id, exc_info=exc)
         return FastSubmitResult(
             session_id="",

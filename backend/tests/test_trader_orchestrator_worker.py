@@ -180,6 +180,107 @@ async def test_ensure_runtime_signal_persisted_uses_on_conflict_do_nothing_for_r
     }
 
 
+@pytest.mark.asyncio
+async def test_list_unconsumed_trade_signals_prefers_intent_runtime(monkeypatch):
+    runtime_signal = SimpleNamespace(
+        id="runtime-signal-1",
+        source="scanner",
+        strategy_type="generic-runtime-strategy",
+        market_id="runtime-market-1",
+        status="pending",
+        runtime_sequence=120,
+    )
+    observed_kwargs: dict[str, object] = {}
+
+    class _Runtime:
+        async def list_unconsumed_signals(self, **kwargs):
+            observed_kwargs.update(kwargs)
+            return [runtime_signal]
+
+    async def _authoritative_must_not_run(*_args, **_kwargs):
+        raise AssertionError("standard orchestrator hot path must not query trade_signals when runtime has signals")
+
+    monkeypatch.setattr(trader_orchestrator_worker, "get_intent_runtime", lambda: _Runtime())
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_list_unconsumed_trade_signals_authoritative",
+        _authoritative_must_not_run,
+    )
+
+    rows = await trader_orchestrator_worker.list_unconsumed_trade_signals(
+        object(),
+        trader_id="trader-1",
+        sources=["scanner"],
+        statuses=["pending", "selected"],
+        strategy_types_by_source={"scanner": ["generic-runtime-strategy"]},
+        cursor_runtime_sequence=100,
+        limit=10,
+    )
+
+    assert rows == [runtime_signal]
+    assert observed_kwargs["trader_id"] == "trader-1"
+    assert observed_kwargs["cursor_runtime_sequence"] == 100
+
+
+@pytest.mark.asyncio
+async def test_triggered_signal_build_uses_snapshots_when_authoritative_db_is_busy(monkeypatch):
+    async def _db_timeout(*_args, **_kwargs):
+        raise asyncio.TimeoutError()
+
+    pressure_events: list[str] = []
+
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "_list_unconsumed_trade_signals_authoritative",
+        _db_timeout,
+    )
+    monkeypatch.setattr(
+        trader_orchestrator_worker,
+        "maybe_mark_db_pressure",
+        lambda _exc, *, component, ttl_seconds: pressure_events.append(component),
+    )
+
+    rows = await trader_orchestrator_worker._build_triggered_trade_signals(
+        object(),
+        trader_id="trader-1",
+        signal_ids_by_source={"scanner": ["snapshot-signal-1"]},
+        signal_snapshots_by_source={
+            "scanner": {
+                "snapshot-signal-1": {
+                    "id": "snapshot-signal-1",
+                    "source": "scanner",
+                    "signal_type": "scanner_opportunity",
+                    "strategy_type": "generic-runtime-strategy",
+                    "market_id": "snapshot-market-1",
+                    "market_question": "Snapshot-backed signal?",
+                    "direction": "buy_yes",
+                    "entry_price": 0.42,
+                    "edge_percent": 6.0,
+                    "confidence": 0.8,
+                    "liquidity": 1000.0,
+                    "status": "pending",
+                    "payload_json": {},
+                    "strategy_context_json": {},
+                    "runtime_sequence": 130,
+                    "created_at": datetime(2026, 4, 16, 3, 30, tzinfo=timezone.utc),
+                    "updated_at": datetime(2026, 4, 16, 3, 30, tzinfo=timezone.utc),
+                }
+            }
+        },
+        sources=["scanner"],
+        strategy_types_by_source={"scanner": ["generic-runtime-strategy"]},
+        cursor_runtime_sequence=100,
+        cursor_created_at=None,
+        cursor_signal_id=None,
+        statuses=["pending"],
+        limit=10,
+    )
+
+    assert [row.id for row in rows] == ["snapshot-signal-1"]
+    assert rows[0].market_id == "snapshot-market-1"
+    assert pressure_events == ["trader_orchestrator_trigger_signals"]
+
+
 def test_maybe_log_execution_latency_sla_breach_does_not_repeat_same_signature(monkeypatch):
     warnings: list[dict[str, object]] = []
 
@@ -430,8 +531,6 @@ def test_merged_strategy_params_use_loaded_strategy_config_defaults(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_build_triggered_trade_signals_prefers_runtime_signal_snapshots(monkeypatch):
-    fallback_mock = AsyncMock(return_value=[])
-    monkeypatch.setattr(trader_orchestrator_worker, "_list_triggered_trade_signals", fallback_mock)
     monkeypatch.setattr(
         trader_orchestrator_worker,
         "_list_unconsumed_trade_signals_authoritative",
@@ -473,7 +572,6 @@ async def test_build_triggered_trade_signals_prefers_runtime_signal_snapshots(mo
 
     assert [row.id for row in rows] == ["signal-1"]
     assert rows[0].payload_json["asset"] == "BTC"
-    fallback_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

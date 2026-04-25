@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 from typing import Any, Optional
 
 from sqlalchemy.exc import DBAPIError
@@ -37,14 +38,13 @@ from services.event_bus import event_bus
 from services.intent_runtime import get_intent_runtime
 from services.live_pressure import is_db_pressure_active, maybe_mark_db_pressure
 from services.strategy_loader import strategy_loader
+import services.trader_hot_state as hot_state
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
 from services.trader_orchestrator.fast_submit import (
     advance_fast_trader_cursor,
     execute_fast_signal,
 )
 from services.trader_orchestrator_state import (
-    create_trader_decision,
-    create_trader_event,
     get_trader_signal_cursor,
     list_fast_traders,
     list_unconsumed_trade_signals,
@@ -81,6 +81,8 @@ _WAKE_EVENTS = (
     "trade_signal_batch",
     "signals_update",
 )
+
+_FAST_ORDER_SUCCESS_STATUSES = {"executed", "submitted", "open", "working", "completed", "partial", "hedging"}
 
 
 def _get_sequence_cursor(trader_id: str) -> Optional[int]:
@@ -345,11 +347,11 @@ class _FastTraderTask:
         cursor_created_at: Any,
         cursor_signal_id: Any,
     ) -> bool:
+        del session
         now_mono = time.monotonic()
         if now_mono - self._last_idle_event_at < _IDLE_EVENT_INTERVAL_SECONDS:
             return False
-        await create_trader_event(
-            session,
+        await hot_state.buffer_trader_event(
             trader_id=self.trader_id,
             event_type="fast_cycle_heartbeat",
             severity="info",
@@ -362,7 +364,6 @@ class _FastTraderTask:
                 "cursor_created_at": getattr(cursor_created_at, "isoformat", lambda: None)(),
                 "cursor_signal_id": str(cursor_signal_id or "") or None,
             },
-            commit=False,
         )
         self._last_idle_event_at = now_mono
         return True
@@ -379,8 +380,8 @@ class _FastTraderTask:
         message: str,
         reason: str | None = None,
     ) -> None:
-        await create_trader_event(
-            session,
+        del session
+        await hot_state.buffer_trader_event(
             trader_id=self.trader_id,
             event_type=event_type,
             severity=severity,
@@ -395,7 +396,94 @@ class _FastTraderTask:
                 "market_id": str(getattr(signal, "market_id", "") or ""),
                 "runtime_sequence": getattr(signal, "runtime_sequence", None),
             },
-            commit=False,
+        )
+
+    async def _buffer_decision(
+        self,
+        *,
+        signal: Any,
+        source_key: str,
+        strategy_key: str,
+        mode: str,
+        decision: str,
+        reason: str | None,
+        score: Any = None,
+        checks_summary: dict[str, Any] | None = None,
+        risk_snapshot: dict[str, Any] | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> str:
+        return await hot_state.buffer_decision(
+            trader_id=self.trader_id,
+            signal_id=str(getattr(signal, "id", "") or ""),
+            signal_source=str(getattr(signal, "source", "") or source_key),
+            strategy_key=strategy_key,
+            strategy_version=None,
+            decision=decision,
+            reason=reason,
+            score=score,
+            trace_id=None,
+            checks_summary=checks_summary or {"fast_tier": True, "checks": []},
+            risk_snapshot=risk_snapshot or {"fast_tier": True},
+            payload=payload
+            or self._decision_payload(
+                signal=signal,
+                source_key=source_key,
+                strategy_key=strategy_key,
+                mode=mode,
+            ),
+        )
+
+    async def _advance_cursor_buffered(
+        self,
+        *,
+        signal: Any,
+        mode: str,
+        decision_id: str | None,
+        outcome: str,
+        reason: str | None,
+    ) -> None:
+        signal_id = str(getattr(signal, "id", "") or "").strip()
+        if not signal_id:
+            return
+        signal_status = str(outcome or "").strip().lower()
+        if signal_status == "blocked":
+            signal_status = "skipped"
+        if signal_status not in {"executed", "skipped", "expired", "failed", "submitted", "selected"}:
+            signal_status = "failed" if signal_status == "error" else "skipped"
+        effective_price = getattr(signal, "effective_price", None)
+        try:
+            await get_intent_runtime().update_signal_status(
+                signal_id=signal_id,
+                status=signal_status,
+                effective_price=effective_price,
+            )
+        except Exception:
+            await hot_state.buffer_signal_status(
+                signal_id=signal_id,
+                status=signal_status,
+                effective_price=effective_price,
+            )
+        created_at = getattr(signal, "created_at", None) or utcnow()
+        runtime_sequence = safe_int(getattr(signal, "runtime_sequence", None), None)
+        hot_state.update_signal_cursor(
+            self.trader_id,
+            mode,
+            created_at,
+            signal_id,
+            runtime_sequence,
+        )
+        await hot_state.buffer_signal_consumption(
+            trader_id=self.trader_id,
+            signal_id=signal_id,
+            outcome=outcome,
+            reason=reason,
+            decision_id=decision_id,
+        )
+        await hot_state.buffer_signal_cursor(
+            trader_id=self.trader_id,
+            last_signal_created_at=created_at,
+            last_signal_id=signal_id,
+            last_runtime_sequence=runtime_sequence,
         )
 
     async def _run_once(self) -> None:
@@ -408,46 +496,61 @@ class _FastTraderTask:
         cursor_created_at = None
         cursor_signal_id = None
         cursor_runtime_sequence = _get_sequence_cursor(trader_id)
-        signal_ids: list[str] | None = None
+        runtime_signals = await get_intent_runtime().list_unconsumed_signals(
+            trader_id=trader_id,
+            sources=accepted_sources,
+            statuses=["pending", "selected"],
+            strategy_types_by_source=strategy_types_by_source,
+            cursor_runtime_sequence=cursor_runtime_sequence,
+            cursor_created_at=None,
+            cursor_signal_id=None,
+            limit=_MAX_SIGNALS_PER_CYCLE,
+        )
+        if runtime_signals:
+            mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
+            risk_limits = dict(self._trader.get("risk_limits") or {})
+            default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
+            async with FastAsyncSessionLocal() as session:
+                for signal in runtime_signals:
+                    try:
+                        await self._process_one(
+                            session,
+                            signal=signal,
+                            mode=mode,
+                            default_size_usd=default_size_usd,
+                        )
+                        if session.in_transaction():
+                            await asyncio.shield(session.commit())
+                    except Exception as exc:
+                        try:
+                            await session.rollback()
+                        except Exception as rollback_exc:
+                            logger.debug("Fast trader rollback failed", trader_id=trader_id, exc_info=rollback_exc)
+                        if _is_retryable_db_error(exc):
+                            maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
+                        logger.warning(
+                            "Fast trader signal processing failed",
+                            trader_id=trader_id,
+                            signal_id=getattr(signal, "id", None),
+                            exc_info=exc,
+                        )
+                    finally:
+                        try:
+                            await session.reset()
+                        except Exception:
+                            pass
+            return
         if cursor_runtime_sequence is not None:
-            runtime_signals = await get_intent_runtime().list_unconsumed_signals(
-                trader_id=trader_id,
-                sources=accepted_sources,
-                strategy_types_by_source=strategy_types_by_source,
+            if is_db_pressure_active():
+                return
+            await self._maybe_emit_idle_event(
+                None,
+                accepted_sources=accepted_sources,
                 cursor_runtime_sequence=cursor_runtime_sequence,
                 cursor_created_at=None,
                 cursor_signal_id=None,
-                limit=_MAX_SIGNALS_PER_CYCLE,
             )
-            signal_ids = [
-                str(getattr(signal, "id", "") or "").strip()
-                for signal in runtime_signals
-                if str(getattr(signal, "id", "") or "").strip()
-            ]
-            if not signal_ids:
-                if is_db_pressure_active():
-                    return
-                now_mono = time.monotonic()
-                touch_due = now_mono - self._last_trader_touch_at >= _TRADER_LAST_RUN_TOUCH_SECONDS
-                idle_due = now_mono - self._last_idle_event_at >= _IDLE_EVENT_INTERVAL_SECONDS
-                if not touch_due and not idle_due:
-                    return
-                async with FastAsyncSessionLocal() as session:
-                    touched = await self._touch_trader_run(session, force=False)
-                    emitted = await self._maybe_emit_idle_event(
-                        session,
-                        accepted_sources=accepted_sources,
-                        cursor_runtime_sequence=cursor_runtime_sequence,
-                        cursor_created_at=None,
-                        cursor_signal_id=None,
-                    )
-                    if touched or emitted:
-                        try:
-                            await asyncio.shield(session.commit())
-                        except Exception as exc:
-                            maybe_mark_db_pressure(exc, component=WORKER_NAME, ttl_seconds=45.0)
-                            logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
-                return
+            return
 
         async with FastAsyncSessionLocal() as session:
             if cursor_runtime_sequence is None:
@@ -464,7 +567,6 @@ class _FastTraderTask:
                 cursor_runtime_sequence=cursor_runtime_sequence,
                 cursor_created_at=cursor_created_at,
                 cursor_signal_id=cursor_signal_id,
-                signal_ids=signal_ids,
                 limit=_MAX_SIGNALS_PER_CYCLE,
             )
             if not signals:
@@ -538,10 +640,9 @@ class _FastTraderTask:
                 message="Fast signal skipped: missing strategy key.",
                 reason="missing_strategy_key",
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
+                mode=mode,
                 decision_id=None,
                 outcome="failed",
                 reason="missing_strategy_key",
@@ -551,12 +652,11 @@ class _FastTraderTask:
 
         strategy = strategy_loader.get_instance(strategy_key)
         if strategy is None:
-            decision_row = await create_trader_decision(
-                session,
-                trader_id=trader_id,
+            decision_id = await self._buffer_decision(
                 signal=signal,
+                source_key=source_key,
                 strategy_key=strategy_key,
-                strategy_version=None,
+                mode=mode,
                 decision="failed",
                 reason=f"Fast strategy not loaded: {strategy_key}",
                 score=None,
@@ -568,7 +668,6 @@ class _FastTraderTask:
                     strategy_key=strategy_key,
                     mode=mode,
                 ),
-                commit=False,
             )
             await self._record_signal_event(
                 session,
@@ -580,11 +679,10 @@ class _FastTraderTask:
                 message="Fast signal skipped: strategy is not loaded.",
                 reason="strategy_not_loaded",
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
-                decision_id=decision_row.id,
+                mode=mode,
+                decision_id=decision_id,
                 outcome="failed",
                 reason=f"Fast strategy not loaded: {strategy_key}",
             )
@@ -615,12 +713,11 @@ class _FastTraderTask:
             )
         except asyncio.TimeoutError:
             reason = f"Fast evaluate exceeded budget ({_EVALUATE_BUDGET_SECONDS}s)."
-            decision_row = await create_trader_decision(
-                session,
-                trader_id=trader_id,
+            decision_id = await self._buffer_decision(
                 signal=signal,
+                source_key=source_key,
                 strategy_key=strategy_key,
-                strategy_version=None,
+                mode=mode,
                 decision="failed",
                 reason=reason,
                 score=None,
@@ -632,7 +729,6 @@ class _FastTraderTask:
                     strategy_key=strategy_key,
                     mode=mode,
                 ),
-                commit=False,
             )
             await self._record_signal_event(
                 session,
@@ -644,11 +740,10 @@ class _FastTraderTask:
                 message="Fast strategy evaluate exceeded budget.",
                 reason=f"evaluate_timeout:{_EVALUATE_BUDGET_SECONDS}",
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
-                decision_id=decision_row.id,
+                mode=mode,
+                decision_id=decision_id,
                 outcome="failed",
                 reason=reason,
             )
@@ -661,12 +756,11 @@ class _FastTraderTask:
             return
         except Exception as exc:
             reason = f"Fast evaluate raised: {type(exc).__name__}: {exc}"
-            decision_row = await create_trader_decision(
-                session,
-                trader_id=trader_id,
+            decision_id = await self._buffer_decision(
                 signal=signal,
+                source_key=source_key,
                 strategy_key=strategy_key,
-                strategy_version=None,
+                mode=mode,
                 decision="failed",
                 reason=reason,
                 score=None,
@@ -678,7 +772,6 @@ class _FastTraderTask:
                     strategy_key=strategy_key,
                     mode=mode,
                 ),
-                commit=False,
             )
             await self._record_signal_event(
                 session,
@@ -690,11 +783,10 @@ class _FastTraderTask:
                 message="Fast strategy evaluate raised.",
                 reason=f"{type(exc).__name__}: {exc}",
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
-                decision_id=decision_row.id,
+                mode=mode,
+                decision_id=decision_id,
                 outcome="failed",
                 reason=reason,
             )
@@ -712,12 +804,11 @@ class _FastTraderTask:
 
         if final_decision != "selected":
             outcome = final_decision if final_decision in {"blocked", "failed", "skipped"} else "blocked"
-            decision_row = await create_trader_decision(
-                session,
-                trader_id=trader_id,
+            decision_id = await self._buffer_decision(
                 signal=signal,
+                source_key=source_key,
                 strategy_key=strategy_key,
-                strategy_version=None,
+                mode=mode,
                 decision=final_decision,
                 reason=reason or f"fast:{final_decision}",
                 score=getattr(decision, "score", None),
@@ -730,39 +821,31 @@ class _FastTraderTask:
                     mode=mode,
                     evaluated_size=evaluated_size,
                 ),
-                commit=False,
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
-                decision_id=decision_row.id,
+                mode=mode,
+                decision_id=decision_id,
                 outcome=outcome,
                 reason=reason or f"fast:{final_decision}",
             )
             return
 
-        decision_row = await create_trader_decision(
-            session,
-            trader_id=trader_id,
-            signal=signal,
-            strategy_key=strategy_key,
-            strategy_version=None,
-            decision="selected",
-            reason=reason or "fast:selected",
-            score=getattr(decision, "score", None),
-            checks_summary=self._checks_summary(decision),
-            risk_snapshot={"fast_tier": True},
-            payload=self._decision_payload(
+        decision_id = uuid.uuid4().hex
+        selected_decision_audit = {
+            "decision": "selected",
+            "reason": reason or "fast:selected",
+            "score": getattr(decision, "score", None),
+            "checks_summary": self._checks_summary(decision),
+            "risk_snapshot": {"fast_tier": True},
+            "payload": self._decision_payload(
                 signal=signal,
                 source_key=source_key,
                 strategy_key=strategy_key,
                 mode=mode,
                 evaluated_size=evaluated_size,
             ),
-            commit=False,
-        )
-        await asyncio.shield(session.commit())
+        }
 
         try:
             submit_started_at = time.monotonic()
@@ -770,7 +853,8 @@ class _FastTraderTask:
                 session,
                 trader_id=trader_id,
                 signal=signal,
-                decision_id=decision_row.id,
+                decision_id=decision_id,
+                decision_audit=selected_decision_audit,
                 strategy_key=strategy_key,
                 strategy_version=None,
                 strategy_params=strategy_params,
@@ -788,13 +872,24 @@ class _FastTraderTask:
                     budget_s=_SUBMIT_BUDGET_SECONDS,
                 )
         except Exception as exc:
-            await update_trader_decision(
-                session,
-                decision_id=decision_row.id,
+            failed_decision_id = await self._buffer_decision(
+                signal=signal,
+                source_key=source_key,
+                strategy_key=strategy_key,
+                mode=mode,
                 decision="failed",
                 reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
-                payload_patch={"submit_exception": type(exc).__name__},
-                commit=False,
+                score=getattr(decision, "score", None),
+                checks_summary=self._checks_summary(decision),
+                risk_snapshot={"fast_tier": True},
+                payload=self._decision_payload(
+                    signal=signal,
+                    source_key=source_key,
+                    strategy_key=strategy_key,
+                    mode=mode,
+                    evaluated_size=evaluated_size,
+                    result_payload={"submit_exception": type(exc).__name__},
+                ),
             )
             await self._record_signal_event(
                 session,
@@ -806,11 +901,10 @@ class _FastTraderTask:
                 message="Fast submit raised.",
                 reason=f"{type(exc).__name__}: {exc}",
             )
-            await advance_fast_trader_cursor(
-                session,
-                trader_id=trader_id,
+            await self._advance_cursor_buffered(
                 signal=signal,
-                decision_id=decision_row.id,
+                mode=mode,
+                decision_id=failed_decision_id,
                 outcome="failed",
                 reason=f"Fast submit raised: {type(exc).__name__}: {exc}",
             )
@@ -822,14 +916,24 @@ class _FastTraderTask:
             )
             return
 
-        outcome_for_cursor = "executed" if result.orders_written > 0 else result.status
+        result_status = str(result.status or "").strip().lower()
+        outcome_for_cursor = (
+            "executed"
+            if result.orders_written > 0 and result_status in _FAST_ORDER_SUCCESS_STATUSES
+            else result_status
+        )
         if result.orders_written <= 0:
-            await update_trader_decision(
-                session,
-                decision_id=decision_row.id,
+            no_order_decision_id = await self._buffer_decision(
+                signal=signal,
+                source_key=source_key,
+                strategy_key=strategy_key,
+                mode=mode,
                 decision="failed" if result.status == "failed" else "skipped",
                 reason=result.error_message or reason or f"fast_submit:{result.status}",
-                payload_patch=self._decision_payload(
+                score=getattr(decision, "score", None),
+                checks_summary=self._checks_summary(decision),
+                risk_snapshot={"fast_tier": True},
+                payload=self._decision_payload(
                     signal=signal,
                     source_key=source_key,
                     strategy_key=strategy_key,
@@ -837,7 +941,6 @@ class _FastTraderTask:
                     evaluated_size=evaluated_size,
                     result_payload=result.payload,
                 ),
-                commit=False,
             )
             await self._record_signal_event(
                 session,
@@ -849,10 +952,24 @@ class _FastTraderTask:
                 message="Fast submit did not write an order.",
                 reason=result.error_message or result.status,
             )
+            await self._advance_cursor_buffered(
+                signal=signal,
+                mode=mode,
+                decision_id=no_order_decision_id,
+                outcome=outcome_for_cursor,
+                reason=result.error_message or reason,
+            )
+            return
         else:
             await update_trader_decision(
                 session,
-                decision_id=decision_row.id,
+                decision_id=decision_id,
+                decision=None if result_status in _FAST_ORDER_SUCCESS_STATUSES else "failed",
+                reason=(
+                    None
+                    if result_status in _FAST_ORDER_SUCCESS_STATUSES
+                    else (result.error_message or reason or f"fast_submit:{result.status}")
+                ),
                 payload_patch={
                     "orders_written": result.orders_written,
                     "created_orders": result.created_orders,
@@ -864,7 +981,7 @@ class _FastTraderTask:
             session,
             trader_id=trader_id,
             signal=signal,
-            decision_id=decision_row.id,
+            decision_id=decision_id,
             outcome=outcome_for_cursor,
             reason=result.error_message or reason,
         )
@@ -1032,6 +1149,10 @@ class _FastRuntime:
     async def run(self) -> None:
         global _current_runtime
         logger.info("Fast-tier runtime supervisor started")
+        try:
+            await hot_state.seed()
+        except Exception as exc:
+            logger.warning("Fast-tier runtime hot-state seed failed", exc_info=exc)
         # Install ourselves as the active runtime BEFORE subscribing so the
         # dispatcher has a target to forward to.  The dedup in EventBus.subscribe
         # plus the module-level _dispatch_wake indirection guarantees the

@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
@@ -16,9 +16,13 @@ from models.database import (  # noqa: E402
     Trader,
     TraderDecision,
     TraderEvent,
+    TraderOrder,
     TraderSignalConsumption,
 )
 from services.strategies.base import StrategyDecision  # noqa: E402
+import services.trader_hot_state as hot_state  # noqa: E402
+from services.trader_orchestrator import fast_submit  # noqa: E402
+from services.trader_orchestrator.order_manager import LegSubmitResult  # noqa: E402
 from services.trader_orchestrator_state import list_fast_traders  # noqa: E402
 from tests.postgres_test_db import build_postgres_session_factory  # noqa: E402
 from utils.utcnow import utcnow  # noqa: E402
@@ -103,6 +107,7 @@ async def _seed_trader_and_signal(session, signal_id: str = "signal-1") -> None:
 @pytest.mark.asyncio
 async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_skipped_decision")
+    monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
 
     class SkippingStrategy:
         def evaluate(self, signal, context):
@@ -132,6 +137,7 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
             signal = await session.get(TradeSignal, "signal-1")
             await runner._process_one(session, signal=signal, mode="live", default_size_usd=7.5)
             await session.commit()
+            await hot_state.flush_audit_buffer()
 
         async with session_factory() as session:
             decision = (
@@ -158,6 +164,7 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
 @pytest.mark.asyncio
 async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_no_order_decision")
+    monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
 
     class SelectingStrategy:
         def evaluate(self, signal, context):
@@ -166,6 +173,10 @@ async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch)
     async def fake_execute_fast_signal(session, **kwargs):
         assert session is not None
         assert kwargs["decision_id"]
+        existing_decisions = (
+            await session.execute(select(func.count()).select_from(TraderDecision))
+        ).scalar_one()
+        assert existing_decisions == 0
         return SimpleNamespace(
             status="skipped",
             effective_price=None,
@@ -185,6 +196,7 @@ async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch)
             signal = await session.get(TradeSignal, "signal-2")
             await runner._process_one(session, signal=signal, mode="live", default_size_usd=7.5)
             await session.commit()
+            await hot_state.flush_audit_buffer()
 
         async with session_factory() as session:
             decision = (
@@ -210,8 +222,9 @@ async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_fast_trader_idle_cycle_updates_last_run_and_emits_heartbeat():
+async def test_fast_trader_idle_cycle_updates_last_run_and_emits_heartbeat(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_idle_heartbeat")
+    monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
     runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), asyncio.Event())
     runner._last_idle_event_at = -1_000_000.0
 
@@ -245,6 +258,7 @@ async def test_fast_trader_idle_cycle_updates_last_run_and_emits_heartbeat():
                 cursor_signal_id="signal-0",
             )
             await session.commit()
+            await hot_state.flush_audit_buffer()
 
         async with session_factory() as session:
             trader = await session.get(Trader, "fast-trader")
@@ -389,6 +403,121 @@ async def test_list_fast_traders_excludes_disabled_and_paused_traders():
             traders = await list_fast_traders(session)
 
         assert [trader["id"] for trader in traders] == ["fast-enabled"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_links_deferred_decision_to_order(monkeypatch):
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_deferred_decision_link")
+
+    async def fake_submit_execution_leg(**_kwargs):
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="failed",
+            effective_price=0.42,
+            error_message="venue rejected",
+            payload={"provider_status": "rejected"},
+            provider_order_id="provider-order-1",
+            provider_clob_order_id="provider-clob-1",
+            shares=7.0,
+            notional_usd=3.0,
+        )
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-linked")
+            signal = await session.get(TradeSignal, "signal-linked")
+            result = await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id="decision-linked",
+                decision_audit={
+                    "decision": "selected",
+                    "reason": "selected after provider submit",
+                    "score": 9.0,
+                    "checks_summary": {"fast_tier": True, "checks": []},
+                    "risk_snapshot": {"fast_tier": True},
+                    "payload": {"fast_tier": True},
+                },
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="selected after provider submit",
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            decision = await session.get(TraderDecision, "decision-linked")
+            order = (
+                await session.execute(select(TraderOrder).where(TraderOrder.signal_id == "signal-linked"))
+            ).scalar_one()
+
+        assert result.orders_written == 1
+        assert result.status == "failed"
+        assert decision is not None
+        assert decision.decision == "selected"
+        assert order.decision_id == "decision-linked"
+        assert order.provider_order_id == "provider-order-1"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_rolls_back_partial_decision_when_order_persist_fails(monkeypatch):
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_persist_failure_rollback")
+
+    async def fake_submit_execution_leg(**_kwargs):
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="failed",
+            effective_price=0.42,
+            error_message="venue rejected",
+            payload={"provider_status": "rejected"},
+            notional_usd=3.0,
+        )
+
+    async def fake_create_trader_order(*_args, **_kwargs):
+        raise RuntimeError("order write failed")
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+    monkeypatch.setattr(fast_submit, "create_trader_order", fake_create_trader_order)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-rollback")
+            signal = await session.get(TradeSignal, "signal-rollback")
+            result = await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id="decision-rollback",
+                decision_audit={
+                    "decision": "selected",
+                    "reason": "selected after provider submit",
+                    "payload": {"fast_tier": True},
+                },
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="selected after provider submit",
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            decision = await session.get(TraderDecision, "decision-rollback")
+
+        assert result.orders_written == 0
+        assert result.status == "failed"
+        assert "order write failed" in str(result.error_message)
+        assert decision is None
     finally:
         await engine.dispose()
 
