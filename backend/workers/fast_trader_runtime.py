@@ -626,6 +626,22 @@ class _FastTraderTask:
     ) -> None:
         trader_id = self.trader_id
         source_key = str(getattr(signal, "source", "") or "").strip().lower()
+        allowed_strategy_types = set(self._accepted_strategy_types_by_source().get(source_key) or [])
+        signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
+        if allowed_strategy_types and signal_strategy_type not in allowed_strategy_types:
+            await self._advance_cursor_buffered(
+                signal=signal,
+                mode=mode,
+                decision_id=None,
+                outcome="skipped",
+                reason=(
+                    "source_strategy_filter:"
+                    f"signal={signal_strategy_type or 'unknown'};"
+                    f"allowed={','.join(sorted(allowed_strategy_types))}"
+                ),
+            )
+            return
+
         strategy_key = self._strategy_key_for_source(source_key) or str(
             getattr(signal, "strategy_type", "") or ""
         ).strip().lower()

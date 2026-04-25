@@ -15,8 +15,8 @@ from services.chainlink_feed import BINANCE_TOPIC, CHAINLINK_TOPIC, ChainlinkFee
 
 def test_handle_message_parses_snapshot_rows_with_parent_symbol():
     feed = ChainlinkFeed()
-    # Use timestamps close to "now" so history entries survive the 25-minute
-    # pruning window inside _handle_message.
+    # Use timestamps close to "now" so history entries survive pruning inside
+    # _handle_message.
     now_s = int(time.time())
     ts0 = now_s - 10
     ts1 = now_s - 9
@@ -45,8 +45,8 @@ def test_handle_message_parses_snapshot_rows_with_parent_symbol():
 
 def test_handle_message_parses_payload_list_and_respects_source_priority():
     feed = ChainlinkFeed()
-    # Use timestamps close to "now" so history entries survive the 25-minute
-    # pruning window inside _handle_message.
+    # Use timestamps close to "now" so history entries survive pruning inside
+    # _handle_message.
     now_s = int(time.time())
     ts_binance = now_s - 10
     ts_chainlink = now_s - 9

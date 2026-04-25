@@ -48,6 +48,7 @@ _BOUNDARY_INTERVALS_SECONDS = (300, 900, 3600, 14400)
 _BOUNDARY_PREFETCH_WINDOW_SECONDS = 15
 _BOUNDARY_LINGER_WINDOW_SECONDS = 10
 _CRYPTO_ML_TASK_KEY = "crypto_directional"
+_CRYPTO_ORACLE_HISTORY_POINTS = 120
 
 
 def _to_float(value: Any) -> float | None:
@@ -73,6 +74,51 @@ def _parse_iso_utc(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _enrich_crypto_motion_fields(row: dict[str, Any], motion_summary: dict[str, Any] | None) -> None:
+    summary = dict(motion_summary or {})
+    if not summary:
+        return
+
+    history_summary = dict(row.get("oracle_history_summary") or {})
+    for key in ("move_5m", "move_30m", "move_2h"):
+        move = summary.get(key)
+        if not isinstance(move, dict):
+            continue
+        percent = _to_float(move.get("percent"))
+        if percent is None:
+            continue
+        history_summary[key] = dict(move)
+        percent_key = f"{key}_percent"
+        pct_key = f"{key}_pct"
+        if row.get(percent_key) is None:
+            row[percent_key] = percent
+        if row.get(pct_key) is None:
+            row[pct_key] = percent
+
+    if summary.get("history_coverage_seconds") is not None:
+        history_summary["history_coverage_seconds"] = summary.get("history_coverage_seconds")
+    if summary.get("latest_ts_ms") is not None:
+        history_summary["latest_ts_ms"] = summary.get("latest_ts_ms")
+    if summary.get("latest_price") is not None:
+        history_summary["latest_price"] = summary.get("latest_price")
+    if history_summary:
+        row["oracle_history_summary"] = history_summary
+
+    if row.get("recent_move_zscore") is not None:
+        return
+    move_5m = _to_float(row.get("move_5m_percent"))
+    if move_5m is None:
+        return
+    move_30m = _to_float(row.get("move_30m_percent"))
+    move_2h = _to_float(row.get("move_2h_percent"))
+    move_scale = max(
+        abs(move_30m or 0.0) / 2.0,
+        abs(move_2h or 0.0) / 3.0,
+        0.25,
+    )
+    row["recent_move_zscore"] = abs(move_5m) / move_scale if move_scale > 0 else None
 
 
 def _metadata_updated_at_iso(value: Any) -> str | None:
@@ -946,6 +992,7 @@ class MarketRuntime:
         feed_manager = self._feed_manager
         reference_runtime = self._reference_runtime
         now_iso = utcnow().isoformat().replace("+00:00", "Z")
+        motion_summary_by_asset: dict[str, dict[str, Any]] = {}
         for market in markets:
             row = market.to_dict()
             row["fetched_at"] = now_iso
@@ -956,8 +1003,14 @@ class MarketRuntime:
             row["oracle_updated_at_ms"] = oracle.get("updated_at_ms") if oracle else None
             row["oracle_age_seconds"] = oracle.get("age_seconds") if oracle else None
             row["oracle_prices_by_source"] = reference_runtime.get_oracle_prices_by_source(asset) if asset else {}
-            oracle_history = reference_runtime.get_oracle_history(asset, points=80) if asset else []
+            oracle_history = reference_runtime.get_oracle_history(asset, points=_CRYPTO_ORACLE_HISTORY_POINTS) if asset else []
             row["oracle_history"] = oracle_history
+            if asset:
+                motion_summary = motion_summary_by_asset.get(asset)
+                if motion_summary is None:
+                    motion_summary = reference_runtime.get_oracle_motion_summary(asset)
+                    motion_summary_by_asset[asset] = motion_summary
+                _enrich_crypto_motion_fields(row, motion_summary)
             row["price_updated_at"] = now_iso
 
             # Fallback: if CryptoService couldn't resolve price_to_beat,
@@ -1409,6 +1462,7 @@ class MarketRuntime:
         now_iso = utcnow().isoformat().replace("+00:00", "Z")
         now_dt = utcnow()
         strict_age = float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0)
+        motion_summary_by_asset: dict[str, dict[str, Any]] = {}
         for existing in rows:
             row = dict(existing)
             token_ids = [str(token_id or "").strip() for token_id in (row.get("clob_token_ids") or []) if str(token_id or "").strip()]
@@ -1446,7 +1500,13 @@ class MarketRuntime:
             row["oracle_updated_at_ms"] = oracle.get("updated_at_ms") if oracle else row.get("oracle_updated_at_ms")
             row["oracle_age_seconds"] = oracle.get("age_seconds") if oracle else row.get("oracle_age_seconds")
             row["oracle_prices_by_source"] = reference_runtime.get_oracle_prices_by_source(asset) if asset else row.get("oracle_prices_by_source")
-            row["oracle_history"] = reference_runtime.get_oracle_history(asset, points=80) if asset else row.get("oracle_history")
+            row["oracle_history"] = reference_runtime.get_oracle_history(asset, points=_CRYPTO_ORACLE_HISTORY_POINTS) if asset else row.get("oracle_history")
+            if asset:
+                motion_summary = motion_summary_by_asset.get(asset)
+                if motion_summary is None:
+                    motion_summary = reference_runtime.get_oracle_motion_summary(asset)
+                    motion_summary_by_asset[asset] = motion_summary
+                _enrich_crypto_motion_fields(row, motion_summary)
             start_time = _parse_iso_utc(row.get("start_time"))
             end_time = _parse_iso_utc(row.get("end_time"))
             if start_time is not None and end_time is not None:

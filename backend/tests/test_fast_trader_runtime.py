@@ -162,6 +162,46 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_fast_trader_consumes_signal_from_unconfigured_strategy_without_decision(monkeypatch):
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_strategy_filter")
+    monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
+
+    def _unexpected_strategy_lookup(key):
+        raise AssertionError(f"unexpected strategy lookup for {key}")
+
+    monkeypatch.setattr(fast_trader_runtime.strategy_loader, "get_instance", _unexpected_strategy_lookup)
+    runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), asyncio.Event())
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-filtered")
+            signal = await session.get(TradeSignal, "signal-filtered")
+            signal.strategy_type = "other-fast-strategy"
+            await session.commit()
+
+            await runner._process_one(session, signal=signal, mode="live", default_size_usd=7.5)
+            await session.commit()
+            await hot_state.flush_audit_buffer()
+
+        async with session_factory() as session:
+            decision_count = (
+                await session.execute(select(func.count()).select_from(TraderDecision))
+            ).scalar_one()
+            consumption = (
+                await session.execute(
+                    select(TraderSignalConsumption).where(TraderSignalConsumption.trader_id == "fast-trader")
+                )
+            ).scalar_one()
+
+        assert decision_count == 0
+        assert consumption.decision_id is None
+        assert consumption.outcome == "skipped"
+        assert str(consumption.reason or "").startswith("source_strategy_filter:")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_no_order_decision")
     monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)

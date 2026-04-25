@@ -110,6 +110,106 @@ class ReferenceRuntime:
             for ts_ms, price in list(history)[-max(1, int(points)) :]
         ]
 
+    def get_oracle_motion_summary(
+        self,
+        asset: str,
+        *,
+        min_coverage_ratio: float = 0.6,
+    ) -> dict[str, Any]:
+        history = getattr(self._chainlink_feed, "_history", {}).get(str(asset or "").upper())
+        if not history:
+            return {}
+
+        latest_ts_ms, latest_price = history[-1]
+        try:
+            latest_ts_ms = int(latest_ts_ms)
+            latest_price = float(latest_price)
+        except (TypeError, ValueError):
+            return {}
+        if latest_ts_ms <= 0 or latest_price <= 0:
+            return {}
+
+        summary: dict[str, Any] = {
+            "latest_ts_ms": latest_ts_ms,
+            "latest_price": latest_price,
+        }
+        try:
+            oldest_ts_ms = int(history[0][0])
+            summary["history_coverage_seconds"] = max(0.0, (latest_ts_ms - oldest_ts_ms) / 1000.0)
+        except (TypeError, ValueError, IndexError):
+            summary["history_coverage_seconds"] = None
+
+        for key, lookback_seconds in (
+            ("move_5m", 300.0),
+            ("move_30m", 1800.0),
+            ("move_2h", 7200.0),
+        ):
+            move = self._oracle_move_from_history(
+                history,
+                latest_ts_ms=latest_ts_ms,
+                latest_price=latest_price,
+                lookback_seconds=lookback_seconds,
+                min_coverage_ratio=min_coverage_ratio,
+            )
+            if move is not None:
+                summary[key] = move
+        return summary
+
+    @staticmethod
+    def _oracle_move_from_history(
+        history: Any,
+        *,
+        latest_ts_ms: int,
+        latest_price: float,
+        lookback_seconds: float,
+        min_coverage_ratio: float,
+    ) -> dict[str, Any] | None:
+        target_ts_ms = latest_ts_ms - int(max(1.0, float(lookback_seconds)) * 1000.0)
+        prior_ts_ms: int | None = None
+        prior_price: float | None = None
+
+        for raw_ts_ms, raw_price in reversed(history):
+            try:
+                ts_ms = int(raw_ts_ms)
+                price = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+            if ts_ms <= target_ts_ms and price > 0:
+                prior_ts_ms = ts_ms
+                prior_price = price
+                break
+
+        if prior_ts_ms is None or prior_price is None:
+            for raw_ts_ms, raw_price in history:
+                try:
+                    ts_ms = int(raw_ts_ms)
+                    price = float(raw_price)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0:
+                    continue
+                actual_lookback_seconds = max(0.0, (latest_ts_ms - ts_ms) / 1000.0)
+                if actual_lookback_seconds < max(1.0, float(lookback_seconds)) * max(0.0, min(1.0, min_coverage_ratio)):
+                    return None
+                prior_ts_ms = ts_ms
+                prior_price = price
+                break
+
+        if prior_ts_ms is None or prior_price is None or prior_price <= 0:
+            return None
+
+        actual_lookback_seconds = max(0.0, (latest_ts_ms - prior_ts_ms) / 1000.0)
+        percent = ((latest_price - prior_price) / prior_price) * 100.0
+        return {
+            "percent": percent,
+            "actual_lookback_seconds": actual_lookback_seconds,
+            "coverage_ratio": actual_lookback_seconds / max(1.0, float(lookback_seconds)),
+            "prior_ts_ms": prior_ts_ms,
+            "prior_price": prior_price,
+            "latest_ts_ms": latest_ts_ms,
+            "latest_price": latest_price,
+        }
+
     def get_status(self) -> dict[str, Any]:
         chainlink_prices = self._chainlink_feed.get_all_prices()
         latest_chainlink_ms = max(

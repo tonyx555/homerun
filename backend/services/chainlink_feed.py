@@ -31,9 +31,10 @@ BINANCE_TOPIC = "crypto_prices"
 RECONNECT_BASE_MS = 500
 RECONNECT_MAX_MS = 10_000
 
-# Rolling history: keep 25 minutes of prices (covers any 15-min window start)
-HISTORY_MAX_AGE_MS = 25 * 60 * 1000
-HISTORY_MAX_ENTRIES = 3000  # ~2 updates/sec * 25 min * 4 assets
+# Rolling history: keep enough oracle context for fast crypto strategies that
+# validate 5m/30m/2h motion before submitting live orders.
+HISTORY_MAX_AGE_MS = 3 * 60 * 60 * 1000
+HISTORY_MAX_ENTRIES = 40_000
 
 # Maps RTDS symbols to our canonical asset names
 # Chainlink uses "btc/usd", Binance uses "btcusdt"

@@ -113,6 +113,9 @@ class _FakeReferenceRuntime:
             return []
         return [{"t": oracle["updated_at_ms"], "p": oracle["price"]}]
 
+    def get_oracle_motion_summary(self, asset: str):
+        return {}
+
     def get_status(self):
         return {}
 
