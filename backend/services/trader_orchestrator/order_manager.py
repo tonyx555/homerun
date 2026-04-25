@@ -8,6 +8,11 @@ from typing import Any
 from services.live_execution_adapter import execute_live_order
 from services.polymarket import polymarket_client
 from services.live_execution_service import live_execution_service
+from services.optimization.execution_estimator import (
+    ExecutionEstimate,
+    ExecutionEstimator,
+    ExecutionEstimatorConfig,
+)
 from services.strategy_sdk import StrategySDK
 from utils.converters import safe_float
 
@@ -18,6 +23,7 @@ _LEG_SUBMIT_TIMEOUT_SECONDS = 35.0
 _NUMERIC_TOKEN_ID_RE = re.compile(r"^\d{18,}$")
 _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _CONDITION_ID_RE = re.compile(r"^0x[0-9a-f]{64}$")
+_execution_estimator = ExecutionEstimator()
 
 
 @dataclass
@@ -273,6 +279,107 @@ def _resolve_execution_price_bounds(
         return None, resolved
 
     return None, None
+
+
+def _order_book_payload(order_book: Any) -> dict[str, Any] | None:
+    if order_book is None:
+        return None
+    if isinstance(order_book, dict):
+        bids = order_book.get("bids")
+        asks = order_book.get("asks")
+        if isinstance(bids, list) and isinstance(asks, list):
+            return {"bids": bids, "asks": asks}
+        return None
+
+    def _levels(side_name: str) -> list[dict[str, float]]:
+        levels = []
+        for level in list(getattr(order_book, side_name, []) or []):
+            price = safe_float(getattr(level, "price", None), None)
+            size = safe_float(getattr(level, "size", None), None)
+            if price is not None and size is not None and price > 0 and size > 0:
+                levels.append({"price": float(price), "size": float(size)})
+        return levels
+
+    return {"bids": _levels("bids"), "asks": _levels("asks")}
+
+
+def _trades_payload(trades: list[Any]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for trade in trades:
+        if isinstance(trade, dict):
+            price = safe_float(trade.get("price"), None)
+            size = safe_float(trade.get("size"), None)
+            side = str(trade.get("side") or "").strip().upper()
+            timestamp = safe_float(trade.get("timestamp"), None)
+        else:
+            price = safe_float(getattr(trade, "price", None), None)
+            size = safe_float(getattr(trade, "size", None), None)
+            side = str(getattr(trade, "side", "") or "").strip().upper()
+            timestamp = safe_float(getattr(trade, "timestamp", None), None)
+        if price is None or size is None or timestamp is None or price <= 0 or size <= 0:
+            continue
+        rows.append(
+            {
+                "price": float(price),
+                "size": float(size),
+                "side": side if side in {"BUY", "SELL"} else "BUY",
+                "timestamp": float(timestamp),
+            }
+        )
+    return rows
+
+
+def _context_order_book(live_context: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("execution_order_book", "order_book", "book"):
+        payload = live_context.get(key)
+        normalized = _order_book_payload(payload)
+        if normalized is not None:
+            return normalized
+    return None
+
+
+def _context_trades(live_context: dict[str, Any]) -> list[dict[str, Any]]:
+    for key in ("execution_recent_trades", "recent_trades", "trades"):
+        raw = live_context.get(key)
+        if isinstance(raw, list):
+            return _trades_payload(raw)
+    return []
+
+
+async def _resolve_shadow_book_and_tape(
+    *,
+    token_id: str | None,
+    live_context: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]], float | None, str, str | None]:
+    context_book = _context_order_book(live_context)
+    context_trades = _context_trades(live_context)
+    context_age_ms = safe_float(live_context.get("execution_order_book_age_ms"), None)
+    if context_book is not None:
+        return context_book, context_trades, context_age_ms, "signal_microstructure_context", None
+
+    if not token_id:
+        return None, [], None, "missing_token_id", None
+
+    try:
+        from services.ws_feeds import get_feed_manager
+
+        feed_manager = get_feed_manager()
+        book = await feed_manager.get_order_book(token_id)
+        book_payload = _order_book_payload(book)
+        trades = _trades_payload(feed_manager.cache.get_recent_trades(token_id, max_trades=200))
+        staleness = feed_manager.cache.staleness(token_id)
+        book_age_ms = staleness * 1000.0 if staleness is not None else None
+        if book_payload is not None:
+            return book_payload, trades, book_age_ms, "ws_order_book", None
+        return None, trades, book_age_ms, "ws_order_book_missing", None
+    except Exception as exc:
+        return None, [], None, "ws_order_book_error", repr(exc)
+
+
+def _paper_status_for_estimate(estimate: ExecutionEstimate) -> str:
+    if estimate.filled_shares <= 0:
+        return "skipped"
+    return "executed"
 
 
 def _resolve_condition_id_for_leg(
@@ -593,53 +700,115 @@ async def submit_execution_leg(
     )
 
     if mode_key == "shadow":
-        quote_price = None
-        quote_source = "signal_price_fallback"
-        if token_id:
-            try:
-                quote_price = safe_float(await asyncio.wait_for(polymarket_client.get_midpoint(token_id), timeout=1.5), None)
-            except Exception:
-                quote_price = None
-            quote_source = "polymarket_midpoint"
-        if quote_price is None or quote_price <= 0.0 or quote_price > 1.0:
-            quote_price = price
-            if token_id:
-                quote_source = "signal_price_fallback"
-            else:
-                quote_source = "signal_price_fallback_no_token"
-        if quote_price is None or quote_price <= 0.0:
+        price_policy = str(leg.get("price_policy") or "").strip().lower()
+        order_type = "taker_limit" if price_policy == "taker_limit" else "maker_limit"
+        book_payload, recent_trades, book_age_ms, quote_source, quote_error = await _resolve_shadow_book_and_tape(
+            token_id=token_id,
+            live_context=live_context,
+        )
+        payload_mode = "paper" if legacy_paper_compat else "shadow"
+        submission_label = "simulated" if legacy_paper_compat else "shadow_microstructure_simulated"
+        if book_payload is None:
             return LegSubmitResult(
                 leg_id=leg_id,
-                status="failed",
+                status="skipped",
                 effective_price=price,
-                error_message="No executable quote available for shadow execution leg.",
+                error_message="No order book available for shadow execution leg.",
                 payload={
-                    "mode": "shadow",
-                    "submission": "rejected",
-                    "reason": "missing_quote",
+                    "mode": payload_mode,
+                    "submission": "skipped",
+                    "reason": "missing_order_book",
                     "token_id": token_id,
                     "token_id_source": token_source,
                     "token_resolution_attempts": token_attempts,
+                    "quote_source": quote_source,
+                    "quote_error": quote_error,
                     "leg": dict(leg),
+                    "shares": shares,
+                    "requested_shares": requested_shares,
+                    "min_live_shares": _MIN_LIVE_SHARES,
+                    "requested_notional_usd": notional,
+                    "effective_notional_usd": 0.0,
                 },
                 shares=shares,
-                notional_usd=notional,
+                notional_usd=0.0,
             )
-        effective_shadow_notional = shares * quote_price
-        payload_mode = "paper" if legacy_paper_compat else "shadow"
-        submission_label = "simulated" if legacy_paper_compat else "shadow_quote_simulated"
-        paper_fill_ratio = 1.0
-        if notional > 0.0:
-            paper_fill_ratio = min(1.0, max(0.0, effective_shadow_notional / notional))
+
+        estimate = _execution_estimator.estimate_order(
+            order_book=book_payload,
+            side=order_side,
+            size_shares=shares,
+            limit_price=price,
+            order_type=order_type,
+            recent_trades=recent_trades,
+            book_age_ms=book_age_ms,
+            config=ExecutionEstimatorConfig(
+                fee_bps=0.0,
+                latency_ms=350.0,
+                time_in_force_seconds=6.0,
+                displayed_depth_factor=0.88,
+                min_depth_factor=0.20,
+                max_book_age_ms=10_000.0,
+                stale_depth_decay=0.55,
+                maker_queue_ahead_fraction=0.65,
+                maker_trade_flow_multiplier=1.20,
+                adverse_selection_multiplier=0.70,
+            ),
+        )
+        quote_price = estimate.average_price
+        effective_shadow_notional = estimate.filled_notional_usd
+        paper_status = _paper_status_for_estimate(estimate)
         paper_simulation_payload = {
-            "filled": True,
-            "fill_ratio": paper_fill_ratio,
-            "estimated_fee_usd": 0.0,
-            "slippage_usd": max(0.0, notional - effective_shadow_notional),
+            "filled": estimate.filled_shares > 0,
+            "fill_ratio": estimate.fill_ratio,
+            "estimated_fee_usd": estimate.fees_usd,
+            "slippage_usd": abs(estimate.slippage_bps) / 10_000.0 * effective_shadow_notional,
+            "slippage_bps": estimate.slippage_bps,
+            "price_impact_bps": estimate.price_impact_bps,
+            "adverse_selection_bps": estimate.adverse_selection_bps,
+            "adverse_selection_cost_usd": estimate.adverse_selection_cost_usd,
+            "fill_probability": estimate.fill_probability,
+            "queue_ahead_shares": estimate.queue_ahead_shares,
+            "levels_consumed": estimate.levels_consumed,
+            "execution_estimate": estimate.to_dict(),
         }
+        if estimate.filled_shares <= 0:
+            return LegSubmitResult(
+                leg_id=leg_id,
+                status=paper_status,
+                effective_price=price,
+                error_message=f"Shadow execution did not fill: {estimate.reason}.",
+                payload={
+                    "mode": payload_mode,
+                    "submission": "skipped",
+                    "reason": estimate.reason,
+                    "token_id": token_id,
+                    "token_id_source": token_source,
+                    "token_resolution_attempts": token_attempts,
+                    "quote_source": quote_source,
+                    "quote_error": quote_error,
+                    "leg": dict(leg),
+                    "shares": shares,
+                    "filled_size": 0.0,
+                    "average_fill_price": None,
+                    "filled_notional_usd": 0.0,
+                    "requested_shares": requested_shares,
+                    "min_live_shares": _MIN_LIVE_SHARES,
+                    "requested_notional_usd": notional,
+                    "effective_notional_usd": 0.0,
+                    "time_in_force": time_in_force,
+                    "post_only": post_only,
+                    "paper_simulation": paper_simulation_payload,
+                },
+                provider_order_id=None,
+                provider_clob_order_id=None,
+                shares=0.0,
+                notional_usd=0.0,
+            )
+
         return LegSubmitResult(
             leg_id=leg_id,
-            status="executed",
+            status=paper_status,
             effective_price=quote_price,
             error_message=None,
             payload={
@@ -649,10 +818,11 @@ async def submit_execution_leg(
                 "token_id_source": token_source,
                 "token_resolution_attempts": token_attempts,
                 "quote_source": quote_source,
+                "quote_error": quote_error,
                 "quote_price": quote_price,
                 "leg": dict(leg),
                 "shares": shares,
-                "filled_size": shares,
+                "filled_size": estimate.filled_shares,
                 "average_fill_price": quote_price,
                 "filled_notional_usd": effective_shadow_notional,
                 "requested_shares": requested_shares,
@@ -665,7 +835,7 @@ async def submit_execution_leg(
             },
             provider_order_id=None,
             provider_clob_order_id=None,
-            shares=shares,
+            shares=estimate.filled_shares,
             notional_usd=effective_shadow_notional,
         )
 

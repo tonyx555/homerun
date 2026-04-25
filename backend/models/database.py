@@ -2831,6 +2831,35 @@ class ExecutionSimEvent(Base):
     )
 
 
+class MarketMicrostructureSnapshot(Base):
+    """Durable top-of-book, depth, and trade tape samples for execution replay."""
+
+    __tablename__ = "market_microstructure_snapshots"
+
+    id = Column(String, primary_key=True)
+    provider = Column(String, nullable=False, default="polymarket", index=True)
+    token_id = Column(String, nullable=False, index=True)
+    snapshot_type = Column(String, nullable=False, index=True)
+    observed_at = Column(DateTime, nullable=False, index=True)
+    exchange_ts_ms = Column(BigInteger, nullable=True)
+    sequence = Column(BigInteger, nullable=True)
+    best_bid = Column(Float, nullable=True)
+    best_ask = Column(Float, nullable=True)
+    spread_bps = Column(Float, nullable=True)
+    bids_json = Column(JSON, nullable=True)
+    asks_json = Column(JSON, nullable=True)
+    trade_price = Column(Float, nullable=True)
+    trade_size = Column(Float, nullable=True)
+    trade_side = Column(String, nullable=True)
+    payload_json = Column(JSON, default=dict)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index("idx_mms_token_observed", "token_id", "observed_at"),
+        Index("idx_mms_token_type_observed", "token_id", "snapshot_type", "observed_at"),
+    )
+
+
 # ==================== WORKER RUNTIME STATE ====================
 
 

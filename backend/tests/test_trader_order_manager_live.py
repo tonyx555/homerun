@@ -385,7 +385,11 @@ async def test_submit_execution_leg_live_does_not_fallback_to_market_id_token():
 
 
 @pytest.mark.asyncio
-async def test_submit_execution_leg_paper_still_simulates_execution():
+async def test_submit_execution_leg_paper_skips_without_executable_book(monkeypatch):
+    async def _no_token(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(order_manager, "_fetch_token_id_from_market", _no_token)
     signal = SimpleNamespace(
         id="sig-3",
         market_id="m3",
@@ -409,26 +413,17 @@ async def test_submit_execution_leg_paper_still_simulates_execution():
         notional_usd=25.0,
     )
 
-    assert result.status == "executed"
-    assert result.effective_price is not None
-    assert 0.001 <= float(result.effective_price) <= 1.0
-    assert result.error_message is None
-    assert result.payload["submission"] == "simulated"
+    assert result.status == "skipped"
+    assert result.error_message == "No order book available for shadow execution leg."
+    assert result.payload["submission"] == "skipped"
     assert result.payload["mode"] == "paper"
-    assert isinstance(result.payload.get("paper_simulation"), dict)
-    assert result.payload["paper_simulation"]["filled"] is True
-    assert 0.0 < float(result.payload["paper_simulation"]["fill_ratio"]) <= 1.0
-    assert result.notional_usd is not None
-    assert 0.0 < float(result.notional_usd) <= 25.0
-    assert result.shares is not None
-    assert float(result.shares) > 0.0
+    assert result.payload["reason"] == "missing_order_book"
+    assert result.notional_usd == 0.0
 
 
 @pytest.mark.asyncio
-async def test_submit_execution_leg_shadow_uses_quote_only_path(monkeypatch):
-    midpoint_mock = AsyncMock(return_value=0.63)
+async def test_submit_execution_leg_shadow_uses_microstructure_context(monkeypatch):
     execution_mock = AsyncMock(side_effect=AssertionError("shadow mode must not place live orders"))
-    monkeypatch.setattr(order_manager.polymarket_client, "get_midpoint", midpoint_mock)
     monkeypatch.setattr(order_manager, "execute_live_order", execution_mock)
 
     token_id = "123456789012345678901"
@@ -438,7 +433,19 @@ async def test_submit_execution_leg_shadow_uses_quote_only_path(monkeypatch):
         direction="buy_yes",
         entry_price=0.60,
         market_question="Will shadow quote execute?",
-        payload_json={"selected_token_id": token_id},
+        payload_json={
+            "selected_token_id": token_id,
+            "live_market": {
+                "execution_order_book": {
+                    "bids": [{"price": 0.58, "size": 100.0}],
+                    "asks": [{"price": 0.60, "size": 150.0}],
+                },
+                "execution_recent_trades": [
+                    {"price": 0.60, "size": 50.0, "side": "BUY", "timestamp": 100.0},
+                ],
+                "execution_order_book_age_ms": 100.0,
+            },
+        },
     )
 
     result = await order_manager.submit_execution_leg(
@@ -456,13 +463,13 @@ async def test_submit_execution_leg_shadow_uses_quote_only_path(monkeypatch):
     )
 
     assert result.status == "executed"
-    assert result.effective_price == pytest.approx(0.63, rel=1e-9)
+    assert result.effective_price == pytest.approx(0.60, rel=1e-9)
     assert result.error_message is None
     assert result.payload["mode"] == "shadow"
-    assert result.payload["submission"] == "shadow_quote_simulated"
-    assert result.payload["quote_source"] == "polymarket_midpoint"
+    assert result.payload["submission"] == "shadow_microstructure_simulated"
+    assert result.payload["quote_source"] == "signal_microstructure_context"
     assert result.payload["token_id_source"] == "payload.selected_token_id"
-    midpoint_mock.assert_awaited_once_with(token_id)
+    assert result.payload["paper_simulation"]["execution_estimate"]["levels_consumed"] == 1
     execution_mock.assert_not_awaited()
 
 

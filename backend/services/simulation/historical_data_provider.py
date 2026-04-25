@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
+from models.database import AsyncSessionLocal, MarketMicrostructureSnapshot
 from services.kalshi_client import kalshi_client
 from services.polymarket import polymarket_client
 
@@ -57,6 +61,13 @@ def _normalize_price(value: Any) -> float | None:
     if parsed > 1.0:
         return 1.0
     return parsed
+
+
+def _ts_to_utc(ts: int | None) -> datetime | None:
+    normalized = _normalize_ts_ms(ts)
+    if normalized is None:
+        return None
+    return datetime.fromtimestamp(normalized / 1000.0, tz=timezone.utc)
 
 
 class HistoricalDataProvider:
@@ -275,3 +286,97 @@ class HistoricalDataProvider:
         candles = self._points_to_candles(points, timeframe_seconds=tf_seconds)
         self._write_cache(key, candles)
         return candles
+
+    async def get_polymarket_microstructure_context(
+        self,
+        *,
+        token_id: str,
+        event_ts: int | None,
+        lookback_seconds: float = 30.0,
+        forward_seconds: float = 6.0,
+    ) -> dict[str, Any]:
+        normalized_token = str(token_id or "").strip().lower()
+        event_dt = _ts_to_utc(event_ts)
+        if not normalized_token or event_dt is None:
+            return {}
+        start_dt = event_dt - timedelta(seconds=max(1.0, float(lookback_seconds)))
+        end_dt = event_dt + timedelta(seconds=max(0.0, float(forward_seconds)))
+        async with AsyncSessionLocal() as session:
+            before_book_query = (
+                select(MarketMicrostructureSnapshot)
+                .where(
+                    MarketMicrostructureSnapshot.token_id == normalized_token,
+                    MarketMicrostructureSnapshot.snapshot_type == "book",
+                    MarketMicrostructureSnapshot.observed_at <= event_dt,
+                )
+                .order_by(MarketMicrostructureSnapshot.observed_at.desc())
+                .limit(1)
+            )
+            book_row = (await session.execute(before_book_query)).scalar_one_or_none()
+            if book_row is None:
+                after_book_query = (
+                    select(MarketMicrostructureSnapshot)
+                    .where(
+                        MarketMicrostructureSnapshot.token_id == normalized_token,
+                        MarketMicrostructureSnapshot.snapshot_type == "book",
+                        MarketMicrostructureSnapshot.observed_at > event_dt,
+                        MarketMicrostructureSnapshot.observed_at <= event_dt + timedelta(seconds=2),
+                    )
+                    .order_by(MarketMicrostructureSnapshot.observed_at.asc())
+                    .limit(1)
+                )
+                book_row = (await session.execute(after_book_query)).scalar_one_or_none()
+
+            trades_query = (
+                select(MarketMicrostructureSnapshot)
+                .where(
+                    MarketMicrostructureSnapshot.token_id == normalized_token,
+                    MarketMicrostructureSnapshot.snapshot_type == "trade",
+                    MarketMicrostructureSnapshot.observed_at >= start_dt,
+                    MarketMicrostructureSnapshot.observed_at <= end_dt,
+                )
+                .order_by(MarketMicrostructureSnapshot.observed_at.asc())
+            )
+            trade_rows = list((await session.execute(trades_query)).scalars().all())
+
+        if book_row is None:
+            return {}
+        observed = book_row.observed_at
+        if observed.tzinfo is None:
+            observed = observed.replace(tzinfo=timezone.utc)
+        else:
+            observed = observed.astimezone(timezone.utc)
+        age_ms = (event_dt - observed).total_seconds() * 1000.0
+        trades = []
+        for row in trade_rows:
+            observed_trade = row.observed_at
+            if observed_trade.tzinfo is None:
+                observed_trade = observed_trade.replace(tzinfo=timezone.utc)
+            else:
+                observed_trade = observed_trade.astimezone(timezone.utc)
+            if row.trade_price is None or row.trade_size is None:
+                continue
+            trades.append(
+                {
+                    "price": float(row.trade_price),
+                    "size": float(row.trade_size),
+                    "side": str(row.trade_side or "BUY").upper(),
+                    "timestamp": observed_trade.timestamp(),
+                }
+            )
+        return {
+            "execution_order_book": {
+                "bids": list(book_row.bids_json or []),
+                "asks": list(book_row.asks_json or []),
+            },
+            "execution_recent_trades": trades,
+            "execution_order_book_age_ms": max(0.0, age_ms),
+            "execution_microstructure": {
+                "source": "market_microstructure_snapshots",
+                "book_observed_at": observed.isoformat(),
+                "book_sequence": book_row.sequence,
+                "trade_count": len(trades),
+                "lookback_seconds": float(lookback_seconds),
+                "forward_seconds": float(forward_seconds),
+            },
+        }

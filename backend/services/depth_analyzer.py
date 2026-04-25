@@ -22,6 +22,7 @@ from sqlalchemy import Column, String, Boolean, DateTime
 
 from models.database import Base, AsyncSessionLocal
 from models.types import PreciseFloat as Float
+from services.optimization.execution_estimator import ExecutionEstimator, ExecutionEstimatorConfig
 from services.polymarket import polymarket_client
 from utils.logger import get_logger
 
@@ -105,6 +106,7 @@ class DepthAnalyzer:
 
     def __init__(self, min_depth_usd: float = MIN_DEPTH_USD) -> None:
         self.min_depth_usd = min_depth_usd
+        self._execution_estimator = ExecutionEstimator()
         logger.info(
             "DepthAnalyzer initialized",
             min_depth_usd=self.min_depth_usd,
@@ -138,20 +140,6 @@ class DepthAnalyzer:
             # Descending: best (highest) bids first
             levels.sort(key=lambda x: x[0], reverse=True)
         return levels
-
-    @staticmethod
-    def _calculate_mid_price(order_book: dict) -> float:
-        """Derive mid-price from the best bid and best ask.
-
-        Returns 0.0 if either side of the book is empty.
-        """
-        bids = order_book.get("bids", [])
-        asks = order_book.get("asks", [])
-        if not bids or not asks:
-            return 0.0
-        best_bid = max(float(b["price"]) for b in bids)
-        best_ask = min(float(a["price"]) for a in asks)
-        return (best_bid + best_ask) / 2.0
 
     # ------------------------------------------------------------------
     # Public API
@@ -213,32 +201,30 @@ class DepthAnalyzer:
             return result
 
         levels = self._parse_order_book_levels(order_book, side_upper)
-        mid_price = self._calculate_mid_price(order_book)
 
-        # --- Calculate available depth at or better than target_price ---
-        available_depth_usd = 0.0
-        for price, size in levels:
-            if side_upper == "BUY" and price > target_price:
-                break
-            if side_upper == "SELL" and price < target_price:
-                break
-            available_depth_usd += price * size
+        estimate = self._execution_estimator.estimate_order(
+            order_book=order_book,
+            side=side_upper,
+            size_usd=required_size_usd,
+            limit_price=target_price,
+            order_type="taker_limit",
+            config=ExecutionEstimatorConfig(
+                fee_bps=0.0,
+                latency_ms=350.0,
+                displayed_depth_factor=0.88,
+                min_depth_factor=0.20,
+                max_book_age_ms=10_000.0,
+                stale_depth_decay=0.55,
+                adverse_selection_multiplier=0.70,
+            ),
+        )
+        available_depth_usd = estimate.filled_notional_usd
 
-        # --- Best price ---
         best_price = levels[0][0] if levels else 0.0
-
-        # --- VWAP for the requested size ---
-        vwap_price = self._compute_vwap(levels, required_size_usd)
-
-        # --- Slippage from mid to VWAP ---
-        if mid_price > 0 and vwap_price > 0:
-            slippage_percent = abs(vwap_price - mid_price) / mid_price * 100.0
-        else:
-            slippage_percent = 0.0
-
-        # --- Determine if depth is sufficient ---
+        vwap_price = float(estimate.average_price or 0.0)
+        slippage_percent = abs(estimate.slippage_bps) / 100.0
         min_required = max(self.min_depth_usd, required_size_usd)
-        has_sufficient_depth = available_depth_usd >= min_required
+        has_sufficient_depth = available_depth_usd >= min_required and estimate.fill_probability >= 0.995
 
         result = DepthCheckResult(
             token_id=token_id,
@@ -300,15 +286,16 @@ class DepthAnalyzer:
 
         levels = self._parse_order_book_levels(order_book, side_upper)
 
-        depth_usd = 0.0
-        for level_price, size in levels:
-            if side_upper == "BUY" and level_price > price:
-                break
-            if side_upper == "SELL" and level_price < price:
-                break
-            depth_usd += level_price * size
-
-        return depth_usd
+        requested_depth_usd = sum(level_price * size for level_price, size in levels)
+        estimate = self._execution_estimator.estimate_order(
+            order_book=order_book,
+            side=side_upper,
+            size_usd=requested_depth_usd,
+            limit_price=price,
+            order_type="taker_limit",
+            config=ExecutionEstimatorConfig(fee_bps=0.0),
+        )
+        return estimate.filled_notional_usd
 
     async def get_executable_price(self, token_id: str, side: str, size: float) -> float:
         """Compute the volume-weighted average price (VWAP) to fill *size* USD.
@@ -343,54 +330,14 @@ class DepthAnalyzer:
             )
             return 0.0
 
-        levels = self._parse_order_book_levels(order_book, side_upper)
-        return self._compute_vwap(levels, size)
-
-    # ------------------------------------------------------------------
-    # Internal: VWAP computation
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _compute_vwap(levels: List[tuple], target_usd: float) -> float:
-        """Walk order book levels to compute VWAP for *target_usd*.
-
-        Parameters
-        ----------
-        levels : list[tuple[float, float]]
-            Sorted ``(price, size)`` tuples (cheapest asks first for BUY,
-            best bids first for SELL).
-        target_usd : float
-            The USD amount to fill.
-
-        Returns
-        -------
-        float
-            Volume-weighted average price.  Returns ``0.0`` if the book is
-            empty or has no liquidity.
-        """
-        if not levels or target_usd <= 0:
-            return 0.0
-
-        filled_usd = 0.0
-        weighted_sum = 0.0  # sum of (price * usd_consumed_at_this_level)
-
-        for price, size in levels:
-            level_usd = price * size
-            remaining = target_usd - filled_usd
-
-            if level_usd >= remaining:
-                # This level can fill the rest
-                weighted_sum += price * remaining
-                filled_usd += remaining
-                break
-            else:
-                weighted_sum += price * level_usd
-                filled_usd += level_usd
-
-        if filled_usd <= 0:
-            return 0.0
-
-        return weighted_sum / filled_usd
+        estimate = self._execution_estimator.estimate_order(
+            order_book=order_book,
+            side=side_upper,
+            size_usd=size,
+            order_type="market",
+            config=ExecutionEstimatorConfig(fee_bps=0.0),
+        )
+        return float(estimate.average_price or 0.0)
 
     # ------------------------------------------------------------------
     # Internal: persistence
