@@ -22,6 +22,13 @@ Key insights from $40M extraction research:
 """
 
 from .vwap import VWAPCalculator, OrderBook, OrderBookLevel, VWAPResult
+from .execution_estimator import (
+    ExecutionEstimate,
+    ExecutionEstimator,
+    ExecutionEstimatorConfig,
+    MultiLegExecutionEstimate,
+    execution_estimator,
+)
 from .parallel_executor import ParallelExecutor, ExecutionLeg, ParallelExecutionResult
 from .bregman import BregmanProjector, ProjectionResult, bregman_projector
 from .constraint_solver import (
@@ -53,6 +60,11 @@ __all__ = [
     "OrderBook",
     "OrderBookLevel",
     "VWAPResult",
+    "ExecutionEstimate",
+    "ExecutionEstimator",
+    "ExecutionEstimatorConfig",
+    "MultiLegExecutionEstimate",
+    "execution_estimator",
     # Parallel Execution
     "ParallelExecutor",
     "ExecutionLeg",

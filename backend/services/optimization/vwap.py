@@ -13,6 +13,11 @@ Based on methodology from "Unravelling the Probabilistic Forest" paper:
 
 from dataclasses import dataclass
 
+from services.optimization.execution_estimator import (
+    ExecutionEstimator,
+    ExecutionEstimatorConfig,
+)
+
 
 @dataclass
 class OrderBookLevel:
@@ -69,6 +74,15 @@ class VWAPCalculator:
                                   execution risk.
         """
         self.min_profit_threshold = min_profit_threshold
+        self._execution_estimator = ExecutionEstimator()
+        self._static_vwap_config = ExecutionEstimatorConfig(
+            latency_ms=0.0,
+            displayed_depth_factor=1.0,
+            min_depth_factor=1.0,
+            stale_depth_decay=0.0,
+            adverse_selection_multiplier=0.0,
+            maker_trade_flow_multiplier=0.0,
+        )
 
     def calculate_buy_vwap(self, order_book: OrderBook, size_usd: float) -> VWAPResult:
         """
@@ -84,6 +98,15 @@ class VWAPCalculator:
         Returns:
             VWAPResult with weighted average price and metrics
         """
+        if size_usd <= 0:
+            return VWAPResult(
+                vwap=order_book.asks[0].price if order_book.asks else 0,
+                total_available=0,
+                slippage_bps=0,
+                levels_consumed=0,
+                fill_probability=1.0,
+            )
+
         if not order_book.asks:
             return VWAPResult(
                 vwap=0,
@@ -93,32 +116,15 @@ class VWAPCalculator:
                 fill_probability=0,
             )
 
-        remaining_usd = size_usd
-        total_shares = 0
-        total_cost = 0
-        levels_consumed = 0
+        estimate = self._execution_estimator.estimate_order(
+            order_book=order_book,
+            side="BUY",
+            size_usd=size_usd,
+            order_type="market",
+            config=self._static_vwap_config,
+        )
 
-        for level in order_book.asks:
-            if remaining_usd <= 0:
-                break
-
-            level_value = level.price * level.size
-
-            if level_value <= remaining_usd:
-                # Consume entire level
-                total_shares += level.size
-                total_cost += level_value
-                remaining_usd -= level_value
-            else:
-                # Partial fill on this level
-                shares_to_buy = remaining_usd / level.price
-                total_shares += shares_to_buy
-                total_cost += remaining_usd
-                remaining_usd = 0
-
-            levels_consumed += 1
-
-        if total_shares == 0:
+        if estimate.filled_shares == 0:
             return VWAPResult(
                 vwap=order_book.asks[0].price if order_book.asks else 0,
                 total_available=0,
@@ -127,23 +133,12 @@ class VWAPCalculator:
                 fill_probability=0,
             )
 
-        vwap = total_cost / total_shares
-
-        # Calculate slippage from mid price
-        best_ask = order_book.asks[0].price if order_book.asks else vwap
-        best_bid = order_book.bids[0].price if order_book.bids else vwap
-        mid = (best_ask + best_bid) / 2 if (best_ask + best_bid) > 0 else vwap
-        slippage_bps = ((vwap - mid) / mid * 10000) if mid > 0 else 0
-
-        # Fill probability based on liquidity
-        fill_probability = min(1.0, total_cost / size_usd) if size_usd > 0 else 1.0
-
         return VWAPResult(
-            vwap=vwap,
-            total_available=total_cost,
-            slippage_bps=slippage_bps,
-            levels_consumed=levels_consumed,
-            fill_probability=fill_probability,
+            vwap=float(estimate.average_price or 0.0),
+            total_available=estimate.filled_notional_usd,
+            slippage_bps=estimate.slippage_bps,
+            levels_consumed=estimate.levels_consumed,
+            fill_probability=estimate.fill_probability,
         )
 
     def calculate_sell_vwap(self, order_book: OrderBook, size_shares: float) -> VWAPResult:
@@ -152,6 +147,15 @@ class VWAPCalculator:
 
         Walks through bid side of order book.
         """
+        if size_shares <= 0:
+            return VWAPResult(
+                vwap=order_book.bids[0].price if order_book.bids else 0,
+                total_available=0,
+                slippage_bps=0,
+                levels_consumed=0,
+                fill_probability=1.0,
+            )
+
         if not order_book.bids:
             return VWAPResult(
                 vwap=0,
@@ -161,27 +165,15 @@ class VWAPCalculator:
                 fill_probability=0,
             )
 
-        remaining_shares = size_shares
-        total_shares_sold = 0
-        total_proceeds = 0
-        levels_consumed = 0
+        estimate = self._execution_estimator.estimate_order(
+            order_book=order_book,
+            side="SELL",
+            size_shares=size_shares,
+            order_type="market",
+            config=self._static_vwap_config,
+        )
 
-        for level in order_book.bids:
-            if remaining_shares <= 0:
-                break
-
-            if level.size <= remaining_shares:
-                total_shares_sold += level.size
-                total_proceeds += level.size * level.price
-                remaining_shares -= level.size
-            else:
-                total_shares_sold += remaining_shares
-                total_proceeds += remaining_shares * level.price
-                remaining_shares = 0
-
-            levels_consumed += 1
-
-        if total_shares_sold == 0:
+        if estimate.filled_shares == 0:
             return VWAPResult(
                 vwap=order_book.bids[0].price if order_book.bids else 0,
                 total_available=0,
@@ -190,21 +182,12 @@ class VWAPCalculator:
                 fill_probability=0,
             )
 
-        vwap = total_proceeds / total_shares_sold
-
-        best_ask = order_book.asks[0].price if order_book.asks else vwap
-        best_bid = order_book.bids[0].price if order_book.bids else vwap
-        mid = (best_ask + best_bid) / 2 if (best_ask + best_bid) > 0 else vwap
-        slippage_bps = ((mid - vwap) / mid * 10000) if mid > 0 else 0
-
-        fill_probability = min(1.0, total_shares_sold / size_shares) if size_shares > 0 else 1.0
-
         return VWAPResult(
-            vwap=vwap,
-            total_available=total_proceeds,
-            slippage_bps=slippage_bps,
-            levels_consumed=levels_consumed,
-            fill_probability=fill_probability,
+            vwap=float(estimate.average_price or 0.0),
+            total_available=estimate.filled_notional_usd,
+            slippage_bps=estimate.slippage_bps,
+            levels_consumed=estimate.levels_consumed,
+            fill_probability=estimate.fill_probability,
         )
 
     def estimate_arbitrage_profit(
@@ -243,6 +226,10 @@ class VWAPCalculator:
 
         # Joint fill probability
         fill_probability = yes_vwap.fill_probability * no_vwap.fill_probability
+        orphan_leg_risk_usd = half_size * (
+            yes_vwap.fill_probability * (1.0 - no_vwap.fill_probability)
+            + no_vwap.fill_probability * (1.0 - yes_vwap.fill_probability)
+        )
 
         # Calculate profits
         if total_vwap_cost < 1.0 and achievable_usd > 0:
@@ -281,6 +268,7 @@ class VWAPCalculator:
             "yes_slippage_bps": yes_vwap.slippage_bps,
             "no_slippage_bps": no_vwap.slippage_bps,
             "fill_probability": fill_probability,
+            "orphan_leg_risk_usd": orphan_leg_risk_usd,
             "max_executable_usd": achievable_usd,
             "recommended_size_usd": position_size,
             "gross_profit": gross_profit,

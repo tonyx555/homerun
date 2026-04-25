@@ -939,6 +939,86 @@ class TestVWAPCalculator:
         assert book.asks[1].price == 0.55
 
 
+class TestExecutionEstimator:
+    def test_taker_buy_respects_usd_budget_across_levels(self):
+        from services.optimization.execution_estimator import ExecutionEstimator, ExecutionEstimatorConfig
+
+        estimator = ExecutionEstimator()
+        book = {
+            "bids": [{"price": 0.48, "size": 100}],
+            "asks": [{"price": 0.50, "size": 100}, {"price": 0.55, "size": 100}],
+        }
+        estimate = estimator.estimate_order(
+            order_book=book,
+            side="BUY",
+            size_usd=100.0,
+            order_type="market",
+            config=ExecutionEstimatorConfig(displayed_depth_factor=1.0, min_depth_factor=1.0, stale_depth_decay=0.0),
+        )
+        expected_shares = 100.0 + 50.0 / 0.55
+        assert estimate.status == "filled"
+        assert estimate.filled_notional_usd == pytest.approx(100.0)
+        assert estimate.filled_shares == pytest.approx(expected_shares)
+        assert estimate.average_price == pytest.approx(100.0 / expected_shares)
+
+    def test_maker_order_waits_behind_queue(self):
+        from services.optimization.execution_estimator import ExecutionEstimator, ExecutionEstimatorConfig
+
+        estimator = ExecutionEstimator()
+        book = {
+            "bids": [{"price": 0.49, "size": 100}, {"price": 0.48, "size": 200}],
+            "asks": [{"price": 0.52, "size": 100}],
+        }
+        estimate = estimator.estimate_order(
+            order_book=book,
+            side="BUY",
+            size_shares=50.0,
+            limit_price=0.48,
+            order_type="maker_limit",
+            recent_trades=[{"price": 0.49, "size": 20.0, "side": "SELL", "timestamp": 100.0}],
+            config=ExecutionEstimatorConfig(
+                displayed_depth_factor=1.0,
+                min_depth_factor=1.0,
+                stale_depth_decay=0.0,
+                maker_queue_ahead_fraction=1.0,
+                time_in_force_seconds=5.0,
+            ),
+        )
+        assert estimate.status == "unfilled"
+        assert estimate.queue_ahead_shares == pytest.approx(300.0)
+
+    def test_maker_fill_uses_trade_flow_after_queue(self):
+        from services.optimization.execution_estimator import ExecutionEstimator, ExecutionEstimatorConfig
+
+        estimator = ExecutionEstimator()
+        book = {
+            "bids": [{"price": 0.48, "size": 10}],
+            "asks": [{"price": 0.52, "size": 100}],
+        }
+        estimate = estimator.estimate_order(
+            order_book=book,
+            side="BUY",
+            size_shares=25.0,
+            limit_price=0.48,
+            order_type="maker_limit",
+            recent_trades=[
+                {"price": 0.48, "size": 100.0, "side": "SELL", "timestamp": 100.0},
+                {"price": 0.48, "size": 100.0, "side": "SELL", "timestamp": 101.0},
+            ],
+            config=ExecutionEstimatorConfig(
+                displayed_depth_factor=1.0,
+                min_depth_factor=1.0,
+                stale_depth_decay=0.0,
+                maker_queue_ahead_fraction=0.5,
+                maker_trade_flow_multiplier=1.0,
+                time_in_force_seconds=1.0,
+            ),
+        )
+        assert estimate.filled_shares > 0
+        assert estimate.average_price == pytest.approx(0.48)
+        assert estimate.queue_ahead_shares == pytest.approx(5.0)
+
+
 # =============================================================================
 # COMBINATORIAL STRATEGY TESTS
 # =============================================================================

@@ -1482,6 +1482,9 @@ class FeedManager:
             self._started = True
             loop = asyncio.get_running_loop()
             self._loop = loop  # store for thread-safe scheduling from callbacks
+            from services.microstructure_recorder import get_microstructure_recorder
+
+            get_microstructure_recorder().start()
             self._eviction_task = loop.create_task(self._cache_eviction_loop())
             # Wire PositionMarkState to receive every price tick
             from services.position_mark_state import get_position_mark_state
@@ -1505,6 +1508,9 @@ class FeedManager:
             self._price_push_task.cancel()
         await self._polymarket_feed.stop()
         await self._kalshi_feed.stop()
+        from services.microstructure_recorder import get_microstructure_recorder
+
+        await get_microstructure_recorder().stop()
         self._cache.clear()
         self._ws_push_clients.clear()
         self._token_to_ws_clients.clear()
@@ -1583,6 +1589,12 @@ class FeedManager:
 
     def _on_trade(self, token_id: str, trade: "TradeRecord") -> None:
         """Dispatch a TRADE_EXECUTION DataEvent for each trade."""
+        try:
+            from services.microstructure_recorder import get_microstructure_recorder
+
+            get_microstructure_recorder().record_trade(token_id=token_id, trade=trade)
+        except Exception as exc:
+            logger.debug("Microstructure trade record failed", exc_info=exc)
         if self._loop is None:
             return
         try:
@@ -1624,6 +1636,20 @@ class FeedManager:
         Accumulates updates for the coalescing window, then a background task
         flushes them to registered WS clients.
         """
+        try:
+            from services.microstructure_recorder import get_microstructure_recorder
+
+            get_microstructure_recorder().record_book(
+                token_id=token_id,
+                order_book=self._cache.get_order_book(token_id),
+                best_bid=bid,
+                best_ask=ask,
+                exchange_ts=exchange_ts,
+                ingest_ts=ingest_ts,
+                sequence=sequence,
+            )
+        except Exception as exc:
+            logger.debug("Microstructure book record failed", exc_info=exc)
         should_schedule = False
         ws_ids = self._token_to_ws_clients.get(token_id)
         if not ws_ids:

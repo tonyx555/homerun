@@ -82,6 +82,35 @@ class ExecutionSimulator:
         return "no" if "no" in direction_key else "yes"
 
     @staticmethod
+    def _resolve_token_id_for_outcome(payload: dict[str, Any], outcome: str, fallback: str | None = None) -> str | None:
+        outcome_key = str(outcome or "").strip().lower()
+        candidates: list[Any] = []
+        if outcome_key == "yes":
+            candidates.extend([payload.get("yes_token_id"), payload.get("yesTokenId")])
+        elif outcome_key == "no":
+            candidates.extend([payload.get("no_token_id"), payload.get("noTokenId")])
+        candidates.extend(
+            [
+                payload.get("selected_token_id"),
+                payload.get("token_id"),
+                payload.get("asset_id"),
+                fallback,
+            ]
+        )
+        token_ids = payload.get("token_ids") or payload.get("clob_token_ids") or payload.get("clobTokenIds")
+        if isinstance(token_ids, list):
+            if outcome_key == "yes" and len(token_ids) >= 1:
+                candidates.append(token_ids[0])
+            if outcome_key == "no" and len(token_ids) >= 2:
+                candidates.append(token_ids[1])
+            candidates.extend(token_ids)
+        for candidate in candidates:
+            token = str(candidate or "").strip().lower()
+            if len(token) >= 18 and token != "none":
+                return token
+        return None
+
+    @staticmethod
     def _stable_hash(payload: Any) -> str:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, default=str)
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -447,6 +476,7 @@ class ExecutionSimulator:
             if not market_ref:
                 skipped += 1
                 continue
+            token_id = self._resolve_token_id_for_outcome(signal_payload, outcome, fallback=market_ref)
 
             cache_key = (market_ref, outcome)
             points = point_cache.get(cache_key)
@@ -480,6 +510,29 @@ class ExecutionSimulator:
                 "history_summary": history_summary,
                 "liquidity": self._to_float(signal_payload.get("liquidity"), self._to_float(emission.liquidity, 0.0)),
             }
+            if token_id:
+                live_context["selected_token_id"] = token_id
+                if outcome == "yes":
+                    live_context["yes_token_id"] = token_id
+                else:
+                    live_context["no_token_id"] = token_id
+            if provider == "polymarket" and token_id:
+                microstructure_context = await self._provider.get_polymarket_microstructure_context(
+                    token_id=token_id,
+                    event_ts=emission_ts_ms,
+                    lookback_seconds=30.0,
+                    forward_seconds=6.0,
+                )
+                if microstructure_context:
+                    live_context.update(microstructure_context)
+                    point_series_hashes[f"{market_ref}:{outcome}:microstructure"] = self._stable_hash(
+                        {
+                            "token_id": token_id,
+                            "book": microstructure_context.get("execution_order_book"),
+                            "trades": microstructure_context.get("execution_recent_trades"),
+                            "metadata": microstructure_context.get("execution_microstructure"),
+                        }
+                    )
             execution_payload = dict(signal_payload)
             execution_payload["live_market"] = live_context
             execution_signal = SimpleNamespace(
@@ -506,6 +559,8 @@ class ExecutionSimulator:
                 "price_policy": "maker_limit",
                 "time_in_force": "GTC",
             }
+            if token_id:
+                leg["token_id"] = token_id
             submission = await submit_execution_leg(
                 mode="paper",
                 signal=execution_signal,
