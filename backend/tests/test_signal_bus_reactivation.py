@@ -633,6 +633,105 @@ async def test_upsert_pending_signal_unchanged_suppresses_update_emission(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_upsert_pending_scanner_signal_refreshes_volatile_payload_without_emission(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    signal_id = uuid.uuid4().hex
+    try:
+        async with session_factory() as session:
+            now = utcnow().replace(microsecond=0)
+            session.add(
+                TradeSignal(
+                    id=signal_id,
+                    source="scanner",
+                    source_item_id="pending_scanner_1",
+                    signal_type="scanner_opportunity",
+                    strategy_type="custom_strategy",
+                    market_id="market_pending_scanner_1",
+                    market_question="Pending scanner signal",
+                    direction="buy_yes",
+                    entry_price=0.51,
+                    edge_percent=5.2,
+                    confidence=0.73,
+                    liquidity=1200.0,
+                    expires_at=now + timedelta(seconds=10),
+                    status="pending",
+                    dedupe_key="dedupe_pending_scanner_refresh",
+                    payload_json={
+                        "id": "pending",
+                        "markets": [
+                            {
+                                "id": "market_pending_scanner_1",
+                                "price_age_seconds": 1.0,
+                                "price_updated_at": "2026-04-25T16:00:00Z",
+                                "outcome_prices": [0.51, 0.49],
+                            }
+                        ],
+                        "signal_emitted_at": "2026-04-25T16:00:00Z",
+                    },
+                    strategy_context_json={"strategy_mode": "steady"},
+                    quality_passed=True,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            await upsert_trade_signal(
+                session,
+                source="scanner",
+                source_item_id="pending_scanner_1",
+                signal_type="scanner_opportunity",
+                strategy_type="custom_strategy",
+                market_id="market_pending_scanner_1",
+                market_question="Pending scanner signal",
+                direction="buy_yes",
+                entry_price=0.511,
+                edge_percent=5.24,
+                confidence=0.732,
+                liquidity=1225.0,
+                expires_at=now + timedelta(seconds=40),
+                payload_json={
+                    "id": "pending",
+                    "markets": [
+                        {
+                            "id": "market_pending_scanner_1",
+                            "price_age_seconds": 4.0,
+                            "price_updated_at": "2026-04-25T16:00:30Z",
+                            "outcome_prices": [0.511, 0.489],
+                        }
+                    ],
+                    "signal_emitted_at": "2026-04-25T16:00:30Z",
+                },
+                strategy_context_json={"strategy_mode": "steady"},
+                quality_passed=True,
+                quality_rejection_reasons=None,
+                dedupe_key="dedupe_pending_scanner_refresh",
+                commit=True,
+            )
+
+            refreshed = await session.get(TradeSignal, signal_id)
+            assert refreshed is not None
+            assert refreshed.status == "pending"
+            assert refreshed.expires_at == now + timedelta(seconds=40)
+            assert refreshed.payload_json["markets"][0]["price_age_seconds"] == pytest.approx(4.0)
+
+            emissions = (
+                (
+                    await session.execute(
+                        select(TradeSignalEmission)
+                        .where(TradeSignalEmission.signal_id == signal_id)
+                        .order_by(TradeSignalEmission.created_at.asc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            assert not emissions
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_expire_stale_signals_skips_price_staleness_for_non_scanner_source(tmp_path):
     engine, session_factory = await _build_session_factory(tmp_path)
     signal_id = uuid.uuid4().hex

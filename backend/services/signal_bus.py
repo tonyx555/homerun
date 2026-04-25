@@ -47,21 +47,67 @@ def _scanner_skipped_reactivation_cooldown_seconds() -> float:
 _SKIPPED_REACTIVATION_VOLATILE_KEYS = {
     "bridge_run_at",
     "bridge_source",
+    "book_updated_at",
+    "best_ask",
+    "best_bid",
+    "current_no_price",
+    "current_yes_price",
     "ingested_at",
+    "last_price_update",
+    "last_trade_price",
+    "liquidity",
     "market_data_age_ms",
+    "mid_price",
+    "observed_at",
+    "no_price",
+    "outcome_prices",
+    "price_age_seconds",
+    "price_updated_at",
+    "published_at",
+    "quote_age_seconds",
+    "quote_updated_at",
+    "runtime_sequence",
+    "roster_hash",
+    "scan_completed_at",
+    "scan_started_at",
+    "sequence",
     "signal_emitted_at",
+    "updated_at",
+    "volume",
+    "yes_price",
 }
 _SKIPPED_REACTIVATION_FLAG_KEYS = {
     "asset",
+    "condition_id",
+    "direction",
+    "event_slug",
     "timeframe",
+    "market_id",
+    "market_slug",
+    "mode",
+    "no_token_id",
+    "outcome",
+    "price_policy",
     "regime",
+    "selected_market_id",
     "selected_direction",
     "selected_outcome",
+    "selected_token_id",
+    "side",
+    "strategy_mode",
+    "time_in_force",
+    "token_id",
+    "yes_token_id",
     "oracle_available",
     "oracle_source",
     "is_live",
     "is_current",
 }
+_ACTIVE_SIGNAL_PRICE_DELTA = 0.002
+_ACTIVE_SIGNAL_EDGE_DELTA = 0.10
+_ACTIVE_SIGNAL_CONFIDENCE_DELTA = 0.005
+_ACTIVE_SIGNAL_LIQUIDITY_DELTA_ABS = 100.0
+_ACTIVE_SIGNAL_LIQUIDITY_DELTA_REL = 0.05
 _SKIPPED_REACTIVATION_PRICE_DELTA = 0.005
 _SKIPPED_REACTIVATION_EDGE_DELTA = 0.25
 _SKIPPED_REACTIVATION_CONFIDENCE_DELTA = 0.01
@@ -69,6 +115,7 @@ _SKIPPED_REACTIVATION_LIQUIDITY_DELTA_ABS = 250.0
 _SKIPPED_REACTIVATION_LIQUIDITY_DELTA_REL = 0.10
 _SKIPPED_REACTIVATION_EXPIRY_DELTA_SECONDS = 15.0
 _SKIPPED_REACTIVATION_LIQUIDITY_BANDS = (250.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0)
+_ACTIVE_REFRESH_SOURCES = {"crypto", "scanner", "traders", "weather"}
 _RUNTIME_SEQUENCE_UNSET = object()
 
 
@@ -106,7 +153,7 @@ def _normalize_reactivation_value(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_normalize_reactivation_value(item) for item in value]
     if isinstance(value, float):
-        return round(float(value), 10)
+        return round(float(value), 4)
     return value
 
 
@@ -177,13 +224,22 @@ def _has_signal_material_change(
         return True
     if str(row.direction or "") != str(direction or ""):
         return True
-    if _normalize_number(row.entry_price) != _normalize_number(entry_price):
+    if _delta_crosses_threshold(row.entry_price, entry_price, abs_threshold=_ACTIVE_SIGNAL_PRICE_DELTA):
         return True
-    if _normalize_number(row.edge_percent) != _normalize_number(edge_percent):
+    if _delta_crosses_threshold(row.edge_percent, edge_percent, abs_threshold=_ACTIVE_SIGNAL_EDGE_DELTA):
         return True
-    if _normalize_number(row.confidence) != _normalize_number(confidence):
+    if _delta_crosses_threshold(
+        row.confidence,
+        confidence,
+        abs_threshold=_ACTIVE_SIGNAL_CONFIDENCE_DELTA,
+    ):
         return True
-    if _normalize_number(row.liquidity) != _normalize_number(liquidity):
+    if _delta_crosses_threshold(
+        row.liquidity,
+        liquidity,
+        abs_threshold=_ACTIVE_SIGNAL_LIQUIDITY_DELTA_ABS,
+        rel_threshold=_ACTIVE_SIGNAL_LIQUIDITY_DELTA_REL,
+    ):
         return True
     existing_raw = _safe_json(row.payload_json)
     existing_normalized = ensure_market_roster_payload(
@@ -1200,11 +1256,6 @@ async def upsert_trade_signal(
                     quality_passed=quality_passed,
                     quality_rejection_reasons=quality_rejection_reasons,
                 )
-                if not has_material_change:
-                    existing_expires_at = _to_utc_naive(row.expires_at)
-                    incoming_expires_at = _to_utc_naive(expires_at)
-                    if existing_expires_at != incoming_expires_at:
-                        has_material_change = True
             elif previous_status == "skipped":
                 has_material_change = _has_skipped_signal_material_change(
                     row,
@@ -1248,6 +1299,13 @@ async def upsert_trade_signal(
                 emission_event_type = "upsert_active_unchanged"
                 emission_reason = "suppressed:active_unchanged"
                 publish_signal_emission = False
+                if str(source or "").strip().lower() in _ACTIVE_REFRESH_SOURCES:
+                    row.expires_at = incoming_expires_naive
+                    row.payload_json = _safe_json(normalized_payload_json)
+                    row.strategy_context_json = _safe_json(strategy_context_json)
+                    if quality_passed is not None:
+                        row.quality_passed = quality_passed
+                        row.quality_rejection_reasons = quality_rejection_reasons if quality_rejection_reasons else None
             elif incoming_already_expired and previous_status in SIGNAL_ACTIVE_STATUSES:
                 # Scanner sent a fresh emit with an already-past expires_at.
                 # Mark the existing row expired; do not reactivate or emit.

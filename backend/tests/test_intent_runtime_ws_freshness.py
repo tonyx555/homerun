@@ -11,6 +11,7 @@ from services.intent_runtime import (
     IntentRuntime,
     _SIGNAL_PUBLICATION_BATCH_SIZE,
     _extract_required_token_ids,
+    _projection_pressure_ttl_seconds,
     _snapshot_has_strict_scanner_live_market,
     _strict_ws_ttl_seconds_for_source,
 )
@@ -20,6 +21,12 @@ from services.strategies.base import BaseStrategy
 from models.market import Event, Market
 from models.opportunity import Opportunity
 from utils.utcnow import utcnow
+
+
+def test_projection_pressure_ttl_ignores_first_projection_failure():
+    assert _projection_pressure_ttl_seconds(0) is None
+    assert _projection_pressure_ttl_seconds(1) == pytest.approx(15.0)
+    assert _projection_pressure_ttl_seconds(5) == pytest.approx(45.0)
 
 
 def test_tokens_have_fresh_ws_quotes_uses_scanner_age_budget(monkeypatch):

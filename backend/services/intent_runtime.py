@@ -36,8 +36,13 @@ _SIGNAL_ACTIVE_STATUSES = {"pending", "selected", "submitted"}
 _SIGNAL_TERMINAL_STATUSES = {"executed", "skipped", "expired", "failed"}
 _STATUS_PROJECTION_BATCH_MAX = 64
 _UPSERT_PROJECTION_BATCH_MAX = 8
+_STATUS_PROJECTION_CHUNK_SIZE = 16
+_STATUS_PROJECTION_PRESSURE_CHUNK_SIZE = 4
+_UPSERT_PROJECTION_CHUNK_SIZE = 10
+_UPSERT_PROJECTION_PRESSURE_CHUNK_SIZE = 5
 _PROJECTION_RETRY_MAX_ATTEMPTS = 3
 _PROJECTION_RETRY_BASE_DELAY_SECONDS = 0.25
+_PROJECTION_DB_PRESSURE_TTL_SECONDS = 15.0
 _PROJECTION_STATEMENT_TIMEOUT_MS = 5000
 _PROJECTION_LOCK_TIMEOUT_MS = 1000
 _RUNTIME_LANE_BY_SOURCE = {"crypto": "crypto"}
@@ -249,6 +254,15 @@ def _normalize_runtime_sequence(value: Any) -> int | None:
     except Exception:
         return None
     return parsed if parsed > 0 else None
+
+
+def _projection_pressure_ttl_seconds(retry_count: int) -> float | None:
+    if int(retry_count or 0) <= 0:
+        return None
+    return min(
+        _PROJECTION_DB_PRESSURE_TTL_SECONDS * float(max(1, int(retry_count or 0))),
+        45.0,
+    )
 
 
 def _runtime_sort_key(snapshot: dict[str, Any]) -> tuple[int, str]:
@@ -2133,8 +2147,15 @@ class IntentRuntime:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                maybe_mark_db_pressure(exc, component="intent_projection", ttl_seconds=60.0)
                 retry_count = int(payload.get("_projection_retry_count") or 0)
+                pressure_ttl_seconds = _projection_pressure_ttl_seconds(retry_count)
+                db_pressure_marked = False
+                if pressure_ttl_seconds is not None:
+                    db_pressure_marked = maybe_mark_db_pressure(
+                        exc,
+                        component="intent_projection",
+                        ttl_seconds=pressure_ttl_seconds,
+                    )
                 if retry_count < _PROJECTION_RETRY_MAX_ATTEMPTS:
                     payload["_projection_retry_count"] = retry_count + 1
                     self._start_task(
@@ -2145,6 +2166,9 @@ class IntentRuntime:
                     "Intent runtime DB projection failed",
                     projection_kind=str(payload.get("kind") or "").strip().lower() or None,
                     retry_count=retry_count,
+                    error_type=type(exc).__name__,
+                    db_pressure_marked=db_pressure_marked,
+                    projection_queue_size=self._projection_queue.qsize(),
                     exc_info=exc,
                 )
 
@@ -2193,7 +2217,11 @@ class IntentRuntime:
         if not snapshots and not sweep_missing:
             return
 
-        _UPSERT_CHUNK_SIZE = 5 if is_db_pressure_active() else 20
+        _UPSERT_CHUNK_SIZE = (
+            _UPSERT_PROJECTION_PRESSURE_CHUNK_SIZE
+            if is_db_pressure_active()
+            else _UPSERT_PROJECTION_CHUNK_SIZE
+        )
         snapshot_items = list(snapshots.values())
         signal_types_in_batch: set[str] = set()
         strategy_types_in_batch: set[str] = set()
@@ -2347,7 +2375,11 @@ class IntentRuntime:
         if not latest_by_signal_id:
             return
 
-        _STATUS_CHUNK_SIZE = 16
+        _STATUS_CHUNK_SIZE = (
+            _STATUS_PROJECTION_PRESSURE_CHUNK_SIZE
+            if is_db_pressure_active()
+            else _STATUS_PROJECTION_CHUNK_SIZE
+        )
         items = list(latest_by_signal_id.values())
         for chunk_start in range(0, len(items), _STATUS_CHUNK_SIZE):
             chunk = items[chunk_start:chunk_start + _STATUS_CHUNK_SIZE]
