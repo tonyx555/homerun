@@ -109,6 +109,7 @@ _LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
 _LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 150
 _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
 _LIVE_ORDER_AUTHORITY_RECOVERY_RECENT_TERMINAL_LOOKBACK_MINUTES = 30
+_LIVE_ORDER_AUTHORITY_RECOVERY_DECISION_LOOKBACK_MINUTES = 30
 PENDING_LIVE_EXIT_TERMINAL_STATUSES = {
     "filled",
     "superseded_resolution",
@@ -1873,13 +1874,66 @@ def _live_order_authority_key_from_row(row: TraderOrder) -> str:
     return ""
 
 
-def _live_order_authority_row_sort_key(row: TraderOrder) -> tuple[int, int, int, float, float, str]:
+def _live_order_authority_keys_from_row(row: TraderOrder) -> list[str]:
+    payload = dict(getattr(row, "payload_json", None) or {})
+    keys: list[str] = []
+    primary_key = _live_order_authority_key_from_row(row)
+    if primary_key:
+        keys.append(primary_key)
+    row_clob_id = str(getattr(row, "provider_clob_order_id", None) or "").strip()
+    payload_clob_id, payload_live_order_id = _extract_live_order_authority_ids_from_payload(payload)
+    for clob_id in (row_clob_id, payload_clob_id):
+        if clob_id:
+            keys.append(f"clob:{clob_id.lower()}")
+    provider_order_id = str(
+        getattr(row, "provider_order_id", None)
+        or extract_trader_order_provider_order_id(payload)
+        or ""
+    ).strip()
+    for live_order_id in (provider_order_id, payload_live_order_id):
+        if live_order_id:
+            keys.append(f"live:{live_order_id.lower()}")
+            keys.append(f"provider:{live_order_id.lower()}")
+    return list(dict.fromkeys(keys))
+
+
+def _is_live_authority_terminal_order_status(status: Any) -> bool:
+    key = _normalize_status_key(status)
+    return key in RESOLVED_ORDER_STATUSES or key in REALIZED_ORDER_STATUSES or key.startswith("closed")
+
+
+def _position_close_has_live_terminal_authority(position_close: dict[str, Any]) -> bool:
+    price_source = str(position_close.get("price_source") or "").strip().lower()
+    close_trigger = str(position_close.get("close_trigger") or "").strip().lower()
+    if price_source in {"wallet_activity", "wallet_trade", "wallet_flat_override"}:
+        return True
+    if close_trigger in {"wallet_activity", "wallet_summary_recovery", "external_wallet_flatten"}:
+        return True
+    for key in (
+        "wallet_trade_id",
+        "wallet_activity_transaction_hash",
+        "wallet_activity_id",
+        "wallet_closed_position_timestamp",
+    ):
+        if str(position_close.get(key) or "").strip():
+            return True
+    return False
+
+
+def _terminal_status_for_position_close(position_close: dict[str, Any], existing_profit: Any) -> tuple[str, float]:
+    pnl = safe_float(position_close.get("realized_pnl"), safe_float(existing_profit, 0.0) or 0.0) or 0.0
+    normalized_pnl = 0.0 if abs(float(pnl)) <= 1e-9 else float(pnl)
+    return ("closed_win" if normalized_pnl >= 0.0 else "closed_loss", normalized_pnl)
+
+
+def _live_order_authority_row_sort_key(row: TraderOrder) -> tuple[int, int, int, int, float, float, str]:
     updated_at = row.updated_at or row.executed_at or row.created_at or _now()
     created_at = row.created_at or row.updated_at or updated_at
     return (
         1 if str(row.reason or "").strip().lower() == "recovered from live venue authority" else 0,
         1 if not str(row.decision_id or "").strip() else 0,
         1 if not str(row.signal_id or "").strip() else 0,
+        0 if _is_live_authority_terminal_order_status(row.status) else 1,
         -updated_at.timestamp(),
         -created_at.timestamp(),
         str(row.id or ""),
@@ -2399,7 +2453,7 @@ async def _infer_live_order_authority_candidate(
     if not question:
         return None
 
-    window_start = created_at - timedelta(days=7)
+    window_start = created_at - timedelta(minutes=_LIVE_ORDER_AUTHORITY_RECOVERY_DECISION_LOOKBACK_MINUTES)
     window_end = created_at + timedelta(minutes=5)
     rows = (
         await session.execute(
@@ -2564,6 +2618,17 @@ async def recover_missing_live_trader_orders(
             "adopted_existing_orders": 0,
         }
 
+    live_provider_clob_ids = {
+        str(row.clob_order_id or "").strip().lower()
+        for row in live_rows
+        if str(row.clob_order_id or "").strip()
+    }
+    live_order_ids = {
+        str(row.id or "").strip().lower()
+        for row in live_rows
+        if str(row.id or "").strip()
+    }
+
     live_orders_by_token: dict[str, LiveTradingPosition] = {}
     relevant_token_ids = {
         str(row.token_id or "").strip()
@@ -2616,11 +2681,7 @@ async def recover_missing_live_trader_orders(
             for position_row in position_rows
             if str(getattr(position_row, "market_id", "") or "").strip()
         }
-        relevant_provider_clob_ids = {
-            str(live_row.clob_order_id or "").strip().lower()
-            for live_row in live_rows
-            if str(live_row.clob_order_id or "").strip()
-        }
+        relevant_provider_clob_ids = set(live_provider_clob_ids)
         if relevant_market_ids or relevant_provider_clob_ids:
             market_filters: list[Any] = [
                 TraderOrder.market_id.is_(None),
@@ -2640,6 +2701,36 @@ async def recover_missing_live_trader_orders(
         .scalars()
         .all()
     )
+    global_authority_rows_by_key: dict[str, TraderOrder] = {}
+    if trader_id_filter and (live_provider_clob_ids or live_order_ids):
+        global_authority_filters: list[Any] = []
+        if live_provider_clob_ids:
+            global_authority_filters.append(
+                func.lower(func.coalesce(TraderOrder.provider_clob_order_id, "")).in_(list(live_provider_clob_ids))
+            )
+        if live_order_ids:
+            global_authority_filters.append(
+                func.lower(func.coalesce(TraderOrder.provider_order_id, "")).in_(list(live_order_ids))
+            )
+        if global_authority_filters:
+            global_authority_rows = list(
+                (
+                    await session.execute(
+                        select(TraderOrder)
+                        .where(TraderOrder.mode == "live")
+                        .where(or_(*global_authority_filters))
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for global_authority_row in global_authority_rows:
+                for authority_key in _live_order_authority_keys_from_row(global_authority_row):
+                    current = global_authority_rows_by_key.get(authority_key)
+                    if current is None or _live_order_authority_row_sort_key(
+                        global_authority_row
+                    ) < _live_order_authority_row_sort_key(current):
+                        global_authority_rows_by_key[authority_key] = global_authority_row
     existing_order_ids = [str(row.id or "").strip() for row in existing_rows if str(row.id or "").strip()]
     execution_order_rows: list[ExecutionSessionOrder] = []
     if existing_order_ids:
@@ -2824,6 +2915,27 @@ async def recover_missing_live_trader_orders(
         clob_order_id = str(live_row.clob_order_id or "").strip().lower()
         live_order_id = str(live_row.id or "").strip().lower()
         live_side = str(live_row.side or "").strip().upper()
+        live_authority_keys = [
+            key
+            for key in (
+                f"clob:{clob_order_id}" if clob_order_id else "",
+                f"live:{live_order_id}" if live_order_id else "",
+                f"provider:{live_order_id}" if live_order_id else "",
+            )
+            if key
+        ]
+        global_authority_row = None
+        if trader_id_filter:
+            for live_authority_key in live_authority_keys:
+                global_authority_row = global_authority_rows_by_key.get(live_authority_key)
+                if global_authority_row is not None:
+                    break
+            if global_authority_row is not None:
+                global_authority_trader_id = str(global_authority_row.trader_id or "").strip()
+                if global_authority_trader_id and global_authority_trader_id not in trader_id_filter:
+                    adopted_existing_orders += 1
+                    affected_traders.add(global_authority_trader_id)
+                    continue
 
         token_key = _wallet_position_token_key(live_row.token_id)
         position_row = live_orders_by_token.get(token_key)
@@ -2892,6 +3004,10 @@ async def recover_missing_live_trader_orders(
             existing_row = existing_provider_rows_by_clob_id.get(clob_order_id)
         if existing_row is None and live_order_id:
             existing_row = existing_rows_by_live_order_id.get(live_order_id)
+        if existing_row is None and global_authority_row is not None:
+            global_authority_trader_id = str(global_authority_row.trader_id or "").strip()
+            if not trader_id_filter or global_authority_trader_id in trader_id_filter:
+                existing_row = global_authority_row
         if existing_row is None and token_key:
             live_market_id = str(getattr(position_row, "market_id", None) or "").strip()
             live_condition_id = _normalize_condition_id(live_market_id)
@@ -2998,6 +3114,40 @@ async def recover_missing_live_trader_orders(
                 or existing_status.startswith("closed")
             )
             status_changed = False
+            existing_position_close = merged_payload.get("position_close")
+            if isinstance(existing_position_close, dict) and _position_close_has_live_terminal_authority(
+                existing_position_close
+            ):
+                prior_existing_status = existing_status
+                terminal_status, terminal_pnl = _terminal_status_for_position_close(
+                    existing_position_close,
+                    existing_row.actual_profit,
+                )
+                if existing_status != terminal_status:
+                    existing_row.status = terminal_status
+                    existing_status = terminal_status
+                    status_changed = True
+                if safe_float(existing_row.actual_profit, None) != terminal_pnl:
+                    existing_row.actual_profit = float(terminal_pnl)
+                    status_changed = True
+                existing_status_is_terminal = True
+                if not str(existing_position_close.get("closed_at") or "").strip():
+                    existing_position_close["closed_at"] = to_iso(now)
+                    payload_changed = True
+                merged_payload["position_close"] = existing_position_close
+                repair_reason = "live_authority_recovery_preserved_terminal_position_close"
+                repair_state = merged_payload.get("position_close_status_repair")
+                if (
+                    status_changed
+                    or not isinstance(repair_state, dict)
+                    or str(repair_state.get("reason") or "").strip() != repair_reason
+                ):
+                    merged_payload["position_close_status_repair"] = {
+                        "repaired_at": to_iso(now),
+                        "prior_status": prior_existing_status,
+                        "reason": repair_reason,
+                    }
+                    payload_changed = True
             if (
                 str(live_row.side or "").strip().upper() != "SELL"
                 and recovered_status in LIVE_ACTIVE_ORDER_STATUSES

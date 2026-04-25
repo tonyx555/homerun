@@ -5443,6 +5443,70 @@ async def reconcile_live_positions(
 
     for row in candidates:
         payload = dict(row.payload_json or {})
+        terminal_position_close = payload.get("position_close")
+        if isinstance(terminal_position_close, dict) and _position_close_has_terminal_external_authority(
+            terminal_position_close
+        ):
+            close_trigger = str(terminal_position_close.get("close_trigger") or "position_close").strip() or "position_close"
+            pnl = safe_float(
+                terminal_position_close.get("realized_pnl"),
+                safe_float(row.actual_profit, 0.0) or 0.0,
+            ) or 0.0
+            next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
+            details.append(
+                {
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": close_trigger,
+                    "next_status": next_status,
+                    "note": "terminalized_active_row_with_position_close",
+                }
+            )
+            if not dry_run:
+                row.status = next_status
+                row.actual_profit = float(pnl)
+                row.updated_at = now
+                terminal_position_close.setdefault("closed_at", _iso_utc(now))
+                pending_exit = payload.get("pending_live_exit")
+                if isinstance(pending_exit, dict):
+                    pending_status = str(pending_exit.get("status") or "").strip().lower()
+                    if pending_status not in {
+                        "filled",
+                        "superseded_resolution",
+                        "superseded_wallet_activity",
+                        "superseded_wallet_flat",
+                        "superseded_external",
+                        "cancelled",
+                    }:
+                        pending_exit["status"] = "superseded_position_close"
+                        pending_exit["resolved_at"] = terminal_position_close["closed_at"]
+                        payload["pending_live_exit"] = pending_exit
+                payload["position_close"] = terminal_position_close
+                row.payload_json = payload
+                _apply_position_close_verification(
+                    session,
+                    row=row,
+                    now=now,
+                    event_type="position_close_status_repair",
+                    payload_json=payload,
+                )
+                hot_state.record_order_resolved(
+                    trader_id=trader_id,
+                    mode=str(row.mode or ""),
+                    order_id=str(row.id or ""),
+                    market_id=str(row.market_id or ""),
+                    direction=str(row.direction or ""),
+                    source=str(row.source or ""),
+                    status=next_status,
+                    actual_profit=pnl,
+                    payload=payload,
+                    copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                )
+                closed += 1
+            total_realized_pnl += pnl
+            by_status[next_status] = int(by_status.get(next_status, 0)) + 1
+            would_close += 1
+            continue
         _exit_instance = None
         token_id = _extract_live_token_id(payload)
         take_profit_pct = safe_float(_payload_exit_param(payload, prefix_key="live", name="take_profit_pct"))

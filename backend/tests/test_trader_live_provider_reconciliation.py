@@ -78,12 +78,18 @@ async def _build_session_factory(_tmp_path: Path):
     return await build_postgres_session_factory(Base, "trader_live_provider_reconciliation")
 
 
-async def _seed_trader(session, trader_id: str, *, source_configs: list[dict] | None = None) -> None:
+async def _seed_trader(
+    session,
+    trader_id: str,
+    *,
+    source_configs: list[dict] | None = None,
+    name: str = "Live Trader",
+) -> None:
     now = utcnow()
     session.add(
         Trader(
             id=trader_id,
-            name="Live Trader",
+            name=name,
             source_configs_json=source_configs
             or [{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
             risk_limits_json={},
@@ -629,6 +635,188 @@ async def test_recover_missing_live_trader_orders_adopts_existing_provider_autho
             assert payload["strategy_exit_config"]["stop_loss_pct"] == 12
             assert rows[0].reason == "Tail carry signal selected"
             assert rows[0].status == "resolved_win"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_does_not_duplicate_global_provider_authority_for_scoped_trader(
+    tmp_path,
+):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    canonical_trader_id = "live-trader-canonical-authority"
+    scoped_trader_id = "live-trader-scoped-authority"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, canonical_trader_id, name="Canonical Live Trader")
+            await _seed_trader(session, scoped_trader_id, name="Scoped Live Trader")
+            await _seed_decision(
+                session,
+                trader_id=scoped_trader_id,
+                decision_id="decision-scoped-authority",
+                signal_id="signal-scoped-authority",
+                market_id="market-shared-authority",
+                market_question="Will shared venue authority stay unique?",
+                direction="buy_yes",
+                strategy_key="generic_strategy",
+            )
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="canonical-authority-order",
+                    trader_id=canonical_trader_id,
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    market_id="market-shared-authority",
+                    market_question="Will shared venue authority stay unique?",
+                    direction="buy_yes",
+                    mode="live",
+                    status="closed_loss",
+                    notional_usd=9.0,
+                    entry_price=0.9,
+                    effective_price=0.9,
+                    provider_clob_order_id="clob-shared-authority",
+                    reason="Signal selected",
+                    payload_json={
+                        "provider_clob_order_id": "clob-shared-authority",
+                        "token_id": "token-shared-authority",
+                        "position_close": {
+                            "close_trigger": "wallet_activity",
+                            "price_source": "wallet_activity",
+                            "realized_pnl": -0.09,
+                            "wallet_activity_transaction_hash": "0xsharedauthorityclose",
+                            "wallet_activity_timestamp": now.isoformat(),
+                        },
+                    },
+                    created_at=now - timedelta(minutes=5),
+                    executed_at=now - timedelta(minutes=5),
+                    updated_at=now,
+                    actual_profit=-0.09,
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-shared-authority",
+                    wallet_address="0xwallet",
+                    clob_order_id="clob-shared-authority",
+                    token_id="token-shared-authority",
+                    side="BUY",
+                    price=0.9,
+                    size=10.0,
+                    order_type="GTC",
+                    status="filled",
+                    filled_size=10.0,
+                    average_fill_price=0.9,
+                    market_question="Will shared venue authority stay unique?",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[scoped_trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+
+            scoped_rows = (
+                await session.execute(select(TraderOrder).where(TraderOrder.trader_id == scoped_trader_id))
+            ).scalars().all()
+            canonical_rows = (
+                await session.execute(select(TraderOrder).where(TraderOrder.trader_id == canonical_trader_id))
+            ).scalars().all()
+            assert scoped_rows == []
+            assert len(canonical_rows) == 1
+            assert canonical_rows[0].provider_clob_order_id == "clob-shared-authority"
+            assert canonical_rows[0].status == "closed_loss"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_recover_missing_live_trader_orders_preserves_existing_wallet_close_authority(tmp_path):
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "live-trader-preserve-wallet-close-authority"
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            now = utcnow()
+            session.add(
+                TraderOrder(
+                    id="existing-wallet-close-authority",
+                    trader_id=trader_id,
+                    source="scanner",
+                    strategy_key="generic_strategy",
+                    market_id="market-wallet-close-authority",
+                    market_question="Will wallet close authority remain terminal?",
+                    direction="buy_yes",
+                    mode="live",
+                    status="executed",
+                    notional_usd=9.0,
+                    entry_price=0.9,
+                    effective_price=0.9,
+                    provider_clob_order_id="clob-wallet-close-authority",
+                    reason="Signal selected",
+                    payload_json={
+                        "provider_clob_order_id": "clob-wallet-close-authority",
+                        "token_id": "token-wallet-close-authority",
+                        "position_close": {
+                            "close_trigger": "wallet_activity",
+                            "price_source": "wallet_activity",
+                            "realized_pnl": -0.12,
+                            "wallet_activity_transaction_hash": "0xwalletcloseauthority",
+                            "wallet_activity_timestamp": now.isoformat(),
+                        },
+                    },
+                    created_at=now - timedelta(minutes=5),
+                    executed_at=now - timedelta(minutes=5),
+                    updated_at=now - timedelta(minutes=1),
+                    actual_profit=None,
+                )
+            )
+            session.add(
+                LiveTradingOrder(
+                    id="venue-order-wallet-close-authority",
+                    wallet_address="0xwallet",
+                    clob_order_id="clob-wallet-close-authority",
+                    token_id="token-wallet-close-authority",
+                    side="BUY",
+                    price=0.9,
+                    size=10.0,
+                    order_type="GTC",
+                    status="filled",
+                    filled_size=10.0,
+                    average_fill_price=0.9,
+                    market_question="Will wallet close authority remain terminal?",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            await session.commit()
+
+            result = await recover_missing_live_trader_orders(
+                session,
+                trader_ids=[trader_id],
+                commit=True,
+                broadcast=False,
+            )
+
+            assert result["recovered_orders"] == 0
+            assert result["adopted_existing_orders"] == 1
+            row = await session.get(TraderOrder, "existing-wallet-close-authority")
+            assert row is not None
+            assert row.status == "closed_loss"
+            assert row.actual_profit == pytest.approx(-0.12)
+            payload = dict(row.payload_json or {})
+            assert payload["position_close_status_repair"]["reason"] == (
+                "live_authority_recovery_preserved_terminal_position_close"
+            )
+            assert payload["live_wallet_authority"]["live_trading_order_id"] == "venue-order-wallet-close-authority"
     finally:
         await engine.dispose()
 

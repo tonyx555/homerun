@@ -234,6 +234,8 @@ async def test_seed_close_alert_markers_rekeys_old_persisted_marker():
                                 "closed_at": "2026-03-02T13:05:00Z",
                             }
                         },
+                        market_id="market-1",
+                        direction="buy_yes",
                         updated_at=datetime(2026, 3, 2, 13, 5, tzinfo=timezone.utc),
                         executed_at=datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
                         created_at=datetime(2026, 3, 2, 10, 0, tzinfo=timezone.utc),
@@ -249,6 +251,7 @@ async def test_seed_close_alert_markers_rekeys_old_persisted_marker():
         "closed_loss|wallet_activity_transaction_hash:0xclose|"
         "wallet_activity_timestamp:2026-03-02T12:00:00Z"
     )
+    assert any(key.startswith("evidence:") for key in notifier._close_alert_markers)
 
 
 @pytest.mark.asyncio
@@ -352,7 +355,76 @@ async def test_position_close_alert_dedupes_same_wallet_close_evidence(monkeypat
     plain = _plain_text(captured[0])
     assert "Count: 1" in plain
     assert plain.count("Alpha") == 1
-    assert set(notifier._close_alert_markers) == {"order-1", "order-2", "order-3"}
+    assert {"order-1", "order-2", "order-3"}.issubset(set(notifier._close_alert_markers))
+    assert any(key.startswith("evidence:") for key in notifier._close_alert_markers)
+
+
+@pytest.mark.asyncio
+async def test_position_close_alert_dedupes_same_wallet_close_evidence_across_traders(monkeypatch):
+    notifier = TelegramNotifier()
+    captured: list[str] = []
+
+    async def _enqueue(text: str) -> None:
+        captured.append(text)
+
+    async def _persist(_session) -> None:
+        return None
+
+    async def _name_map(_session, _trader_ids: set[str]) -> dict[str, str]:
+        return {"trader-1": "Alpha", "trader-2": "Beta"}
+
+    monkeypatch.setattr(notifier, "_enqueue", _enqueue)
+    monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
+    monkeypatch.setattr(notifier, "_load_trader_name_map", _name_map)
+
+    now = datetime(2026, 3, 2, 12, 0, tzinfo=timezone.utc)
+    close_payload = {
+        "close_trigger": "wallet_activity",
+        "price_source": "wallet_activity",
+        "wallet_activity_transaction_hash": "0xsharedclose",
+        "wallet_activity_timestamp": "2026-03-02T12:00:00Z",
+        "closed_at": "2026-03-02T12:01:00Z",
+    }
+    orders = [
+        SimpleNamespace(
+            id="order-cross-1",
+            trader_id="trader-1",
+            status="closed_loss",
+            actual_profit=-0.09,
+            market_question="Will one wallet close alert once?",
+            market_id="market-1",
+            direction="buy_yes",
+            payload_json={"token_id": "token-1", "position_close": dict(close_payload)},
+            updated_at=now,
+            created_at=now,
+            mode="live",
+        ),
+        SimpleNamespace(
+            id="order-cross-2",
+            trader_id="trader-2",
+            status="closed_loss",
+            actual_profit=-0.09,
+            market_question="Will one wallet close alert once?",
+            market_id="market-1",
+            direction="buy_yes",
+            payload_json={"token_id": "token-1", "position_close": dict(close_payload)},
+            updated_at=now,
+            created_at=now,
+            mode="live",
+        ),
+    ]
+
+    await notifier._send_position_close_alerts(
+        session=object(),
+        orders=orders,
+        mode="live",
+    )
+
+    plain = _plain_text(captured[0])
+    assert "Count: 1" in plain
+    assert "Alpha" in plain
+    assert "Beta" not in plain
+    assert {"order-cross-1", "order-cross-2"}.issubset(set(notifier._close_alert_markers))
 
 
 @pytest.mark.asyncio

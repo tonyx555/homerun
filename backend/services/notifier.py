@@ -482,9 +482,15 @@ class TelegramNotifier:
                 if token_id:
                     break
         market_id = str(getattr(order, "market_id", "") or "").strip()
-        trader_id = str(getattr(order, "trader_id", "") or "").strip()
         direction = str(getattr(order, "direction", "") or "").strip().lower()
-        return "|".join((trader_id, token_id or market_id, direction, marker))
+        asset_key = token_id or market_id
+        if not asset_key or not marker:
+            return ""
+        return "|".join((asset_key, direction, marker))
+
+    @staticmethod
+    def _close_alert_evidence_marker_key(evidence_key: str) -> str:
+        return f"evidence:{evidence_key}"
 
     @staticmethod
     def _realized_at_for_order(order: TraderOrder) -> datetime | None:
@@ -552,8 +558,14 @@ class TelegramNotifier:
         seeded_markers: dict[str, str] = dict(self._close_alert_markers) if preserve_existing else {}
         for row in reversed(rows):
             order_id = str(row.id)
+            marker = self._close_alert_marker_for_order(row)
             seeded_markers.pop(order_id, None)
-            seeded_markers[order_id] = self._close_alert_marker_for_order(row)
+            seeded_markers[order_id] = marker
+            evidence_key = self._close_alert_evidence_key_for_order(row, marker)
+            if evidence_key:
+                evidence_marker_key = self._close_alert_evidence_marker_key(evidence_key)
+                seeded_markers.pop(evidence_marker_key, None)
+                seeded_markers[evidence_marker_key] = marker
         self._close_alert_markers = seeded_markers
         self._trim_close_alert_markers()
 
@@ -1006,13 +1018,20 @@ class TelegramNotifier:
                 continue
             marker = self._close_alert_marker_for_order(row)
             order_id = str(row.id)
+            evidence_key = self._close_alert_evidence_key_for_order(row, marker)
+            evidence_marker_key = self._close_alert_evidence_marker_key(evidence_key) if evidence_key else ""
             if self._close_alert_markers.get(order_id) == marker:
                 continue
+            if evidence_marker_key and self._close_alert_markers.get(evidence_marker_key) == marker:
+                self._close_alert_markers[order_id] = marker
+                markers_changed = True
+                continue
             self._close_alert_markers[order_id] = marker
+            if evidence_marker_key:
+                self._close_alert_markers[evidence_marker_key] = marker
             markers_changed = True
             if abs(_realized_pnl_for_order(row)) < 0.005:
                 continue
-            evidence_key = self._close_alert_evidence_key_for_order(row, marker)
             if evidence_key in batch_evidence_keys:
                 continue
             batch_evidence_keys.add(evidence_key)
