@@ -86,6 +86,7 @@ from services.trader_orchestrator_state import (
     create_trader_decision_checks as _create_trader_decision_checks,
     create_trader_event as _create_trader_event,
     create_trader_order as _create_trader_order,
+    get_gross_exposure as _db_get_gross_exposure,
     get_pending_live_exit_summary_for_trader,
     list_unconsumed_trade_signals as _list_unconsumed_trade_signals_authoritative,
     list_live_wallet_positions_for_trader,
@@ -722,7 +723,11 @@ async def get_last_resolved_loss_at(session, *, trader_id, mode=None, since=None
 
 
 async def get_gross_exposure(session, mode=None):
-    return hot_state.get_gross_exposure(mode or "live")
+    mode_key = mode or "live"
+    hot_exposure = hot_state.get_gross_exposure(mode_key)
+    if hot_exposure > 0.0:
+        return hot_exposure
+    return await _db_get_gross_exposure(session, mode=mode_key)
 
 
 async def get_market_exposure(session, market_id, mode=None):

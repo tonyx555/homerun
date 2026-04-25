@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     AsyncSessionLocal,
+    LiveTradingPosition,
     TradeSignal,
     TraderDecision,
     TraderDecisionCheck,
@@ -499,10 +500,31 @@ async def _seed_from_db(session: AsyncSession) -> None:
         market_id = str(row.market_id or "").strip()
         if market_id:
             snap.open_position_market_ids.add(market_id)
+
+    wallet_position_rows = (
+        await session.execute(
+            select(
+                LiveTradingPosition.size,
+                LiveTradingPosition.average_cost,
+                LiveTradingPosition.current_price,
+            ).where(LiveTradingPosition.size > 0)
+        )
+    ).all()
+    wallet_live_gross = 0.0
+    for row in wallet_position_rows:
+        size = max(0.0, safe_float(row.size, 0.0) or 0.0)
+        average_cost = safe_float(row.average_cost, 0.0) or 0.0
+        current_price = safe_float(row.current_price, 0.0) or 0.0
+        price = average_cost if average_cost > 0.0 else current_price
+        if size > 0.0 and price > 0.0:
+            wallet_live_gross += size * price
+
     for (_, mode_key), snap in _shadow_snapshots.items():
         _rebuild_snapshot_order_views(snap)
         if snap.gross_notional > 0.0:
             _shadow_global_gross[mode_key] = _shadow_global_gross.get(mode_key, 0.0) + snap.gross_notional
+    if wallet_live_gross > 0.0:
+        _shadow_global_gross["live"] = max(_shadow_global_gross.get("live", 0.0), wallet_live_gross)
     # Snapshot index by trader
     snapshots_by_trader: dict[str, list[_TraderSnapshot]] = {}
     for (tid, _), snap in _shadow_snapshots.items():

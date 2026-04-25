@@ -302,6 +302,52 @@ async def test_fast_runtime_restarts_dead_per_trader_task(monkeypatch):
     assert runtime._tasks["fast-trader"] is not old_task
 
 
+@pytest.mark.asyncio
+async def test_fast_runtime_restarts_stale_per_trader_task(monkeypatch):
+    runtime = fast_trader_runtime._FastRuntime()
+    old_wake = asyncio.Event()
+    old_runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), old_wake)
+    now_mono = fast_trader_runtime.time.monotonic()
+    old_runner._started_at_mono = now_mono - fast_trader_runtime._FAST_TASK_STALE_SECONDS - 10.0
+    old_runner._last_cycle_started_at = now_mono - fast_trader_runtime._FAST_TASK_STALE_SECONDS - 5.0
+    old_runner._last_cycle_finished_at = 0.0
+    old_task = asyncio.get_running_loop().create_future()
+    runtime._wake_events["fast-trader"] = old_wake
+    runtime._task_objs["fast-trader"] = old_runner
+    runtime._tasks["fast-trader"] = old_task
+
+    class EmptySession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    async def fake_list_fast_traders(session):
+        assert session is not None
+        return [_fast_trader_config()]
+
+    created = {"count": 0}
+
+    def fake_create_task(coro, *, name=None):
+        assert name == "fast-trader-fast-trader"
+        coro.close()
+        created["count"] += 1
+        return asyncio.get_running_loop().create_future()
+
+    monkeypatch.setattr(fast_trader_runtime, "AsyncSessionLocal", lambda: EmptySession())
+    monkeypatch.setattr(fast_trader_runtime, "list_fast_traders", fake_list_fast_traders)
+    monkeypatch.setattr(fast_trader_runtime.asyncio, "create_task", fake_create_task)
+
+    await runtime._refresh_roster()
+
+    assert old_runner._stopped is True
+    assert old_task.cancelled() is True
+    assert created["count"] == 1
+    assert runtime._task_objs["fast-trader"] is not old_runner
+    assert runtime._tasks["fast-trader"] is not old_task
+
+
 def test_fast_trader_filters_signal_strategy_types_by_source_config():
     task = object.__new__(fast_trader_runtime._FastTraderTask)
     task._trader = {

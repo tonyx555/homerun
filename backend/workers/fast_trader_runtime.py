@@ -66,6 +66,7 @@ _SUBMIT_BUDGET_SECONDS = 1.0
 _POLL_FALLBACK_SECONDS = 0.25
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
 _TRADER_REFRESH_INTERVAL_SECONDS = 15.0
+_FAST_TASK_STALE_SECONDS = 30.0
 _MAX_SIGNALS_PER_CYCLE = 4
 _TRADER_LAST_RUN_TOUCH_SECONDS = 5.0
 _IDLE_EVENT_INTERVAL_SECONDS = 60.0
@@ -100,6 +101,12 @@ class _FastTraderTask:
         self._stopped = False
         self._last_trader_touch_at = 0.0
         self._last_idle_event_at = 0.0
+        self._started_at_mono = time.monotonic()
+        self._last_cycle_started_at = 0.0
+        self._last_cycle_finished_at = 0.0
+        self._last_cycle_duration_seconds = 0.0
+        self._last_cycle_error: str | None = None
+        self._cycles_completed = 0
 
     @property
     def trader_id(self) -> str:
@@ -111,6 +118,32 @@ class _FastTraderTask:
     def stop(self) -> None:
         self._stopped = True
         self._wake.set()
+
+    def is_stale(self, now_mono: float, threshold_seconds: float) -> bool:
+        if self._stopped:
+            return False
+        if not self._trader.get("is_enabled", True) or self._trader.get("is_paused", False):
+            return False
+        last_progress = max(self._last_cycle_finished_at, self._last_cycle_started_at, self._started_at_mono)
+        return now_mono - last_progress > threshold_seconds
+
+    def snapshot(self, now_mono: float, threshold_seconds: float) -> dict[str, Any]:
+        last_progress = max(self._last_cycle_finished_at, self._last_cycle_started_at, self._started_at_mono)
+        inflight_seconds = 0.0
+        if self._last_cycle_started_at > self._last_cycle_finished_at:
+            inflight_seconds = max(0.0, now_mono - self._last_cycle_started_at)
+        return {
+            "trader_id": self.trader_id,
+            "enabled": bool(self._trader.get("is_enabled", True)),
+            "paused": bool(self._trader.get("is_paused", False)),
+            "stopped": self._stopped,
+            "stale": self.is_stale(now_mono, threshold_seconds),
+            "last_progress_age_seconds": round(max(0.0, now_mono - last_progress), 3),
+            "inflight_seconds": round(inflight_seconds, 3),
+            "last_cycle_duration_seconds": round(max(0.0, self._last_cycle_duration_seconds), 3),
+            "cycles_completed": self._cycles_completed,
+            "last_cycle_error": self._last_cycle_error,
+        }
 
     async def run(self) -> None:
         """Infinite per-trader loop.  Exits only when ``stop()`` is called."""
@@ -128,15 +161,23 @@ class _FastTraderTask:
                 break
             if not self._trader.get("is_enabled", True) or self._trader.get("is_paused", False):
                 continue
+            cycle_started_at = time.monotonic()
+            self._last_cycle_started_at = cycle_started_at
             try:
-                await asyncio.wait_for(self._run_once(), timeout=_CYCLE_HARD_BUDGET_SECONDS)
-            except asyncio.TimeoutError:
+                await self._run_once()
+                self._last_cycle_error = None
+            except asyncio.CancelledError:
+                self._last_cycle_error = "cancelled"
+                raise
+            except asyncio.TimeoutError as exc:
+                self._last_cycle_error = type(exc).__name__
                 logger.warning(
-                    "Fast trader cycle exceeded hard budget",
+                    "Fast trader cycle timed out",
                     trader_id=trader_id,
-                    budget_s=_CYCLE_HARD_BUDGET_SECONDS,
+                    exc_info=exc,
                 )
             except Exception as exc:
+                self._last_cycle_error = type(exc).__name__
                 if _is_retryable_db_error(exc):
                     logger.warning(
                         "Fast trader cycle hit retryable DB error",
@@ -145,6 +186,18 @@ class _FastTraderTask:
                     )
                 else:
                     logger.error("Fast trader cycle failed", trader_id=trader_id, exc_info=exc)
+            finally:
+                cycle_finished_at = time.monotonic()
+                self._last_cycle_finished_at = cycle_finished_at
+                self._last_cycle_duration_seconds = cycle_finished_at - cycle_started_at
+                self._cycles_completed += 1
+                if self._last_cycle_duration_seconds > _CYCLE_HARD_BUDGET_SECONDS:
+                    logger.warning(
+                        "Fast trader cycle exceeded hard budget",
+                        trader_id=trader_id,
+                        duration_s=round(self._last_cycle_duration_seconds, 3),
+                        budget_s=_CYCLE_HARD_BUDGET_SECONDS,
+                    )
         logger.info("Fast trader runtime stopped", trader_id=trader_id)
 
     def _accepted_sources(self) -> list[str]:
@@ -834,6 +887,12 @@ class _FastRuntime:
         if now_mono - self._last_heartbeat < _HEARTBEAT_INTERVAL_SECONDS:
             return
         self._last_heartbeat = now_mono
+        task_snapshots = {
+            trader_id: runner.snapshot(now_mono, _FAST_TASK_STALE_SECONDS)
+            for trader_id, runner in self._task_objs.items()
+        }
+        stale_count = sum(1 for snapshot in task_snapshots.values() if snapshot.get("stale"))
+        dead_count = sum(1 for task in self._tasks.values() if task.done())
         try:
             # Heartbeat uses the MAIN pool — the fast-tier pool is reserved
             # for the trading hot path, not worker-snapshot writes.  Keeping
@@ -844,15 +903,38 @@ class _FastRuntime:
                     WORKER_NAME,
                     running=True,
                     enabled=True,
-                    current_activity=f"Supervising {len(self._task_objs)} fast trader(s)",
+                    current_activity=(
+                        f"Supervising {len(self._task_objs)} fast trader(s); "
+                        f"stale={stale_count} dead={dead_count}"
+                    ),
                     interval_seconds=int(_TRADER_REFRESH_INTERVAL_SECONDS),
-                    stats={"fast_trader_count": len(self._task_objs)},
+                    stats={
+                        "fast_trader_count": len(self._task_objs),
+                        "stale_trader_tasks": stale_count,
+                        "dead_trader_tasks": dead_count,
+                        "task_snapshots": task_snapshots,
+                    },
                 )
         except DBAPIError as exc:
             if not _is_retryable_db_error(exc):
                 logger.debug("Fast runtime heartbeat failed", exc_info=exc)
         except Exception as exc:
             logger.debug("Fast runtime heartbeat failed", exc_info=exc)
+
+    async def _stop_task(self, trader_id: str, runner: _FastTraderTask | None, task: asyncio.Task | None) -> None:
+        if runner is not None:
+            runner.stop()
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await asyncio.wait_for(task, timeout=2.0)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            task.cancel()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Fast trader stopped with error", trader_id=trader_id, exc_info=exc)
 
     async def _refresh_roster(self) -> None:
         """Reconcile the set of running per-trader tasks with the DB roster."""
@@ -865,6 +947,7 @@ class _FastRuntime:
             async with AsyncSessionLocal() as session:
                 traders = await list_fast_traders(session)
             seen_ids: set[str] = set()
+            now_mono = time.monotonic()
             for trader in traders:
                 trader_id = str(trader.get("id") or "").strip()
                 if not trader_id:
@@ -874,7 +957,14 @@ class _FastRuntime:
                 existing_task = self._tasks.get(trader_id)
                 if existing is not None and existing_task is not None and not existing_task.done():
                     existing.refresh_trader(trader)
-                    continue
+                    if not existing.is_stale(now_mono, _FAST_TASK_STALE_SECONDS):
+                        continue
+                    logger.warning(
+                        "Restarting stale fast trader task",
+                        trader_id=trader_id,
+                        snapshot=existing.snapshot(now_mono, _FAST_TASK_STALE_SECONDS),
+                    )
+                    await self._stop_task(trader_id, existing, existing_task)
                 if existing is not None:
                     existing.stop()
                 if existing_task is not None and existing_task.done():
@@ -899,17 +989,9 @@ class _FastRuntime:
             stale_ids = [tid for tid in list(self._tasks.keys()) if tid not in seen_ids]
             for tid in stale_ids:
                 runner = self._task_objs.pop(tid, None)
-                if runner is not None:
-                    runner.stop()
                 task = self._tasks.pop(tid, None)
                 self._wake_events.pop(tid, None)
-                if task is not None:
-                    try:
-                        await asyncio.wait_for(task, timeout=2.0)
-                    except asyncio.TimeoutError:
-                        task.cancel()
-                    except Exception as exc:  # noqa: BLE001
-                        logger.debug("Fast trader stopped with error", trader_id=tid, exc_info=exc)
+                await self._stop_task(tid, runner, task)
 
     async def run(self) -> None:
         global _current_runtime
@@ -939,15 +1021,8 @@ class _FastRuntime:
                 await self._emit_heartbeat()
         finally:
             self._stopping = True
-            for runner in self._task_objs.values():
-                runner.stop()
-            for task in self._tasks.values():
-                try:
-                    await asyncio.wait_for(task, timeout=2.0)
-                except asyncio.TimeoutError:
-                    task.cancel()
-                except Exception:  # noqa: BLE001
-                    pass
+            for trader_id, runner in list(self._task_objs.items()):
+                await self._stop_task(trader_id, runner, self._tasks.get(trader_id))
             # Only clear the module pointer if we are still the current
             # runtime — a rapid restart may have already installed the next
             # instance by the time we reach finally.

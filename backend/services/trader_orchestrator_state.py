@@ -3865,6 +3865,21 @@ def _serialize_snapshot(row: TraderOrchestratorSnapshot) -> dict[str, Any]:
     }
 
 
+async def _apply_wallet_live_exposure_floor(session: AsyncSession, snapshot: dict[str, Any]) -> dict[str, Any]:
+    wallet_live_exposure = await get_gross_exposure(session, mode="live")
+    current_exposure = safe_float(snapshot.get("gross_exposure_usd"), 0.0) or 0.0
+    if wallet_live_exposure <= current_exposure:
+        return snapshot
+
+    patched = dict(snapshot)
+    stats = dict(patched.get("stats") or {})
+    patched["gross_exposure_usd"] = float(wallet_live_exposure)
+    stats["gross_exposure_usd"] = float(wallet_live_exposure)
+    stats["wallet_gross_exposure_floor_usd"] = float(wallet_live_exposure)
+    patched["stats"] = stats
+    return patched
+
+
 def _serialize_trader(row: Trader) -> dict[str, Any]:
     metadata = dict(row.metadata_json or {})
     metadata["resume_policy"] = _normalize_resume_policy(metadata.get("resume_policy"))
@@ -4470,7 +4485,7 @@ async def read_orchestrator_snapshot(session: AsyncSession) -> dict[str, Any]:
     runtime_snapshot = runtime_status.get_orchestrator()
     if os.environ.get("HOMERUN_PROCESS_ROLE") == "worker" and runtime_snapshot.get("updated_at") is not None:
         stats = dict(runtime_snapshot.get("stats") or {})
-        return {
+        return await _apply_wallet_live_exposure_floor(session, {
             "id": ORCHESTRATOR_SNAPSHOT_ID,
             "updated_at": runtime_snapshot.get("updated_at"),
             "last_run_at": runtime_snapshot.get("last_run_at"),
@@ -4487,8 +4502,8 @@ async def read_orchestrator_snapshot(session: AsyncSession) -> dict[str, Any]:
             "daily_pnl": float(stats.get("daily_pnl", 0.0) or 0.0),
             "last_error": runtime_snapshot.get("last_error"),
             "stats": stats,
-        }
-    return _serialize_snapshot(await ensure_orchestrator_snapshot(session))
+        })
+    return await _apply_wallet_live_exposure_floor(session, _serialize_snapshot(await ensure_orchestrator_snapshot(session)))
 
 
 async def update_orchestrator_control(session: AsyncSession, **updates: Any) -> dict[str, Any]:
@@ -4543,6 +4558,12 @@ async def write_orchestrator_snapshot(
     last_error: Optional[str] = None,
     stats: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
+    if isinstance(stats, dict):
+        wallet_live_exposure = await get_gross_exposure(session, mode="live")
+        if wallet_live_exposure > safe_float(stats.get("gross_exposure_usd"), 0.0):
+            stats = dict(stats)
+            stats["gross_exposure_usd"] = float(wallet_live_exposure)
+            stats["wallet_gross_exposure_floor_usd"] = float(wallet_live_exposure)
     persisted_stats = summarize_worker_stats(stats) if isinstance(stats, dict) else None
     runtime_status.update_orchestrator(
         running=running,
@@ -8600,17 +8621,42 @@ async def get_gross_exposure(session: AsyncSession, mode: Optional[str] = None) 
         else:
             query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
     rows = (await session.execute(query)).all()
-    return float(
-        sum(
-            _active_order_notional_for_metrics_fields(
-                mode=row.mode,
-                status=row.status,
-                notional_usd=row.notional_usd,
-                payload_json=row.payload_json,
-            )
-            for row in rows
+    live_order_exposure = 0.0
+    other_order_exposure = 0.0
+    for row in rows:
+        exposure = _active_order_notional_for_metrics_fields(
+            mode=row.mode,
+            status=row.status,
+            notional_usd=row.notional_usd,
+            payload_json=row.payload_json,
         )
-    )
+        if _normalize_mode_key(row.mode) == "live":
+            live_order_exposure += exposure
+        else:
+            other_order_exposure += exposure
+
+    wallet_live_exposure = 0.0
+    if mode is None or _normalize_mode_key(mode) == "live":
+        wallet_position_rows = (
+            await session.execute(
+                select(
+                    LiveTradingPosition.size,
+                    LiveTradingPosition.average_cost,
+                    LiveTradingPosition.current_price,
+                ).where(LiveTradingPosition.size > 0)
+            )
+        ).all()
+        for row in wallet_position_rows:
+            size = max(0.0, safe_float(row.size, 0.0) or 0.0)
+            average_cost = safe_float(row.average_cost, 0.0) or 0.0
+            current_price = safe_float(row.current_price, 0.0) or 0.0
+            price = average_cost if average_cost > 0.0 else current_price
+            if size > 0.0 and price > 0.0:
+                wallet_live_exposure += size * price
+
+    if mode is not None and _normalize_mode_key(mode) == "live":
+        return float(max(live_order_exposure, wallet_live_exposure))
+    return float(other_order_exposure + max(live_order_exposure, wallet_live_exposure))
 
 
 async def get_realized_pnl(

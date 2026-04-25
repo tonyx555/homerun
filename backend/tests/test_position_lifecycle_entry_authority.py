@@ -7,6 +7,8 @@ from services.trader_orchestrator.position_lifecycle import (
     _is_rapid_close_trigger,
     _live_position_notional_cap,
     _pending_exit_is_live_fallback_manual_exit,
+    _position_close_evidence_size,
+    _position_close_filled_size,
     _position_close_missing_terminal_fill_authority,
     _position_close_underfills_entry,
     _row_can_recover_entry_from_wallet_history,
@@ -185,6 +187,32 @@ def test_full_wallet_activity_close_can_terminal_entry():
     }
 
     assert not _position_close_underfills_entry(row, payload, position_close)
+
+
+def test_position_close_tracks_allocated_size_separately_from_wallet_evidence_size():
+    row = SimpleNamespace(
+        notional_usd=9.04187,
+        entry_price=0.877,
+        effective_price=0.877,
+    )
+    payload = {
+        "provider_reconciliation": {
+            "filled_size": 10.31,
+            "average_fill_price": 0.877,
+            "filled_notional_usd": 9.04187,
+        },
+    }
+    position_close = {
+        "price_source": "wallet_activity",
+        "close_trigger": "wallet_activity",
+        "filled_size": 10.31,
+        "wallet_activity_size": 10.31,
+        "wallet_activity_total_size": 20.62,
+    }
+
+    assert not _position_close_underfills_entry(row, payload, position_close)
+    assert _position_close_filled_size(position_close) == 10.31
+    assert _position_close_evidence_size(position_close) == 20.62
 
 
 def test_closed_live_trade_without_close_fill_authority_requires_repair():
