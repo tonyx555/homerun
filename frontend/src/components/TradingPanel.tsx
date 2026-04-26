@@ -5490,12 +5490,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [traderFlyoutMode, setTraderFlyoutMode] = useState<'create' | 'edit'>('create')
   const [draftName, setDraftName] = useState('')
   const [draftDescription, setDraftDescription] = useState('')
-  const [, setDraftStrategyKey] = useState(DEFAULT_STRATEGY_KEY)
-  const [draftSourceStrategies, setDraftSourceStrategies] = useState<Record<string, string>>({})
-  const [draftSourceStrategyVersions, setDraftSourceStrategyVersions] = useState<Record<string, number | null>>({})
+  const [draftStrategyKey, setDraftStrategyKey] = useState<string>(DEFAULT_STRATEGY_KEY)
+  const [draftStrategyVersion, setDraftStrategyVersion] = useState<number | null>(null)
+  const [draftStrategyParams, setDraftStrategyParams] = useState<Record<string, unknown>>({})
   const [draftInterval, setDraftInterval] = useState('60')
-  const [draftSources, setDraftSources] = useState('')
-  const [draftSourceStrategyParams, setDraftSourceStrategyParams] = useState<Record<string, Record<string, unknown>>>({})
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
   const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
@@ -5736,7 +5734,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => uniqueSourceList(sourceCatalog.map((source) => source.key)),
     [sourceCatalog]
   )
-  const defaultSourceCsv = useMemo(() => defaultSourceKeys.join(', '), [defaultSourceKeys])
 
   const traderIds = useMemo(() => traders.map((trader) => trader.id), [traders])
   const traderIdSet = useMemo(() => new Set(traderIds), [traderIds])
@@ -6011,28 +6008,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [allTraders, draftCopyFromMode]
   )
 
-  const selectedSourceKeySet = useMemo(
-    () => new Set(csvToList(draftSources).map((sourceKey) => normalizeSourceKey(sourceKey))),
-    [draftSources]
-  )
-
-  const selectedSourceCount = useMemo(
-    () => sourceCards.filter((source) => selectedSourceKeySet.has(normalizeSourceKey(source.key))).length,
-    [selectedSourceKeySet, sourceCards]
-  )
-
-  const effectiveDraftSources = useMemo(() => {
-    const out: string[] = []
-    const seen = new Set<string>()
-    for (const sourceKey of csvToList(draftSources)) {
-      const normalized = normalizeSourceKey(sourceKey)
-      if (!normalized || seen.has(normalized)) continue
-      seen.add(normalized)
-      out.push(normalized)
-    }
-    return out
-  }, [draftSources])
-
   const sourceStrategyDetailsByKey = useMemo(() => {
     const out: Record<string, StrategyOptionDetail[]> = {}
     for (const source of sourceCards) {
@@ -6040,14 +6015,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return out
   }, [sourceCards])
-
-  const sourceStrategyOptionsByKey = useMemo(() => {
-    const out: Record<string, StrategyOption[]> = {}
-    for (const [sourceKey, details] of Object.entries(sourceStrategyDetailsByKey)) {
-      out[sourceKey] = details.map((item) => ({ key: item.key, label: item.label }))
-    }
-    return out
-  }, [sourceStrategyDetailsByKey])
 
   const sourceStrategyDetailsLookup = useMemo(() => {
     const out: Record<string, Record<string, StrategyOptionDetail>> = {}
@@ -6060,42 +6027,57 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     return out
   }, [sourceStrategyDetailsByKey])
 
-  const effectiveSourceStrategies = useMemo(() => {
-    const out: Record<string, string> = {}
-    for (const sourceKey of effectiveDraftSources) {
-      const options = sourceStrategyOptionsByKey[sourceKey] || []
-      const configured = normalizeStrategyKey(draftSourceStrategies[sourceKey] || '')
-      const configuredExists = options.some((option) => option.key === configured)
-      out[sourceKey] = configuredExists
-        ? configured
-        : defaultStrategyForSource(sourceKey, sourceCards)
-    }
-    return out
-  }, [draftSourceStrategies, effectiveDraftSources, sourceCards, sourceStrategyOptionsByKey])
-  const effectiveSourceStrategyVersions = useMemo(() => {
-    const out: Record<string, number | null> = {}
-    for (const sourceKey of effectiveDraftSources) {
-      const strategyKey = effectiveSourceStrategies[sourceKey]
-      const detail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
-      const configured = normalizeStrategyVersion(draftSourceStrategyVersions[sourceKey])
-      if (!detail) {
-        out[sourceKey] = configured
-        continue
+  type StrategyCatalogOption = {
+    key: string
+    label: string
+    sourceKey: string
+    sourceLabel: string
+    detail: StrategyOptionDetail
+  }
+
+  const allStrategyOptions = useMemo<StrategyCatalogOption[]>(() => {
+    const out: StrategyCatalogOption[] = []
+    for (const source of sourceCards) {
+      const sourceKey = normalizeSourceKey(source.key)
+      const details = sourceStrategyDetailsByKey[sourceKey] || []
+      for (const detail of details) {
+        out.push({
+          key: detail.key,
+          label: detail.label,
+          sourceKey,
+          sourceLabel: source.label || sourceKey.toUpperCase(),
+          detail,
+        })
       }
-      const knownVersions = detail.versions
-      if (configured == null) {
-        out[sourceKey] = null
-        continue
-      }
-      out[sourceKey] = knownVersions.includes(configured) ? configured : null
     }
-    return out
-  }, [
-    draftSourceStrategyVersions,
-    effectiveDraftSources,
-    effectiveSourceStrategies,
-    sourceStrategyDetailsLookup,
-  ])
+    return out.sort((left, right) => {
+      if (left.sourceLabel !== right.sourceLabel) return left.sourceLabel.localeCompare(right.sourceLabel)
+      return left.label.localeCompare(right.label)
+    })
+  }, [sourceCards, sourceStrategyDetailsByKey])
+
+  const strategyOptionByKey = useMemo(() => {
+    const map = new Map<string, StrategyCatalogOption>()
+    for (const opt of allStrategyOptions) map.set(opt.key, opt)
+    return map
+  }, [allStrategyOptions])
+
+  const draftStrategyOption = useMemo(
+    () => strategyOptionByKey.get(normalizeStrategyKey(draftStrategyKey)) || null,
+    [strategyOptionByKey, draftStrategyKey]
+  )
+
+  const effectiveDraftSourceKey = draftStrategyOption?.sourceKey || ''
+
+  const effectiveDraftStrategyDetail = draftStrategyOption?.detail || null
+
+  const effectiveDraftStrategyVersion = useMemo<number | null>(() => {
+    const detail = effectiveDraftStrategyDetail
+    const configured = normalizeStrategyVersion(draftStrategyVersion)
+    if (!detail) return configured
+    if (configured == null) return null
+    return detail.versions.includes(configured) ? configured : null
+  }, [draftStrategyVersion, effectiveDraftStrategyDetail])
 
   const riskFormSchema = useMemo(
     () => ({
@@ -6168,102 +6150,89 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         .sort((left, right) => left.label.localeCompare(right.label)),
     [tradersScopeGroups]
   )
-  const draftSourceParamsByKey = useMemo(() => {
-    const next: Record<string, Record<string, unknown>> = {}
-    for (const [sourceKey, params] of Object.entries(draftSourceStrategyParams)) {
-      const normalizedSource = normalizeSourceKey(sourceKey)
-      if (!normalizedSource) continue
-      next[normalizedSource] = cloneStrategyParamsRecord(params)
-    }
-    return next
-  }, [draftSourceStrategyParams])
   const parsedDraftRisk = useMemo(() => parseJsonObject(draftRisk || '{}'), [draftRisk])
   const parsedDraftMetadata = useMemo(() => parseJsonObject(draftMetadata || '{}'), [draftMetadata])
   const dynamicStrategyParamSections = useMemo(() => {
     const sections: DynamicStrategyParamSection[] = []
 
-    for (const sourceKey of effectiveDraftSources) {
-      const strategyKey = normalizeStrategyKey(
-        normalizeStrategyKeyForSource(
-          sourceKey,
-          effectiveSourceStrategies[sourceKey] || defaultStrategyForSource(sourceKey, sourceCards),
-        ),
-      )
-      const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
-      if (!strategyDetail || !Array.isArray(strategyDetail.paramFields)) continue
-
-      const decoratedParamFields = strategyDetail.paramFields.map((field) => {
-        if (!isRecord(field)) return field
-        if (sourceKey !== 'traders' || strategyKey !== 'traders_copy_trade') return field
-        const fieldKey = String(field.key || '').trim()
-        if (fieldKey !== 'traders_scope') return field
-        const properties = Array.isArray(field.properties) ? field.properties : []
-        const nextProperties = properties.map((property) => {
-          if (!isRecord(property)) return property
-          const propertyKey = String(property.key || '').trim()
-          if (propertyKey === 'individual_wallets' && tradersScopeWalletOptions.length > 0) {
-            return {
-              ...property,
-              options: tradersScopeWalletOptions,
-            }
-          }
-          if (propertyKey === 'group_ids' && tradersScopeGroupOptions.length > 0) {
-            return {
-              ...property,
-              options: tradersScopeGroupOptions,
-            }
-          }
-          return property
-        })
-        return {
-          ...field,
-          properties: nextProperties,
-        }
-      })
-
-      const filteredFields = decoratedParamFields.filter((field): field is Record<string, unknown> => {
-        if (!isRecord(field)) return false
-        const key = String(field.key || '').trim()
-        return Boolean(key)
-      })
-      if (filteredFields.length === 0) continue
-
-      const fieldKeys = filteredFields
-        .map((field) => String(field.key || '').trim())
-        .filter(Boolean)
-      if (fieldKeys.length === 0) continue
-
-      const merged = buildSourceStrategyParams(
-        draftSourceParamsByKey[sourceKey] || {},
-        sourceKey,
-        strategyDetail,
-      )
-      const values: Record<string, unknown> = {}
-      for (const fieldKey of fieldKeys) {
-        if (Object.prototype.hasOwnProperty.call(merged, fieldKey)) {
-          values[fieldKey] = merged[fieldKey]
-        }
-      }
-
-      const sourceLabel = sourceCards.find((source) => normalizeSourceKey(source.key) === sourceKey)?.label || sourceKey.toUpperCase()
-      sections.push({
-        sectionKey: `${sourceKey}:${strategyKey}`,
-        sourceKey,
-        sourceLabel,
-        strategyLabel: strategyDetail.label || strategyLabelForKey(strategyKey, sourceCards),
-        groups: groupStrategyParamFields(filteredFields),
-        fieldKeys,
-        values,
-      })
+    const sourceKey = effectiveDraftSourceKey
+    const strategyDetail = effectiveDraftStrategyDetail
+    const strategyKey = normalizeStrategyKey(draftStrategyKey)
+    if (!sourceKey || !strategyDetail || !Array.isArray(strategyDetail.paramFields)) {
+      return sections
     }
+
+    const decoratedParamFields = strategyDetail.paramFields.map((field) => {
+      if (!isRecord(field)) return field
+      if (sourceKey !== 'traders' || strategyKey !== 'traders_copy_trade') return field
+      const fieldKey = String(field.key || '').trim()
+      if (fieldKey !== 'traders_scope') return field
+      const properties = Array.isArray(field.properties) ? field.properties : []
+      const nextProperties = properties.map((property) => {
+        if (!isRecord(property)) return property
+        const propertyKey = String(property.key || '').trim()
+        if (propertyKey === 'individual_wallets' && tradersScopeWalletOptions.length > 0) {
+          return {
+            ...property,
+            options: tradersScopeWalletOptions,
+          }
+        }
+        if (propertyKey === 'group_ids' && tradersScopeGroupOptions.length > 0) {
+          return {
+            ...property,
+            options: tradersScopeGroupOptions,
+          }
+        }
+        return property
+      })
+      return {
+        ...field,
+        properties: nextProperties,
+      }
+    })
+
+    const filteredFields = decoratedParamFields.filter((field): field is Record<string, unknown> => {
+      if (!isRecord(field)) return false
+      const key = String(field.key || '').trim()
+      return Boolean(key)
+    })
+    if (filteredFields.length === 0) return sections
+
+    const fieldKeys = filteredFields
+      .map((field) => String(field.key || '').trim())
+      .filter(Boolean)
+    if (fieldKeys.length === 0) return sections
+
+    const merged = buildSourceStrategyParams(
+      cloneStrategyParamsRecord(draftStrategyParams),
+      sourceKey,
+      strategyDetail,
+    )
+    const values: Record<string, unknown> = {}
+    for (const fieldKey of fieldKeys) {
+      if (Object.prototype.hasOwnProperty.call(merged, fieldKey)) {
+        values[fieldKey] = merged[fieldKey]
+      }
+    }
+
+    const sourceLabel = sourceCards.find((source) => normalizeSourceKey(source.key) === sourceKey)?.label || sourceKey.toUpperCase()
+    sections.push({
+      sectionKey: `${sourceKey}:${strategyKey}`,
+      sourceKey,
+      sourceLabel,
+      strategyLabel: strategyDetail.label || strategyLabelForKey(strategyKey, sourceCards),
+      groups: groupStrategyParamFields(filteredFields),
+      fieldKeys,
+      values,
+    })
 
     return sections
   }, [
-    draftSourceParamsByKey,
-    effectiveDraftSources,
-    effectiveSourceStrategies,
+    draftStrategyKey,
+    draftStrategyParams,
+    effectiveDraftSourceKey,
+    effectiveDraftStrategyDetail,
     sourceCards,
-    sourceStrategyDetailsLookup,
     tradersScopeGroupOptions,
     tradersScopeWalletOptions,
   ])
@@ -6283,105 +6252,18 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => (isRecord(parsedDraftRisk.value) ? parsedDraftRisk.value : {}),
     [parsedDraftRisk.value]
   )
-  const setSourceStrategy = (sourceKey: string, strategyKey: string) => {
-    const normalizedSource = normalizeSourceKey(sourceKey)
-    const normalizedStrategy = normalizeStrategyKeyForSource(normalizedSource, strategyKey)
-    const strategyDetail = sourceStrategyDetailsLookup[normalizedSource]?.[normalizedStrategy] || null
-    setDraftSourceStrategies((current) => ({
-      ...current,
-      [normalizedSource]: normalizedStrategy,
-    }))
-    setDraftSourceStrategyVersions((current) => ({
-      ...current,
-      [normalizedSource]: null,
-    }))
-    setDraftSourceStrategyParams((current) => ({
-      ...current,
-      [normalizedSource]: buildSourceStrategyParams({}, normalizedSource, strategyDetail),
-    }))
-    if (normalizedSource === 'crypto') {
-      setDraftStrategyKey(normalizedStrategy)
-    }
+  const setDraftStrategy = (strategyKey: string) => {
+    const normalized = normalizeStrategyKey(strategyKey)
+    const opt = strategyOptionByKey.get(normalized)
+    setDraftStrategyKey(normalized)
+    setDraftStrategyVersion(null)
+    setDraftStrategyParams(
+      opt ? buildSourceStrategyParams({}, opt.sourceKey, opt.detail) : {},
+    )
   }
 
-  const setSourceStrategyVersion = (sourceKey: string, versionValue: string) => {
-    const normalizedSource = normalizeSourceKey(sourceKey)
-    const parsedVersion = normalizeStrategyVersion(versionValue)
-    setDraftSourceStrategyVersions((current) => ({
-      ...current,
-      [normalizedSource]: parsedVersion,
-    }))
-  }
-
-  const toggleDraftSource = (sourceKey: string) => {
-    setDraftSources((current) => {
-      const currentList = csvToList(current)
-      const normalizedTarget = normalizeSourceKey(sourceKey)
-      const hasTarget = currentList.some((item) => normalizeSourceKey(item) === normalizedTarget)
-      const next = hasTarget
-        ? currentList.filter((item) => normalizeSourceKey(item) !== normalizedTarget)
-        : [...currentList, sourceKey]
-      return uniqueSourceList(next).join(', ')
-    })
-    const normalizedTarget = normalizeSourceKey(sourceKey)
-    const hasTarget = effectiveDraftSources.includes(normalizedTarget)
-    if (hasTarget) {
-      setDraftSourceStrategies((current) => {
-        const next = { ...current }
-        delete next[normalizedTarget]
-        return next
-      })
-      setDraftSourceStrategyVersions((current) => {
-        const next = { ...current }
-        delete next[normalizedTarget]
-        return next
-      })
-      setDraftSourceStrategyParams((current) => {
-        const next = { ...current }
-        delete next[normalizedTarget]
-        return next
-      })
-    } else {
-      const defaultStrategy = defaultStrategyForSource(normalizedTarget, sourceCards)
-      setDraftSourceStrategies((current) => ({ ...current, [normalizedTarget]: defaultStrategy }))
-      setDraftSourceStrategyVersions((current) => ({ ...current, [normalizedTarget]: null }))
-      setDraftSourceStrategyParams((current) => ({
-        ...current,
-        [normalizedTarget]: buildSourceStrategyParams(
-          {},
-          normalizedTarget,
-          sourceStrategyDetailsLookup[normalizedTarget]?.[defaultStrategy] || null,
-        ),
-      }))
-    }
-  }
-
-  const enableAllSourceCards = () => {
-    setDraftSources(uniqueSourceList(sourceCards.map((source) => source.key)).join(', '))
-    const next: Record<string, string> = {}
-    const nextVersions: Record<string, number | null> = {}
-    const nextParams: Record<string, Record<string, unknown>> = {}
-    for (const source of sourceCards) {
-      const sourceKey = normalizeSourceKey(source.key)
-      const strategyKey = defaultStrategyForSource(sourceKey, sourceCards)
-      next[sourceKey] = strategyKey
-      nextVersions[sourceKey] = null
-      nextParams[sourceKey] = buildSourceStrategyParams(
-        {},
-        sourceKey,
-        sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null,
-      )
-    }
-    setDraftSourceStrategies(next)
-    setDraftSourceStrategyVersions(nextVersions)
-    setDraftSourceStrategyParams(nextParams)
-  }
-
-  const disableAllSourceCards = () => {
-    setDraftSources('')
-    setDraftSourceStrategies({})
-    setDraftSourceStrategyVersions({})
-    setDraftSourceStrategyParams({})
+  const setDraftStrategyVersionFromValue = (versionValue: string) => {
+    setDraftStrategyVersion(normalizeStrategyVersion(versionValue))
   }
 
   useEffect(() => {
@@ -6441,27 +6323,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     options: { preserveName?: boolean; preserveCopyFrom?: boolean; preserveMode?: boolean } = {}
   ) => {
     const traderSourceConfigs = Array.isArray(trader.source_configs) ? trader.source_configs : []
-    const normalizedSourceKeys = uniqueSourceList(
-      traderSourceConfigs.map((config) => normalizeSourceKey(String(config.source_key || '')))
-    )
-    const sourceStrategyMap: Record<string, string> = {}
-    const sourceVersionMap: Record<string, number | null> = {}
-    const sourceParamMap: Record<string, Record<string, unknown>> = {}
-    for (const config of traderSourceConfigs) {
-      const sourceKey = normalizeSourceKey(String(config.source_key || ''))
-      if (!sourceKey) continue
-      const strategyKey = normalizeStrategyKeyForSource(
-        sourceKey,
-        config.strategy_key || defaultStrategyForSource(sourceKey, sourceCards)
-      )
-      sourceStrategyMap[sourceKey] = strategyKey
-      sourceVersionMap[sourceKey] = normalizeStrategyVersion(config.strategy_version)
-      sourceParamMap[sourceKey] = buildSourceStrategyParams(
-        cloneStrategyParamsRecord(config.strategy_params),
-        sourceKey,
-        sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null,
-      )
-    }
+    const primaryConfig = traderSourceConfigs[0] || null
+    const primarySourceKey = primaryConfig
+      ? normalizeSourceKey(String(primaryConfig.source_key || ''))
+      : ''
+    const primaryStrategyKey = primaryConfig
+      ? normalizeStrategyKeyForSource(
+          primarySourceKey,
+          primaryConfig.strategy_key || defaultStrategyForSource(primarySourceKey, sourceCards),
+        )
+      : DEFAULT_STRATEGY_KEY
+    const primaryStrategyDetail = primarySourceKey
+      ? sourceStrategyDetailsLookup[primarySourceKey]?.[primaryStrategyKey] || null
+      : null
+    const primaryStrategyVersion = primaryConfig
+      ? normalizeStrategyVersion(primaryConfig.strategy_version)
+      : null
+    const primaryStrategyParams = primaryConfig
+      ? buildSourceStrategyParams(
+          cloneStrategyParamsRecord(primaryConfig.strategy_params),
+          primarySourceKey,
+          primaryStrategyDetail,
+        )
+      : {}
 
     if (!options.preserveName) {
       setDraftName(trader.name)
@@ -6471,12 +6355,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       setDraftMode(trader.mode === 'live' ? 'live' : 'shadow')
     }
     setDraftLatencyClass((trader.latency_class === 'fast' || trader.latency_class === 'slow') ? trader.latency_class : 'normal')
-    setDraftStrategyKey(normalizeStrategyKey(sourceStrategyMap.crypto || DEFAULT_STRATEGY_KEY))
-    setDraftSourceStrategies(sourceStrategyMap)
-    setDraftSourceStrategyVersions(sourceVersionMap)
-    setDraftSourceStrategyParams(sourceParamMap)
+    setDraftStrategyKey(normalizeStrategyKey(primaryStrategyKey))
+    setDraftStrategyVersion(primaryStrategyVersion)
+    setDraftStrategyParams(primaryStrategyParams)
     setDraftInterval(String(trader.interval_seconds || 60))
-    setDraftSources(normalizedSourceKeys.join(', ') || defaultSourceCsv)
     const risk = trader.risk_limits || {}
     const metadata = trader.metadata || {}
     setDraftRisk(JSON.stringify(risk, null, 2))
@@ -6531,33 +6413,21 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const openCreateTraderFlyout = () => {
-    const defaultSources = defaultSourceKeys.length > 0 ? defaultSourceKeys.map((key) => normalizeSourceKey(key)) : ['crypto']
-    const defaultStrategies = Object.fromEntries(
-      defaultSources.map((sourceKey) => [sourceKey, defaultStrategyForSource(sourceKey, sourceCards)])
-    ) as Record<string, string>
-    const defaultStrategyVersions = Object.fromEntries(
-      defaultSources.map((sourceKey) => [sourceKey, null])
-    ) as Record<string, number | null>
+    const fallbackSourceKey = defaultSourceKeys.length > 0 ? normalizeSourceKey(defaultSourceKeys[0]) : 'crypto'
+    const fallbackStrategyKey = normalizeStrategyKey(
+      defaultStrategyForSource(fallbackSourceKey, sourceCards) || DEFAULT_STRATEGY_KEY,
+    )
+    const fallbackStrategyDetail =
+      sourceStrategyDetailsLookup[fallbackSourceKey]?.[fallbackStrategyKey] || null
     setTraderFlyoutMode('create')
     setDraftName('')
     setDraftDescription('')
-    setDraftStrategyKey(normalizeStrategyKey(defaultStrategies.crypto || DEFAULT_STRATEGY_KEY))
-    setDraftSourceStrategies(defaultStrategies)
-    setDraftSourceStrategyVersions(defaultStrategyVersions)
-    setDraftSourceStrategyParams(
-      Object.fromEntries(
-        defaultSources.map((sourceKey) => [
-          sourceKey,
-          buildSourceStrategyParams(
-            {},
-            sourceKey,
-            sourceStrategyDetailsLookup[sourceKey]?.[defaultStrategies[sourceKey]] || null,
-          ),
-        ]),
-      ) as Record<string, Record<string, unknown>>
+    setDraftStrategyKey(fallbackStrategyKey)
+    setDraftStrategyVersion(null)
+    setDraftStrategyParams(
+      buildSourceStrategyParams({}, fallbackSourceKey, fallbackStrategyDetail),
     )
     setDraftInterval('5')
-    setDraftSources(defaultSources.join(', '))
     setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
     setDraftMetadata('{}')
     setDraftMode(selectedAccountMode)
@@ -6610,31 +6480,28 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const applyDynamicStrategyFormValues = (
-    sourceKey: string,
+    _sourceKey: string,
     fieldKeys: string[],
     values: Record<string, unknown>,
   ) => {
-    const normalizedSource = normalizeSourceKey(sourceKey)
     setTuneDraftDirty(true)
     setTuneSaveError(null)
     setTuneRevertError(null)
-    setDraftSourceStrategyParams((current) => {
-      const next = { ...current }
-      const nextValues = cloneStrategyParamsRecord(current[normalizedSource])
+    setDraftStrategyParams((current) => {
+      const next = cloneStrategyParamsRecord(current)
       for (const key of fieldKeys) {
         if (!Object.prototype.hasOwnProperty.call(values, key)) continue
         const value = values[key]
         if (value === undefined) {
-          delete nextValues[key]
+          delete next[key]
           continue
         }
         if (key === 'traders_scope') {
-          nextValues[key] = normalizeTradersScopeConfig(value)
+          next[key] = normalizeTradersScopeConfig(value)
         } else {
-          nextValues[key] = value
+          next[key] = value
         }
       }
-      next[normalizedSource] = nextValues
       return next
     })
   }
@@ -6679,36 +6546,25 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   }
 
   const buildDraftSourceConfigs = (
-    sourceParamMap: Record<string, Record<string, unknown>>,
+    overrideParams?: Record<string, unknown>,
   ): TraderSourceConfig[] => {
-    const configs: TraderSourceConfig[] = []
-    for (const sourceKey of effectiveDraftSources) {
-      const strategyKey = normalizeStrategyKey(
-        normalizeStrategyKeyForSource(
-          sourceKey,
-          effectiveSourceStrategies[sourceKey] || defaultStrategyForSource(sourceKey, sourceCards)
-        )
-      )
-      const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[strategyKey] || null
-      const strategyVersion = normalizeStrategyVersion(effectiveSourceStrategyVersions[sourceKey])
-      const nextConfig: TraderSourceConfig = {
-        source_key: sourceKey,
-        strategy_key: strategyKey,
-        strategy_version: strategyVersion,
-        strategy_params: buildSourceStrategyParams(
-          cloneStrategyParamsRecord(sourceParamMap[sourceKey]),
-          sourceKey,
-          strategyDetail,
-        ),
-      }
-      configs.push(nextConfig)
-    }
-    return configs
+    const opt = strategyOptionByKey.get(normalizeStrategyKey(draftStrategyKey))
+    if (!opt) return []
+    const params = overrideParams !== undefined
+      ? cloneStrategyParamsRecord(overrideParams)
+      : cloneStrategyParamsRecord(draftStrategyParams)
+    const strategyVersion = normalizeStrategyVersion(effectiveDraftStrategyVersion)
+    return [{
+      source_key: opt.sourceKey,
+      strategy_key: normalizeStrategyKey(opt.key),
+      strategy_version: strategyVersion,
+      strategy_params: buildSourceStrategyParams(params, opt.sourceKey, opt.detail),
+    }]
   }
 
   const validateDraftSourceConfigs = (configs: TraderSourceConfig[]) => {
     if (configs.length === 0) {
-      throw new Error('Enable at least one source.')
+      throw new Error('Choose a strategy.')
     }
     const tradersConfig = configs.find((config) => normalizeSourceKey(String(config.source_key || '')) === 'traders') || null
     if (!tradersConfig) return
@@ -7280,7 +7136,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!selectedTrader) {
         throw new Error('Select a bot before saving tune parameters.')
       }
-      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      const sourceConfigs = buildDraftSourceConfigs()
       validateDraftSourceConfigs(sourceConfigs)
       return updateTrader(selectedTrader.id, {
         source_configs: sourceConfigs,
@@ -7420,7 +7276,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!parsedMetadata.value) {
         throw new Error(`Metadata JSON error: ${parsedMetadata.error || 'invalid object'}`)
       }
-      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      const sourceConfigs = buildDraftSourceConfigs()
       validateDraftSourceConfigs(sourceConfigs)
 
       const payload: Record<string, unknown> = {
@@ -7478,7 +7334,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!parsedMetadata.value) {
         throw new Error(`Metadata JSON error: ${parsedMetadata.error || 'invalid object'}`)
       }
-      const sourceConfigs = buildDraftSourceConfigs(draftSourceParamsByKey)
+      const sourceConfigs = buildDraftSourceConfigs()
       validateDraftSourceConfigs(sourceConfigs)
 
       return updateTrader(traderId, {
@@ -12903,7 +12759,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 <FlyoutSection
                   title="Bot Profile"
                   icon={Sparkles}
-                  subtitle="Name this bot and configure source-specific execution strategies below."
+                  subtitle="Name this bot. The strategy and source are configured below."
                 >
                   <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2">
                     <div className="flex items-center justify-between gap-2">
@@ -13002,121 +12858,91 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 </FlyoutSection>
 
                 <FlyoutSection
-                  title="Signal Sources"
+                  title="Strategy"
                   icon={Zap}
-                  count={`${selectedSourceCount}/${sourceCards.length || sourceCatalog.length} enabled`}
-                  subtitle="Toggle signal sources this bot should consume."
+                  subtitle="Pick the strategy this bot will run. The signal source is derived from the strategy."
                 >
-                  <div className="flex flex-wrap items-center gap-1.5 mb-2">
-                    <Button type="button" size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={enableAllSourceCards}>
-                      Enable all
-                    </Button>
-                    <Button type="button" size="sm" variant="outline" className="h-6 px-2 text-[11px]" onClick={disableAllSourceCards}>
-                      Disable all
-                    </Button>
-                  </div>
-
-                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {sourceCards.map((source) => {
-                      const sourceKey = normalizeSourceKey(source.key)
-                      const isEnabled = selectedSourceKeySet.has(sourceKey)
-                      const strategyOptions = sourceStrategyOptionsByKey[sourceKey] || []
-                      const selectedStrategy = effectiveSourceStrategies[sourceKey] || defaultStrategyForSource(sourceKey, sourceCards)
-                      const strategyDetail = sourceStrategyDetailsLookup[sourceKey]?.[selectedStrategy] || null
-                      const latestVersion = strategyDetail?.latestVersion ?? strategyDetail?.version ?? null
-                      const selectedVersion = effectiveSourceStrategyVersions[sourceKey]
-                      const selectedVersionToken = selectedVersion == null ? 'latest' : `v${selectedVersion}`
-                      const availableVersions = (() => {
-                        const rows = normalizeVersionList(strategyDetail?.versions || [])
-                        if (latestVersion != null && !rows.includes(latestVersion)) {
-                          rows.unshift(latestVersion)
-                        }
-                        if (selectedVersion != null && !rows.includes(selectedVersion)) {
-                          rows.unshift(selectedVersion)
-                        }
-                        return rows
-                      })()
-                      return (
-                        <div
-                          key={source.key}
-                          className={cn(
-                            'rounded-lg border px-2.5 py-2 text-left transition-colors',
-                            isEnabled
-                              ? 'border-emerald-500/40 bg-emerald-500/10'
-                              : 'border-border/70 bg-background hover:border-emerald-500/30 hover:bg-muted/40'
-                          )}
-                        >
-                          <button
-                            type="button"
-                            onClick={() => toggleDraftSource(source.key)}
-                            className="w-full text-left"
+                  {(() => {
+                    const detail = effectiveDraftStrategyDetail
+                    const sourceKey = effectiveDraftSourceKey
+                    const sourceLabel = draftStrategyOption?.sourceLabel || sourceKey.toUpperCase()
+                    const latestVersion = detail?.latestVersion ?? detail?.version ?? null
+                    const selectedVersion = effectiveDraftStrategyVersion
+                    const selectedVersionToken = selectedVersion == null ? 'latest' : `v${selectedVersion}`
+                    const availableVersions = (() => {
+                      const rows = normalizeVersionList(detail?.versions || [])
+                      if (latestVersion != null && !rows.includes(latestVersion)) rows.unshift(latestVersion)
+                      if (selectedVersion != null && !rows.includes(selectedVersion)) rows.unshift(selectedVersion)
+                      return rows
+                    })()
+                    return (
+                      <>
+                        <div>
+                          <Label>Strategy</Label>
+                          <Select
+                            value={normalizeStrategyKey(draftStrategyKey)}
+                            onValueChange={setDraftStrategy}
                           >
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-xs font-medium leading-tight">{source.label}</p>
-                              <span
-                                className={cn(
-                                  'rounded-full px-1.5 py-0.5 text-[9px] font-semibold',
-                                  isEnabled ? 'bg-emerald-500/20 text-emerald-600' : 'bg-muted text-muted-foreground'
-                                )}
+                            <SelectTrigger className="mt-1">
+                              <SelectValue placeholder="Choose a strategy" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {allStrategyOptions.map((option) => (
+                                <SelectItem key={option.key} value={option.key}>
+                                  <span>{option.label}</span>
+                                  <span className="ml-2 text-muted-foreground/70 text-[10px]">
+                                    {option.sourceLabel}
+                                  </span>
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/80">
+                            <span>Source:</span>
+                            <Badge
+                              variant="outline"
+                              className="h-4 px-1.5 text-[9px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
+                            >
+                              {sourceLabel || 'AUTO'}
+                            </Badge>
+                            <span className="text-muted-foreground/60">auto-derived from strategy</span>
+                          </div>
+                        </div>
+
+                        {detail ? (
+                          <div className="mt-3">
+                            <Label>Version</Label>
+                            <div className="mt-1 flex min-w-0 items-center gap-1.5">
+                              <Badge
+                                variant="outline"
+                                className="h-5 min-w-0 flex-1 truncate px-1.5 text-[10px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
                               >
-                                {isEnabled ? 'ON' : 'OFF'}
-                              </span>
-                            </div>
-                            <p className="mt-1 text-[10px] leading-tight text-muted-foreground/75">
-                              {source.description}
-                            </p>
-                          </button>
-                          {isEnabled && strategyOptions.length > 0 ? (
-                            <div className="mt-2">
-                              <Label className="text-[10px] text-muted-foreground uppercase tracking-wide">Strategy</Label>
+                                {latestVersion != null ? `Latest v${latestVersion}` : 'Latest'}
+                              </Badge>
                               <Select
-                                value={selectedStrategy}
-                                onValueChange={(value) => setSourceStrategy(sourceKey, value)}
+                                value={selectedVersionToken}
+                                onValueChange={setDraftStrategyVersionFromValue}
                               >
-                                <SelectTrigger className="mt-1 h-7 text-xs">
+                                <SelectTrigger className="h-7 w-[160px] shrink-0 text-[10px] font-mono">
                                   <SelectValue />
                                 </SelectTrigger>
                                 <SelectContent>
-                                  {strategyOptions.map((option) => (
-                                    <SelectItem key={option.key} value={option.key}>
-                                      {option.label}
+                                  <SelectItem value="latest">
+                                    {latestVersion != null ? `latest (v${latestVersion})` : 'latest'}
+                                  </SelectItem>
+                                  {availableVersions.map((version) => (
+                                    <SelectItem key={`v${version}`} value={`v${version}`}>
+                                      {`v${version}`}
                                     </SelectItem>
                                   ))}
                                 </SelectContent>
                               </Select>
-                              <div className="mt-1.5 flex min-w-0 items-center gap-1.5">
-                                <Badge
-                                  variant="outline"
-                                  className="h-4 min-w-0 flex-1 truncate px-1.5 text-[9px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
-                                >
-                                  {latestVersion != null ? `Latest v${latestVersion}` : 'Latest'}
-                                </Badge>
-                                <Select
-                                  value={selectedVersionToken}
-                                  onValueChange={(value) => setSourceStrategyVersion(sourceKey, value)}
-                                >
-                                  <SelectTrigger className="h-7 w-[142px] shrink-0 text-[10px] font-mono">
-                                    <SelectValue />
-                                  </SelectTrigger>
-                                  <SelectContent>
-                                    <SelectItem value="latest">
-                                      {latestVersion != null ? `latest (v${latestVersion})` : 'latest'}
-                                    </SelectItem>
-                                    {availableVersions.map((version) => (
-                                      <SelectItem key={`${sourceKey}-${selectedStrategy}-v${version}`} value={`v${version}`}>
-                                        {`v${version}`}
-                                      </SelectItem>
-                                    ))}
-                                  </SelectContent>
-                                </Select>
-                              </div>
                             </div>
-                          ) : null}
-                        </div>
-                      )
-                    })}
-                  </div>
-
+                          </div>
+                        ) : null}
+                      </>
+                    )
+                  })()}
                 </FlyoutSection>
 
                 <FlyoutSection
@@ -13454,7 +13280,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 disabled={
                   traderFlyoutBusy ||
                   !draftName.trim() ||
-                  (traderFlyoutMode === 'create' && !draftCopyFromTraderId && effectiveDraftSources.length === 0)
+                  (traderFlyoutMode === 'create' && !draftCopyFromTraderId && !effectiveDraftSourceKey)
                 }
               >
                 {traderFlyoutMode === 'create' ? 'Create Bot' : 'Save Bot'}
