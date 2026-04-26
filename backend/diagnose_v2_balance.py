@@ -9,8 +9,6 @@ Reports which SDK is loaded, which CLOB URL is configured, and pings
 credentials so we can see exactly where your funds are.
 """
 import asyncio
-import json
-import sys
 
 
 def fmt_amt(raw: object) -> str:
@@ -75,7 +73,7 @@ async def main() -> None:
                     api_key = api_key or decrypt_secret(getattr(row, "polymarket_api_key", None))
                     api_secret = api_secret or decrypt_secret(getattr(row, "polymarket_api_secret", None))
                     api_passphrase = api_passphrase or decrypt_secret(getattr(row, "polymarket_api_passphrase", None))
-                    print(f"[OK]   Loaded credentials from DB")
+                    print("[OK]   Loaded credentials from DB")
         except Exception as exc:
             print(f"[WARN] DB credential load failed: {exc}")
 
