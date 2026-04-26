@@ -10,7 +10,7 @@ from enum import Enum
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,6 +153,19 @@ class TraderRequest(BaseModel):
     requested_by: Optional[str] = None
     reason: Optional[str] = None
 
+    @field_validator("source_configs")
+    @classmethod
+    def _enforce_single_source_config(
+        cls, value: list[TraderSourceConfigRequest]
+    ) -> list[TraderSourceConfigRequest]:
+        # A trader runs exactly one strategy on one source. Reject anything else.
+        if len(value) > 1:
+            raise ValueError(
+                "source_configs must contain exactly one entry "
+                "(a trader runs one strategy on one source)"
+            )
+        return value
+
 
 class TraderPatchRequest(BaseModel):
     name: Optional[str] = None
@@ -167,6 +180,20 @@ class TraderPatchRequest(BaseModel):
     is_paused: Optional[bool] = None
     requested_by: Optional[str] = None
     reason: Optional[str] = None
+
+    @field_validator("source_configs")
+    @classmethod
+    def _enforce_single_source_config(
+        cls, value: Optional[list[TraderSourceConfigRequest]]
+    ) -> Optional[list[TraderSourceConfigRequest]]:
+        if value is None:
+            return value
+        if len(value) > 1:
+            raise ValueError(
+                "source_configs must contain exactly one entry "
+                "(a trader runs one strategy on one source)"
+            )
+        return value
 
 
 class TraderTemplateCreateRequest(BaseModel):
@@ -546,84 +573,120 @@ async def get_all_trader_orders_all(
     status: Optional[str] = Query(default=None),
     limit: int = Query(default=500, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
-    session: AsyncSession = Depends(get_db_session),
+    since_seconds: int = Query(
+        default=14 * 24 * 3600,
+        ge=0,
+        le=365 * 24 * 3600,
+        description=(
+            "Cap the historical window by age in seconds (default 14 days, "
+            "matching the bots-overview chart window).  Open orders are "
+            "always returned unbounded; only the paginated historical tail "
+            "is date-filtered.  Pass 0 to disable the cap."
+        ),
+    ),
 ):
-    orders = await list_serialized_trader_orders(
-        session,
-        trader_id=None,
-        status=status,
-        limit=limit,
-        offset=offset,
-    )
-    return {
-        "orders": orders,
-        "limit": limit,
-        "offset": offset,
-    }
+    # Cache key includes pagination + status + window so different
+    # views don't cross-contaminate.  See ``_TTLCache`` above for why
+    # this route does not declare a session dependency.
+    cache_key = f"{(status or '').strip().lower()}|{int(limit)}|{int(offset)}|{int(since_seconds)}"
+
+    async def _load():
+        async with AsyncSessionLocal() as session:
+            orders = await list_serialized_trader_orders(
+                session,
+                trader_id=None,
+                status=status,
+                limit=limit,
+                offset=offset,
+                since_seconds=int(since_seconds) if since_seconds > 0 else None,
+            )
+        return {
+            "orders": orders,
+            "limit": limit,
+            "offset": offset,
+        }
+
+    return await _orders_all_cache.get_or_load(cache_key, _load)
 
 
-# Process-local TTL cache for the trader orders summary endpoint.  The
-# UI polls this on a few-second cadence; the underlying query pulls
-# every visible ``trader_orders`` row including ``payload_json`` (one
-# of the multi-MB JSON columns) and runs ~1.5s server-side, with
-# asyncpg holding the connection in ClientWrite the whole time.  A
-# short cache (3s default; bounded by the rate at which the dashboard
-# can perceptibly refresh anyway) collapses dozens of concurrent and
-# back-to-back polls into a single DB read without any visible
-# staleness — every response is at most ``_TRADER_ORDERS_SUMMARY_TTL``
-# seconds older than the next forced refresh, which is well under the
-# human-perceptible refresh threshold of this dashboard.
+# Process-local TTL cache shared by the bots-overview / left-sidebar
+# endpoints.  Three of the routes below are polled by the dashboard on
+# a few-second cadence and each underlying query pulls full rows that
+# include multi-MB ``json`` columns (``payload_json``, ``events_json``
+# style blobs).  asyncpg decodes the JSON on the event loop, so each
+# call costs ~1-2s of connection-wall time and contributes to the
+# cumulative loop contention that triggers asyncpg "cannot switch to
+# state X" tears on the trader fast-tier path.
 #
-# The lock coalesces in-flight cache misses: when ten polls land
-# during the 1.5s window between cache-miss and cache-fill, only the
-# first runs the DB query; the other nine wait on the same Future.
-_TRADER_ORDERS_SUMMARY_TTL = 3.0
-_trader_orders_summary_cache: dict[str, dict[str, Any]] = {}
-_trader_orders_summary_cache_locks: dict[str, asyncio.Lock] = {}
-_trader_orders_summary_cache_locks_guard = asyncio.Lock()
+# A short TTL cache, well under the dashboard's perceptible refresh
+# threshold, collapses dozens of concurrent and back-to-back polls
+# into a single DB read.  Per-key asyncio.Lock coalesces in-flight
+# misses (only the first poll in a window does the DB query; others
+# wait on the lock and pick up the populated entry).
+class _TTLCache:
+    def __init__(self, ttl_seconds: float) -> None:
+        self._ttl = ttl_seconds
+        self._entries: dict[str, dict[str, Any]] = {}
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
+    async def _lock_for(self, key: str) -> asyncio.Lock:
+        async with self._locks_guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._locks[key] = lock
+            return lock
+
+    async def get_or_load(self, key: str, fetcher):
+        cached = self._entries.get(key)
+        if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < self._ttl:
+            return cached["payload"]
+        lock = await self._lock_for(key)
+        async with lock:
+            cached = self._entries.get(key)
+            if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < self._ttl:
+                return cached["payload"]
+            payload = await fetcher()
+            self._entries[key] = {
+                "payload": payload,
+                "loaded_at_mono": time.monotonic(),
+            }
+            return payload
 
 
-async def _trader_orders_summary_lock_for(mode_key: str) -> asyncio.Lock:
-    async with _trader_orders_summary_cache_locks_guard:
-        lock = _trader_orders_summary_cache_locks.get(mode_key)
-        if lock is None:
-            lock = asyncio.Lock()
-            _trader_orders_summary_cache_locks[mode_key] = lock
-        return lock
+# TTLs sized below the dashboard's actual poll cadence so the cache
+# is invisible: /orders/summary (UI polls every 10s) caches 3s,
+# /orders/all (UI polls every 8s) caches 5s, /events/all (UI polls
+# every 30s) caches 10s.  Every response is at most TTL seconds older
+# than what the user would have seen without caching, far below the
+# perceptible refresh threshold for an aggregate-stats dashboard.
+_orders_summary_cache = _TTLCache(3.0)
+_orders_all_cache = _TTLCache(5.0)
+_events_all_cache = _TTLCache(10.0)
 
 
 @router.get("/orders/summary")
 async def get_trader_orders_summary(
     mode: Optional[str] = Query(default=None),
 ):
-    # Note: this route deliberately does not declare a ``session``
-    # dependency.  The cache hit path returns without touching the DB
-    # at all — declaring ``session: AsyncSession = Depends(...)`` would
-    # acquire a pool connection just to discard it, undoing part of the
-    # point of caching.  The miss path opens its own session inline.
+    # Note: these cache-fronted routes deliberately do not declare a
+    # ``session`` dependency.  The cache-hit path returns without
+    # touching the DB at all — declaring ``session: AsyncSession =
+    # Depends(...)`` would acquire a pool connection just to discard
+    # it, undoing part of the point of caching.  The miss path opens
+    # its own session inline.
     from services.trader_orchestrator_state import (
         get_trader_orders_summary as _get_trader_orders_summary_db,
     )
 
     mode_key = (mode or "").strip().lower()
-    cached = _trader_orders_summary_cache.get(mode_key)
-    if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < _TRADER_ORDERS_SUMMARY_TTL:
-        return cached["payload"]
 
-    lock = await _trader_orders_summary_lock_for(mode_key)
-    async with lock:
-        # Re-check inside the lock — another coroutine may have filled
-        # the cache while we were queued.
-        cached = _trader_orders_summary_cache.get(mode_key)
-        if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < _TRADER_ORDERS_SUMMARY_TTL:
-            return cached["payload"]
+    async def _load():
         async with AsyncSessionLocal() as session:
-            payload = await _get_trader_orders_summary_db(session, mode=mode)
-        _trader_orders_summary_cache[mode_key] = {
-            "payload": payload,
-            "loaded_at_mono": time.monotonic(),
-        }
-        return payload
+            return await _get_trader_orders_summary_db(session, mode=mode)
+
+    return await _orders_summary_cache.get_or_load(mode_key, _load)
 
 
 @router.get("/events/all")
@@ -631,7 +694,6 @@ async def get_all_trader_events_bulk(
     trader_ids: Optional[str] = Query(default=None),
     limit: int = Query(default=500, ge=1, le=2000),
     types: Optional[str] = Query(default=None),
-    session: AsyncSession = Depends(get_db_session),
 ):
     from services.trader_orchestrator_state import list_serialized_trader_events_bulk
     normalized_trader_ids: list[str] | None = None
@@ -648,13 +710,28 @@ async def get_all_trader_events_bulk(
     event_types: list[str] | None = None
     if types:
         event_types = [t.strip() for t in str(types).split(",") if t.strip()]
-    events = await list_serialized_trader_events_bulk(
-        session,
-        trader_ids=normalized_trader_ids,
-        limit=limit,
-        event_types=event_types or None,
+
+    # Cache key includes the normalized trader_ids and types so a
+    # filtered view doesn't override the all-traders view in cache.
+    cache_key = "|".join(
+        [
+            ",".join(sorted(normalized_trader_ids)) if normalized_trader_ids else "",
+            ",".join(sorted(event_types)) if event_types else "",
+            str(int(limit)),
+        ]
     )
-    return {"events": events}
+
+    async def _load():
+        async with AsyncSessionLocal() as session:
+            events = await list_serialized_trader_events_bulk(
+                session,
+                trader_ids=normalized_trader_ids,
+                limit=limit,
+                event_types=event_types or None,
+            )
+        return {"events": events}
+
+    return await _events_all_cache.get_or_load(cache_key, _load)
 
 
 @router.get("/decisions/all")

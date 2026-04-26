@@ -3965,6 +3965,12 @@ async def _validate_source_configs(
 ) -> None:
     if not source_configs:
         raise ValueError("source_configs must include at least one source")
+    if len(source_configs) > 1:
+        # A trader runs exactly one strategy on one source. Reject anything else.
+        raise ValueError(
+            "source_configs must contain exactly one entry "
+            "(a trader runs one strategy on one source)"
+        )
     for source_config in source_configs:
         source_key = str(source_config.get("source_key") or "").strip().lower()
         strategy_key = _normalize_strategy_key(source_config.get("strategy_key"))
@@ -5411,6 +5417,7 @@ async def list_trader_orders(
     mode: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
+    since_seconds: Optional[int] = None,
 ) -> list[TraderOrder]:
     status_values = _expand_trader_order_status_filter(status)
     status_key_expr = func.lower(func.coalesce(TraderOrder.status, ""))
@@ -5444,6 +5451,16 @@ async def list_trader_orders(
         query = query.where(status_key_expr.in_(status_values))
     if mode_key:
         query = query.where(func.lower(func.coalesce(TraderOrder.mode, "")) == mode_key)
+    # Cap the historical window by date so an active trader with
+    # hundreds of resolved orders over months doesn't force every
+    # poll to ship its full lifetime history.  Open orders are still
+    # returned unbounded above (financial correctness — never silently
+    # hide an open position); only the paginated *historical* tail is
+    # date-filtered.
+    if since_seconds is not None and since_seconds > 0:
+        cutoff = utcnow() - timedelta(seconds=int(since_seconds))
+        cutoff_naive = cutoff.replace(tzinfo=None) if cutoff.tzinfo is not None else cutoff
+        query = query.where(TraderOrder.created_at >= cutoff_naive)
     if offset > 0:
         query = query.offset(offset)
     query = query.limit(max(1, min(limit, 20000)))
@@ -9699,6 +9716,7 @@ async def list_serialized_trader_orders(
     mode: Optional[str] = None,
     limit: int = 200,
     offset: int = 0,
+    since_seconds: Optional[int] = None,
 ) -> list[dict[str, Any]]:
     rows = await list_trader_orders(
         session,
@@ -9707,6 +9725,7 @@ async def list_serialized_trader_orders(
         mode=mode,
         limit=limit,
         offset=offset,
+        since_seconds=since_seconds,
     )
     signal_ids = sorted({str(row.signal_id).strip() for row in rows if str(row.signal_id or "").strip()})
     signals_by_id: dict[str, TradeSignal] = {}
