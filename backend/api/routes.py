@@ -14,7 +14,6 @@ from sqlalchemy import select
 from models import Opportunity
 from models.database import (
     AsyncSessionLocal,
-    OpportunityState,
     ScannerSnapshot,
     Strategy,
     StrategyValidationProfile,
