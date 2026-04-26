@@ -5261,7 +5261,17 @@ async def _run_trader_once(
             expired_signals = 0
             expired_by_reason: dict[str, int] = {}
             defer_signal_processing = False
+            _last_per_signal_started: float | None = None
             for signal in signals:
+                _now = time.monotonic()
+                if _last_per_signal_started is not None:
+                    # Cumulative per-signal cost — captured regardless of
+                    # which `continue` branch the prior iteration took.
+                    _accumulators["per_signal_total"] = (
+                        _accumulators.get("per_signal_total", 0.0)
+                        + (_now - _last_per_signal_started) * 1000.0
+                    )
+                _last_per_signal_started = _now
                 signal_id = str(signal.id)
                 signal_wake_started_at = utcnow()
                 context_ready_at = signal_wake_started_at
@@ -7295,6 +7305,13 @@ async def _run_trader_once(
                     cursor_runtime_sequence = _signal_runtime_sequence(signal) or cursor_runtime_sequence
                     processed_signals += 1
 
+            # Capture the final per-signal duration once the for-loop exits.
+            if _last_per_signal_started is not None:
+                _accumulators["per_signal_total"] = (
+                    _accumulators.get("per_signal_total", 0.0)
+                    + (time.monotonic() - _last_per_signal_started) * 1000.0
+                )
+                _last_per_signal_started = None
             if process_signals:
                 if decisions_written == 0 and orders_written == 0:
                     if deferred_signals > 0:
