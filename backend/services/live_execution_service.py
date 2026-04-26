@@ -1609,6 +1609,7 @@ class LiveExecutionService:
         persist_lock = self._get_persist_lock()
         async with persist_lock:
             for attempt in range(_DB_RETRY_ATTEMPTS):
+                needs_retry = False
                 async with AsyncSessionLocal() as session:
                     try:
                         existing_result = await session.execute(
@@ -1684,11 +1685,19 @@ class LiveExecutionService:
                         if not _is_retryable_db_error(exc) or is_last:
                             logger.error("Failed to persist live trading orders", exc_info=exc)
                             return
-                        await asyncio.sleep(_db_retry_delay(attempt))
+                        # Sleep happens AFTER the async with closes the
+                        # session — keeping it inside the block held the
+                        # connection across the retry wait, and a cancel
+                        # arriving during sleep tore the session __aexit__
+                        # in half.  GC then reaped the orphaned asyncpg
+                        # connection ("non-checked-in connection" warning).
+                        needs_retry = True
                     except Exception as exc:
                         await session.rollback()
                         logger.error("Failed to persist live trading orders", exc_info=exc)
                         return
+                if needs_retry:
+                    await asyncio.sleep(_db_retry_delay(attempt))
 
     async def _persist_positions(self) -> None:
         wallet = self._wallet_for_persistence()
@@ -1701,6 +1710,7 @@ class LiveExecutionService:
         persist_lock = self._get_persist_lock()
         async with persist_lock:
             for attempt in range(_DB_RETRY_ATTEMPTS):
+                needs_retry = False
                 async with AsyncSessionLocal() as session:
                     try:
                         wallet_key = str(wallet).strip().lower()
@@ -1768,11 +1778,13 @@ class LiveExecutionService:
                         if not _is_retryable_db_error(exc) or is_last:
                             logger.error("Failed to persist live trading positions", exc_info=exc)
                             return
-                        await asyncio.sleep(_db_retry_delay(attempt))
+                        needs_retry = True
                     except Exception as exc:
                         await session.rollback()
                         logger.error("Failed to persist live trading positions", exc_info=exc)
                         return
+                if needs_retry:
+                    await asyncio.sleep(_db_retry_delay(attempt))
 
     async def _persist_runtime_state(self) -> None:
         wallet = self._wallet_for_persistence()

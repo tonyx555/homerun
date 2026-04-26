@@ -41,6 +41,18 @@ _FAILED_EXIT_MIN_RETRY_INTERVAL_SECONDS = 15
 # Past this many attempts the exit is marked blocked_retry_exhausted_hard
 # and an operator must intervene.
 _FAILED_EXIT_HARD_RETRY_CEILING = 100
+# A short circuit specifically for ``asyncio.TimeoutError`` on the exit
+# submission path.  A timeout means the CLOB call hung for the full
+# ``_LIVE_EXIT_RETRY_TIMEOUT_SECONDS`` budget; each one chews ~10s of
+# Python compute (cancellation tears asyncpg state, my retry fix then
+# invalidates the connection) and the next reconcile cycle picks the
+# same order back up.  N consecutive timeouts is a strong signal the
+# path is fundamentally stuck (drifted ledger, dead provider session,
+# or a market the CLOB simply will not accept) and continuing to retry
+# is just burning CPU/connection state.  Reset the counter on any
+# non-timeout outcome so transient timeouts don't poison healthy
+# orders.
+_FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD = 3
 
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
@@ -439,7 +451,25 @@ def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: d
         pending_exit["retry_count"] = retry_count
         pending_exit["exhausted_at"] = _iso_utc(now)
         pending_exit["next_retry_at"] = None
+        pending_exit["consecutive_timeout_count"] = 0
         return
+    is_timeout = isinstance(error, (asyncio.TimeoutError, TimeoutError))
+    if is_timeout:
+        timeout_streak = int(pending_exit.get("consecutive_timeout_count") or 0) + 1
+        pending_exit["consecutive_timeout_count"] = timeout_streak
+        if timeout_streak >= _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD:
+            # Stop pumping reconcile cycles into a stuck CLOB submission.
+            # Each timeout costs ~10s of compute, cancels asyncpg mid-protocol,
+            # and forces a connection invalidation; retrying again will do the
+            # same thing.  An operator (or a successful periodic
+            # ``sync_positions`` reset) can clear this state.
+            pending_exit["status"] = "blocked_persistent_timeout"
+            pending_exit["retry_count"] = retry_count
+            pending_exit["exhausted_at"] = _iso_utc(now)
+            pending_exit["next_retry_at"] = None
+            return
+    else:
+        pending_exit["consecutive_timeout_count"] = 0
     pending_exit["status"] = "failed"
     pending_exit["retry_count"] = retry_count
     _bump_allowance_error_counter(pending_exit, error_text)
@@ -7564,6 +7594,7 @@ async def reconcile_live_positions(
             "blocked_min_notional",
             "blocked_retry_exhausted",
             "blocked_retry_exhausted_hard",
+            "blocked_persistent_timeout",
         }:
             pending_wallet_resolution_confirmed = wallet_settlement_price is not None
             if pending_winning_idx is not None and pending_outcome_idx is not None and pending_wallet_resolution_confirmed:

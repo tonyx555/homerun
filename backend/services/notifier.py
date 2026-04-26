@@ -441,7 +441,13 @@ class TelegramNotifier:
             if value:
                 close_identity_parts.append(f"{key}:{value}")
         if not close_identity_parts:
-            for key in ("provider_clob_order_id", "exit_order_id", "filled_at", "last_snapshot_at"):
+            # ``last_snapshot_at`` deliberately excluded — that field is
+            # rewritten every reconcile cycle, which would change the
+            # marker for the same close on every poll and fire a
+            # duplicate Telegram alert per cycle until wallet authority
+            # populates one of the keys above.  The remaining fallback
+            # keys are stable per close.
+            for key in ("provider_clob_order_id", "exit_order_id", "filled_at"):
                 value = str(pending_exit.get(key) or "").strip()
                 if value:
                     close_identity_parts.append(f"{key}:{value}")
