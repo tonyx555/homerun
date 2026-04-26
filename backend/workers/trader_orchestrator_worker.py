@@ -5947,31 +5947,6 @@ async def _run_trader_once(
                     copy_allocation_context: dict[str, Any] = {}
                     copy_inventory_context_for_signal: dict[str, Any] = {}
                     if signal_source == "traders" and resolved_strategy_key == "traders_copy_trade":
-                        runtime_signal_payload = (
-                            runtime_signal.payload_json
-                            if isinstance(getattr(runtime_signal, "payload_json", None), dict)
-                            else {}
-                        )
-                        runtime_strategy_context = (
-                            runtime_signal_payload.get("strategy_context")
-                            if isinstance(runtime_signal_payload.get("strategy_context"), dict)
-                            else {}
-                        )
-                        runtime_copy_event = (
-                            runtime_strategy_context.get("copy_event")
-                            if isinstance(runtime_strategy_context.get("copy_event"), dict)
-                            else {}
-                        )
-                        runtime_source_trade = (
-                            runtime_signal_payload.get("source_trade")
-                            if isinstance(runtime_signal_payload.get("source_trade"), dict)
-                            else {}
-                        )
-                        copy_signal_side = str(
-                            runtime_copy_event.get("side")
-                            or runtime_source_trade.get("side")
-                            or ""
-                        ).strip().upper()
                         source_wallet = StrategySDK.extract_primary_trader_signal_wallet(runtime_signal)
                         trader_total_daily_pnl = float(trader_daily_pnl + trader_unrealized_pnl)
                         configured_daily_loss_cap_usd = abs(
