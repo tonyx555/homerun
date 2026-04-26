@@ -127,8 +127,10 @@ class RetryableAsyncSession(AsyncSession):
         try:
             await super().rollback()
         except asyncio.CancelledError:
-            # Ensure rollback completes even if we are cancelled.
-            self._fire_and_forget(self._do_rollback_or_invalidate())
+            # On cancellation, invalidate immediately instead of trying
+            # a fire-and-forget rollback that races with __aexit__'s
+            # close on the same connection. See execute() docstring.
+            self._fire_and_forget(self._do_invalidate())
             raise
         except Exception:
             try:
@@ -225,18 +227,20 @@ class RetryableAsyncSession(AsyncSession):
         20-60s reconcile times, projection-queue cascade.
 
         Shield the execute so the extended-protocol sequence completes
-        atomically; CancelledError still propagates to the caller. We
-        schedule a fire-and-forget rollback on cancel so the now-
-        completed statement doesn't leave the transaction half-built.
+        atomically; CancelledError still propagates to the caller. On
+        cancel, INVALIDATE the connection — don't try rollback first.
+        A rollback after cancellation tries to use the same connection
+        whose protocol state may be uncertain; a failed rollback then
+        leaves the connection even more corrupted, and the pool hands
+        it to the next caller who hits "cannot perform operation:
+        another operation in progress". Forcing invalidate makes the
+        pool drop the connection and spin up a fresh one — one extra
+        connection cycle in exchange for no cross-task corruption.
         """
         try:
             return await asyncio.shield(super().execute(statement, params=params, **kwargs))
         except asyncio.CancelledError:
-            # The shielded execute completed; caller still wanted to bail.
-            # Roll back so we don't leak an open transaction. Fire-and-
-            # forget because the rollback itself may need to survive
-            # further cancellation pressure.
-            self._fire_and_forget(self._do_rollback_or_invalidate())
+            self._fire_and_forget(self._do_invalidate())
             raise
         except DBAPIError:
             try:
@@ -254,19 +258,20 @@ class RetryableAsyncSession(AsyncSession):
         CancelledError between Parse/Bind and Execute/Sync leaves the
         backend in state=active wait_event=Client/ClientRead with an
         open transaction that neither statement_timeout nor
-        idle_in_transaction_session_timeout can reap.  Zombies
-        observed lasting 10-15+ hours until the worker process was
-        restarted or a supervisor killed the backend.
+        idle_in_transaction_session_timeout can reap.
 
         Shield the flush so the extended-protocol sequence completes
-        atomically; CancelledError still propagates to the caller.
+        atomically; CancelledError still propagates to the caller. On
+        non-cancellation exceptions, invalidate (not rollback) so the
+        pool drops the suspect connection — see execute() docstring
+        for the full rationale.
         """
         try:
             await asyncio.shield(super().flush(objects))
         except asyncio.CancelledError:
             raise
         except Exception:
-            self._fire_and_forget(self._do_rollback_or_invalidate())
+            self._fire_and_forget(self._do_invalidate())
             raise
 
     # ------------------------------------------------------------------

@@ -4038,12 +4038,18 @@ async def _run_trader_once(
     # stage_timings_ms field).
     stage_timings_ms: dict[str, float] = {}
     _stage_last_mono = cycle_started_mono
+    _accumulators: dict[str, float] = {}
 
     def _checkpoint(name: str) -> None:
         nonlocal _stage_last_mono
         now = time.monotonic()
         stage_timings_ms[name] = round((now - _stage_last_mono) * 1000.0, 1)
         _stage_last_mono = now
+
+    def _accumulate(name: str, started_mono: float) -> None:
+        """Add to a cumulative bucket — used inside per-signal loops."""
+        delta_ms = (time.monotonic() - started_mono) * 1000.0
+        _accumulators[name] = _accumulators.get(name, 0.0) + delta_ms
 
     async with AsyncSessionLocal() as session:
         # Bound DB statements inside this cycle without leaking the timeout
@@ -5209,6 +5215,7 @@ async def _run_trader_once(
                     cycle_timeout_seconds=cycle_timeout_seconds,
                     reserve_seconds=2.0,
                 )
+                _live_context_started = time.monotonic()
                 async with release_conn(session):
                     try:
                         if live_context_timeout_seconds is not None:
@@ -5247,6 +5254,7 @@ async def _run_trader_once(
                                 logger.warning("Live market context refresh failed (%s): %s", exc_name, exc_message)
                             else:
                                 logger.warning("Live market context refresh failed (%s)", exc_name)
+                _accumulate("live_context", _live_context_started)
 
             deferred_signals = 0
             deferred_by_reason: dict[str, int] = {}
@@ -7376,6 +7384,10 @@ async def _run_trader_once(
                 break
 
     _checkpoint("signal_loop")
+    # Surface cumulative buckets (e.g. live_context) alongside checkpoints
+    # so the warning shows where inside signal_loop time was spent.
+    for _name, _ms in _accumulators.items():
+        stage_timings_ms[_name] = round(_ms, 1)
     cycle_duration_s = time.monotonic() - cycle_started_mono
     if cycle_duration_s > 10.0:
         logger.warning(
