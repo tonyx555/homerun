@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import traceback
 import importlib
 import logging
 import os
@@ -444,12 +445,38 @@ class WorkerHost:
             await asyncio.sleep(30.0)
             if self._shutting_down:
                 return
+            # Split the two awaits so a recurring AttributeError /
+            # type-coercion failure tells us *which* call raised it. The
+            # combined try used to hide that distinction; the structured
+            # logger's ``||`` summary line also drops the traceback
+            # frames, so format and attach it explicitly.
+            snapshots = None
+            orchestrator_snapshot = None
             try:
                 async with AsyncSessionLocal() as session:
                     snapshots = await list_worker_snapshots(session, include_stats=False)
+            except Exception as exc:
+                logger.warning(
+                    "Worker freshness check failed (list_worker_snapshots)",
+                    plane=self._plane_name,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc) or "<no message>",
+                    traceback=traceback.format_exc(),
+                    exc_info=exc,
+                )
+                continue
+            try:
+                async with AsyncSessionLocal() as session:
                     orchestrator_snapshot = await read_orchestrator_snapshot(session)
             except Exception as exc:
-                logger.warning("Worker freshness check failed", plane=self._plane_name, exc_info=exc)
+                logger.warning(
+                    "Worker freshness check failed (read_orchestrator_snapshot)",
+                    plane=self._plane_name,
+                    exc_type=type(exc).__name__,
+                    exc_msg=str(exc) or "<no message>",
+                    traceback=traceback.format_exc(),
+                    exc_info=exc,
+                )
                 continue
 
             snapshot_by_name = {
