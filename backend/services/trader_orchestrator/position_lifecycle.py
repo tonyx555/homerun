@@ -5521,6 +5521,78 @@ async def reconcile_live_positions(
         # other tasks see while it runs.
         await asyncio.sleep(0)
         payload = dict(row.payload_json or {})
+        # Bundle-residual zombie short-circuit.  When the session_engine's
+        # bundle recovery path leaves residual wallet exposure on a leg
+        # that did fill, retrying the flatten every reconcile cycle will
+        # never succeed (the V2 wallet/balance state that caused the
+        # original failure is the same).  Each attempt costs ~10s on the
+        # ``asyncio.wait_for`` budget for the SELL submit, tears asyncpg
+        # mid-protocol, and saturates the per-trader cycle.  Detect the
+        # marker (or the legacy reason-text on rows persisted before the
+        # marker existed) and terminalize the order as a 100% loss
+        # immediately so it stops being a candidate.
+        bundle_recovery_residual_marker = payload.get("bundle_recovery_residual")
+        legacy_reason_match = (
+            isinstance(getattr(row, "reason", None), str)
+            and "residual exposure remains" in row.reason
+            and str(row.status or "").strip().lower() == "executed"
+        )
+        if (
+            (
+                isinstance(bundle_recovery_residual_marker, dict)
+                and str(bundle_recovery_residual_marker.get("status") or "").strip().lower() == "unrecoverable"
+            )
+            or legacy_reason_match
+        ):
+            close_trigger = "bundle_residual_unrecoverable"
+            filled_notional = safe_float(row.notional_usd, 0.0) or 0.0
+            pnl = -filled_notional
+            next_status = _status_for_close(pnl=pnl, close_trigger=close_trigger)
+            details.append(
+                {
+                    "order_id": row.id,
+                    "market_id": row.market_id,
+                    "close_trigger": close_trigger,
+                    "next_status": next_status,
+                    "note": "terminalized_bundle_residual_unrecoverable",
+                }
+            )
+            if not dry_run:
+                row.status = next_status
+                row.actual_profit = float(pnl)
+                row.updated_at = now
+                payload["position_close"] = {
+                    "close_price": 0.0,
+                    "price_source": "bundle_residual_unrecoverable",
+                    "close_trigger": close_trigger,
+                    "realized_pnl": pnl,
+                    "filled_notional_usd": filled_notional,
+                    "closed_at": _iso_utc(now),
+                    "reason": (
+                        "Bundle recovery left residual wallet exposure that the "
+                        "session-engine flatten could not unwind. Terminalized to "
+                        "stop reconcile-cycle retry storms; operator must clean "
+                        "the residual position manually."
+                    ),
+                }
+                row.payload_json = payload
+                hot_state.record_order_resolved(
+                    trader_id=trader_id,
+                    mode=str(row.mode or ""),
+                    order_id=str(row.id or ""),
+                    market_id=str(row.market_id or ""),
+                    direction=str(row.direction or ""),
+                    source=str(row.source or ""),
+                    status=next_status,
+                    actual_profit=float(pnl),
+                    payload=payload,
+                    copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                )
+                closed += 1
+            total_realized_pnl += pnl
+            by_status[next_status] = int(by_status.get(next_status, 0)) + 1
+            would_close += 1
+            continue
         terminal_position_close = payload.get("position_close")
         if isinstance(terminal_position_close, dict) and _position_close_has_terminal_external_authority(
             terminal_position_close

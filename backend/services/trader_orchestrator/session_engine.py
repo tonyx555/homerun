@@ -2231,6 +2231,28 @@ class ExecutionSessionEngine:
                     "residual_exposure": residual_exposure,
                     "recovered_to_flat": not residual_exposure,
                 }
+                # When the flatten itself fails to flatten — i.e. there's
+                # leftover wallet exposure on a leg that filled — the
+                # entry order(s) become "zombie" rows: status='executed'
+                # but no real position the lifecycle can manage with a
+                # normal exit.  Tag the filled entry orders so the
+                # position_lifecycle can terminalize them on the next
+                # reconcile pass instead of burning cycles re-attempting
+                # a flatten the session_engine already proved cannot
+                # complete in this session window.
+                if residual_exposure:
+                    residual_marker = {
+                        "status": "unrecoverable",
+                        "marked_at": _iso_utc(utcnow()),
+                        "flatten_attempts": flatten_attempts,
+                    }
+                    for entry_item in order_write_inputs:
+                        if safe_float(entry_item.get("actual_filled_shares"), 0.0) > 0.0:
+                            entry_payload = entry_item.get("order_payload") or {}
+                            if not isinstance(entry_payload, dict):
+                                entry_payload = {}
+                            entry_payload["bundle_recovery_residual"] = residual_marker
+                            entry_item["order_payload"] = entry_payload
                 _append_event(
                     event_type="bundle_recovery_completed",
                     severity="error" if residual_exposure else "warn",
