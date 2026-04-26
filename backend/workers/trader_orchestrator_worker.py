@@ -4032,6 +4032,18 @@ async def _run_trader_once(
     prefiltered_by_reason: dict[str, int] = {}
     crypto_scope_prefiltered_dimensions: dict[str, int] = {}
     cycle_started_mono = time.monotonic()
+    # Per-stage timings populated at major checkpoints below. Logged at
+    # exit if the cycle exceeded the soft threshold so we can tell which
+    # stage burned the budget (analogous to fast_trader_runtime's
+    # stage_timings_ms field).
+    stage_timings_ms: dict[str, float] = {}
+    _stage_last_mono = cycle_started_mono
+
+    def _checkpoint(name: str) -> None:
+        nonlocal _stage_last_mono
+        now = time.monotonic()
+        stage_timings_ms[name] = round((now - _stage_last_mono) * 1000.0, 1)
+        _stage_last_mono = now
 
     async with AsyncSessionLocal() as session:
         # Bound DB statements inside this cycle without leaking the timeout
@@ -4374,6 +4386,7 @@ async def _run_trader_once(
                 )
         if run_trader_maintenance:
             _trader_maintenance_last_run[trader_id] = maintenance_now
+        _checkpoint("maintenance")
         provider_reconcile_payload = timeout_cleanup.get("provider_reconcile")
         provider_reconcile_payload = (
             dict(provider_reconcile_payload) if isinstance(provider_reconcile_payload, dict) else {}
@@ -4926,6 +4939,7 @@ async def _run_trader_once(
         copy_inventory_context: dict[str, Any] = {}
         copy_inventory_loaded = False
 
+        _checkpoint("setup")
         # Kill switch is the very first gate: short-circuit before any signal
         # fetching, live-market context building, or risk evaluation. The
         # per-trader block_new_orders flag has the same semantics scoped to
@@ -6016,7 +6030,16 @@ async def _run_trader_once(
                         }
 
                         if run_mode == "live":
-                            if not copy_inventory_loaded or copy_signal_side == "SELL":
+                            # Lazy-load inventory once per cycle. Previously
+                            # this re-fetched on every SELL signal, which on
+                            # backlogged copy-trade traders meant 20-50s of
+                            # extra DB+Polymarket work per cycle and was the
+                            # main reason 78865ce8 / f88cc061 / c8851ef7
+                            # cycles were hitting the 30s soft timeout.
+                            # Strategy code validates inventory downstream
+                            # at order submission, so per-signal staleness
+                            # within a cycle (max 30s) is bounded and safe.
+                            if not copy_inventory_loaded:
                                 copy_inventory_loaded = True
                                 try:
                                     # Use a separate session to prevent
@@ -7377,6 +7400,19 @@ async def _run_trader_once(
             if defer_signal_processing or stream_trigger_mode:
                 break
 
+    _checkpoint("signal_loop")
+    cycle_duration_s = time.monotonic() - cycle_started_mono
+    if cycle_duration_s > 10.0:
+        logger.warning(
+            "Trader cycle slow",
+            trader_id=trader_id,
+            mode=run_mode,
+            duration_s=round(cycle_duration_s, 2),
+            processed_signals=processed_signals,
+            decisions_written=decisions_written,
+            orders_written=orders_written,
+            stage_timings_ms=stage_timings_ms,
+        )
     return decisions_written, orders_written, processed_signals
 
 
