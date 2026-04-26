@@ -2,7 +2,7 @@
 Trading Service - Real order execution on Polymarket
 
 This service handles real trading on Polymarket using the CLOB API.
-It integrates with py-clob-client for order placement and management.
+It integrates with py-clob-client-v2 for order placement and management.
 
 IMPORTANT: Real trading involves real money. Use with caution.
 
@@ -198,7 +198,7 @@ def _parse_clob_share_balance_shortage(error_text: str | None) -> tuple[int, int
 
 
 # Markers in exception text that indicate a transient network/proxy failure
-# rather than a genuine order rejection.  py_clob_client wraps httpx transport
+# rather than a genuine order rejection.  py_clob_client_v2 wraps httpx transport
 # errors as PolyApiException(error_msg="Request exception!"), so we match on
 # the wrapper text and common network error strings.
 _TRANSIENT_TRANSPORT_MARKERS = (
@@ -406,7 +406,7 @@ class LiveExecutionService:
     """
     Service for executing real trades on Polymarket.
 
-    Uses the py-clob-client library for order placement.
+    Uses the py-clob-client-v2 library for order placement.
     Implements safety limits and tracking.
     """
 
@@ -757,16 +757,13 @@ class LiveExecutionService:
         if self._client is None:
             return
 
-        if getattr(self._client, "signature_type", None) != signature_type:
-            try:
-                self._client.signature_type = signature_type
-            except (AttributeError, TypeError) as exc:
-                logger.debug("Failed to apply signature_type to trading client", exc_info=exc)
-
+        # py-clob-client-v2 stores signature_type and funder on the OrderBuilder,
+        # not on the ClobClient itself. The constructor wires the builder, so we
+        # only need to mutate the builder when the signature type changes after init.
         builder = getattr(self._client, "builder", None)
-        if builder is not None and getattr(builder, "sig_type", None) != signature_type:
+        if builder is not None and getattr(builder, "signature_type", None) != signature_type:
             try:
-                builder.sig_type = signature_type
+                builder.signature_type = signature_type
             except (AttributeError, TypeError) as exc:
                 logger.debug("Failed to apply signature_type to trading client builder", exc_info=exc)
         funder = self._funder_for_signature_type(signature_type)
@@ -798,7 +795,7 @@ class LiveExecutionService:
             return None
 
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
@@ -923,8 +920,8 @@ class LiveExecutionService:
         signature_type = self._balance_signature_type
         if not isinstance(signature_type, int):
             builder = getattr(self._client, "builder", None)
-            if builder is not None and isinstance(getattr(builder, "sig_type", None), int):
-                signature_type = int(builder.sig_type)
+            if builder is not None and isinstance(getattr(builder, "signature_type", None), int):
+                signature_type = int(builder.signature_type)
 
         if not isinstance(signature_type, int):
             return False
@@ -986,7 +983,7 @@ class LiveExecutionService:
         """
         try:
             from web3 import Web3
-            from py_clob_client.config import get_contract_config
+            from py_clob_client_v2.config import get_contract_config
 
             _rpc_candidates = [
                 url
@@ -1081,7 +1078,7 @@ class LiveExecutionService:
             return
 
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
             def build_params(sig_type: int) -> BalanceAllowanceParams:
                 return BalanceAllowanceParams(
@@ -1123,7 +1120,7 @@ class LiveExecutionService:
             return False
 
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
             params = BalanceAllowanceParams(
                 asset_type=AssetType.CONDITIONAL,
@@ -1157,7 +1154,7 @@ class LiveExecutionService:
             return False
 
         try:
-            from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
             params = BalanceAllowanceParams(
                 asset_type=AssetType.COLLATERAL,
@@ -1432,9 +1429,9 @@ class LiveExecutionService:
             self._init_retry_not_before = None
 
             try:
-                # Import py-clob-client
-                from py_clob_client.client import ClobClient
-                from py_clob_client.clob_types import ApiCreds
+                # Import py-clob-client-v2
+                from py_clob_client_v2.client import ClobClient
+                from py_clob_client_v2.clob_types import ApiCreds, BuilderConfig
                 from eth_account import Account
 
                 # Create API credentials
@@ -1475,6 +1472,11 @@ class LiveExecutionService:
                         self._proxy_funder_address = None
                         return False
 
+                builder_config = None
+                builder_code = (getattr(settings, "POLYMARKET_BUILDER_CODE", None) or "").strip() or None
+                if builder_code:
+                    builder_config = BuilderConfig(builder_code=builder_code)
+
                 self._client = ClobClient(
                     host=settings.CLOB_API_URL,
                     key=private_key,
@@ -1482,6 +1484,7 @@ class LiveExecutionService:
                     creds=creds,
                     signature_type=sig_type,
                     funder=funder,
+                    builder_config=builder_config,
                 )
                 self._wallet_address = eoa_address
                 self._initialized = True
@@ -1493,7 +1496,7 @@ class LiveExecutionService:
                 elif patched:
                     logger.info("Trading requests will use direct connection")
                 else:
-                    logger.warning("Trading HTTP transport patch failed; using py-clob-client default transport")
+                    logger.warning("Trading HTTP transport patch failed; using py-clob-client-v2 default transport")
 
                 await self._restore_runtime_state()
                 # Apply restored sig_type to builder immediately so that even if
@@ -1531,9 +1534,9 @@ class LiveExecutionService:
                     self._last_missing_dependency_log_at is None
                     or (now - self._last_missing_dependency_log_at).total_seconds() >= MISSING_DEPENDENCY_RELOG_SECONDS
                 ):
-                    logger.error("py-clob-client not installed. Run: pip install py-clob-client")
+                    logger.error("py-clob-client-v2 not installed. Run: pip install py-clob-client-v2")
                     self._last_missing_dependency_log_at = now
-                self._last_init_error = "py-clob-client not installed"
+                self._last_init_error = "py-clob-client-v2 not installed"
                 self._init_retry_not_before = now + timedelta(seconds=INITIALIZATION_RETRY_BACKOFF_SECONDS)
                 self._initialized = False
                 self._client = None
@@ -1595,8 +1598,8 @@ class LiveExecutionService:
         if isinstance(self._balance_signature_type, int):
             return int(self._balance_signature_type)
         builder = getattr(self._client, "builder", None)
-        if builder is not None and isinstance(getattr(builder, "sig_type", None), int):
-            return int(builder.sig_type)
+        if builder is not None and isinstance(getattr(builder, "signature_type", None), int):
+            return int(builder.signature_type)
         return int(getattr(settings, "POLYMARKET_SIGNATURE_TYPE", 1))
 
     def _execution_wallet_address(self) -> Optional[str]:
@@ -2321,7 +2324,7 @@ class LiveExecutionService:
             return cached_fallback
         else:
             try:
-                response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
+                response = await self._run_client_io(self._client.get_open_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                 _ingest_open_orders(response)
                 self._clob_read_record_success("Open order snapshots fetch")
             except Exception as exc:
@@ -2337,7 +2340,7 @@ class LiveExecutionService:
                     reinitialized = False
                 if reinitialized and self.is_ready() and not self._clob_read_circuit_open():
                     try:
-                        response = await self._run_client_io(self._client.get_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
+                        response = await self._run_client_io(self._client.get_open_orders, timeout=_CLOB_READ_TIMEOUT_SECONDS)
                         _ingest_open_orders(response)
                         provider_bulk_fetch_failed = False
                         self._clob_read_record_success("Open order snapshots fetch")
@@ -2531,7 +2534,7 @@ class LiveExecutionService:
 
         try:
             provider_response = await self._run_client_io(
-                self._client.get_orders,
+                self._client.get_open_orders,
                 timeout=_CLOB_READ_TIMEOUT_SECONDS,
             )
         except Exception as exc:
@@ -2939,9 +2942,9 @@ class LiveExecutionService:
                 if not sell_gate_ok:
                     raise RuntimeError(sell_gate_error or "SELL pre-submit gate failed")
 
-            # Build and sign order using py-clob-client
-            from py_clob_client.clob_types import MarketOrderArgs, OrderArgs
-            from py_clob_client.order_builder.constants import BUY, SELL
+            # Build and sign order using py-clob-client-v2
+            from py_clob_client_v2.clob_types import MarketOrderArgs, OrderArgs
+            from py_clob_client_v2.order_builder.constants import BUY, SELL
 
             submit_price = float(normalized_price)
             order_side = BUY if side == OrderSide.BUY else SELL
@@ -3390,7 +3393,7 @@ class LiveExecutionService:
             return False
 
         try:
-            response = await self._run_client_io(self._client.cancel, clob_order_id)
+            response = await self._run_client_io(self._client.cancel_orders, [clob_order_id])
         except Exception as exc:
             logger.error("Cancel order error", order_id=order_key, clob_order_id=clob_order_id, exc_info=exc)
             return False
@@ -3893,7 +3896,7 @@ class LiveExecutionService:
                 return {"error": "Could not derive wallet address"}
 
             try:
-                from py_clob_client.clob_types import AssetType, BalanceAllowanceParams
+                from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
 
                 def build_balance_params(signature_type: int):
                     return BalanceAllowanceParams(
@@ -3959,7 +3962,7 @@ class LiveExecutionService:
                 }, None
 
             builder = getattr(self._client, "builder", None)
-            builder_signature_type = getattr(builder, "sig_type", None)
+            builder_signature_type = getattr(builder, "signature_type", None)
             if not isinstance(builder_signature_type, int):
                 builder_signature_type = 0
             primary_signature_type = (

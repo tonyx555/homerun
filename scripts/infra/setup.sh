@@ -316,9 +316,9 @@ show_step_ok
 show_step "Installing trading packages"
 
 PIP_USER=0 python -m pip install -q --no-user -r requirements-trading.txt
-if ! python -c "import py_clob_client, eth_account" >/dev/null 2>&1; then
+if ! python -c "import py_clob_client_v2, eth_account" >/dev/null 2>&1; then
     show_step_fail "trading imports missing"
-    show_sub_info "Expected: py_clob_client, eth_account"
+    show_sub_info "Expected: py_clob_client_v2, eth_account"
     exit 1
 fi
 

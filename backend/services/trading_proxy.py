@@ -124,7 +124,7 @@ def get_sync_proxy_client() -> httpx.Client:
     """
     Get a synchronous httpx.Client configured with the trading proxy.
 
-    Used to replace py-clob-client's internal _http_client so that
+    Used to replace py-clob-client-v2's internal _http_client so that
     all order placement / cancellation goes through the VPN.
     """
     cfg = _get_config()
@@ -198,10 +198,10 @@ def get_async_proxy_client() -> httpx.AsyncClient:
 
 def patch_clob_client_proxy() -> bool:
     """
-    Monkey-patch py-clob-client's module-level HTTP client to use the trading proxy.
+    Monkey-patch py-clob-client-v2's module-level HTTP client to use the trading proxy.
 
-    py-clob-client uses a singleton `_http_client = httpx.Client(http2=True)` in
-    `py_clob_client.http_helpers.helpers` for ALL HTTP requests (order placement,
+    py-clob-client-v2 uses a singleton `_http_client = httpx.Client(http2=True)` in
+    `py_clob_client_v2.http_helpers.helpers` for ALL HTTP requests (order placement,
     cancellation, etc.). This function replaces it with a proxy-configured client.
 
     Returns True if patching succeeded, False otherwise.
@@ -213,9 +213,9 @@ def patch_clob_client_proxy() -> bool:
     global _clob_patch_signature
 
     try:
-        from py_clob_client.http_helpers import helpers as clob_helpers
+        from py_clob_client_v2.http_helpers import helpers as clob_helpers
     except ImportError as exc:
-        logger.error("Failed to import py-clob-client transport helpers", exc_info=exc)
+        logger.error("Failed to import py-clob-client-v2 transport helpers", exc_info=exc)
         return False
 
     try:
@@ -236,11 +236,11 @@ def patch_clob_client_proxy() -> bool:
             _clob_patch_signature = signature
             if patching_proxy:
                 logger.info(
-                    "Patched py-clob-client HTTP client with trading proxy",
+                    "Patched py-clob-client-v2 HTTP client with trading proxy",
                     proxy=_mask_proxy_url(proxy_url),
                 )
             else:
-                logger.info("Patched py-clob-client HTTP client with direct transport")
+                logger.info("Patched py-clob-client-v2 HTTP client with direct transport")
             return True
     except Exception as exc:
         logger.error("Failed to patch CLOB client proxy", exc_info=exc)

@@ -39,6 +39,13 @@ def _default_database_url() -> str:
 class Settings(BaseSettings):
     # API Base URLs
     GAMMA_API_URL: str = "https://gamma-api.polymarket.com"
+    # Polymarket CLOB. Per Polymarket's V2 changelog, clob.polymarket.com
+    # currently serves V1 and auto-flips to V2 on Apr 28 2026 ~11:00 UTC.
+    # Pointing here works through the cutover transparently — V1 stays live
+    # with existing USDC.e + ERC-1155 approvals until then. To trade on V2
+    # before cutover, the wallet first needs the polymarket.com UI migration
+    # (wrap USDC.e → pUSD plus setApprovalForAll for V2 Exchange contracts);
+    # after that's done, this can be set to https://clob-v2.polymarket.com.
     CLOB_API_URL: str = "https://clob.polymarket.com"
     DATA_API_URL: str = "https://data-api.polymarket.com"
 
@@ -196,6 +203,9 @@ class Settings(BaseSettings):
     CHAIN_ID: int = 137  # Polygon mainnet
     POLYMARKET_SIGNATURE_TYPE: int = 1  # 0=EOA, 1=POLY_PROXY, 2=POLY_GNOSIS_SAFE
     POLYMARKET_FUNDER: Optional[str] = None  # Proxy wallet that holds funds for signature types 1/2
+    # Builder code (bytes32 hex) for builder fee attribution on V2 orders.
+    # Copy from polymarket.com Settings → Builder. Leave None to opt out.
+    POLYMARKET_BUILDER_CODE: Optional[str] = None
 
     # Depth Analysis
     MIN_DEPTH_USD: float = 200.0  # Minimum order book depth to allow trade

@@ -467,7 +467,7 @@ needs_setup() {
     if ! backend/venv/bin/python -c 'import sys; raise SystemExit(0 if sys.version_info.major == 3 and 10 <= sys.version_info.minor <= 13 else 1)' >/dev/null 2>&1; then
         return 0
     fi
-    if ! backend/venv/bin/python -c "import py_clob_client, eth_account" >/dev/null 2>&1; then
+    if ! backend/venv/bin/python -c "import py_clob_client_v2, eth_account" >/dev/null 2>&1; then
         return 0
     fi
 

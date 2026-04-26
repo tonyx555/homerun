@@ -2854,8 +2854,8 @@ async def test_polymarket_connection():
                 "message": f"Missing Polymarket credentials: {', '.join(missing)}",
             }
 
-        from py_clob_client.client import ClobClient
-        from py_clob_client.clob_types import ApiCreds
+        from py_clob_client_v2.client import ClobClient
+        from py_clob_client_v2.clob_types import ApiCreds
 
         client = ClobClient(
             host=runtime_settings.CLOB_API_URL,
@@ -2867,7 +2867,7 @@ async def test_polymarket_connection():
                 api_passphrase=api_passphrase,
             ),
         )
-        response = await asyncio.to_thread(client.get_orders)
+        response = await asyncio.to_thread(client.get_open_orders)
 
         open_orders_count: Optional[int] = None
         if isinstance(response, list):

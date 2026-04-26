@@ -186,7 +186,7 @@ async def test_persist_positions_upserts_current_rows_and_deletes_stale_rows(tmp
 async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(monkeypatch):
     service = LiveExecutionService()
     service._initialized = True
-    service._client = SimpleNamespace(get_orders=object(), get_order=object())
+    service._client = SimpleNamespace(get_open_orders=object(), get_order=object())
 
     order = Order(
         id="order-1",
@@ -205,8 +205,8 @@ async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(mo
     async def _run_client_io(method, *args, timeout=None):
         del args
         del timeout
-        if method is service._client.get_orders:
-            calls.append("get_orders")
+        if method is service._client.get_open_orders:
+            calls.append("get_open_orders")
             raise asyncio.TimeoutError()
         if method is service._client.get_order:
             calls.append("get_order")
@@ -219,7 +219,7 @@ async def test_get_order_snapshots_returns_cached_fallback_after_bulk_timeout(mo
 
     snapshots = await service.get_order_snapshots_by_clob_ids(["clob-1"])
 
-    assert calls == ["get_orders"]
+    assert calls == ["get_open_orders"]
     assert snapshots["clob-1"]["clob_order_id"] == "clob-1"
     assert snapshots["clob-1"]["normalized_status"] == "open"
 

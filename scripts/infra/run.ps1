@@ -1585,7 +1585,7 @@ function Test-NeedsSetup {
         return $true
     }
     try {
-        & $venvPython -c "import py_clob_client, eth_account" *> $null
+        & $venvPython -c "import py_clob_client_v2, eth_account" *> $null
         if ($LASTEXITCODE -ne 0) { return $true }
     } catch {
         return $true

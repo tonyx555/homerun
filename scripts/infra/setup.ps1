@@ -591,11 +591,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-python -c "import py_clob_client, eth_account" *> $null
+python -c "import py_clob_client_v2, eth_account" *> $null
 if ($LASTEXITCODE -ne 0) {
     Pop-Location
     Show-StepFail "trading imports missing"
-    Show-SubInfo "Expected: py_clob_client, eth_account"
+    Show-SubInfo "Expected: py_clob_client_v2, eth_account"
     exit 1
 }
 

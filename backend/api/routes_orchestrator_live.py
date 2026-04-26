@@ -540,8 +540,8 @@ async def get_trading_status():
 
     if not authenticated and credentials_configured:
         try:
-            from py_clob_client.client import ClobClient
-            from py_clob_client.clob_types import ApiCreds
+            from py_clob_client_v2.client import ClobClient
+            from py_clob_client_v2.clob_types import ApiCreds
 
             client = ClobClient(
                 host=settings.CLOB_API_URL,
@@ -553,7 +553,7 @@ async def get_trading_status():
                     api_passphrase=api_passphrase,
                 ),
             )
-            await asyncio.to_thread(client.get_orders)
+            await asyncio.to_thread(client.get_open_orders)
             authenticated = True
         except Exception as exc:
             auth_error = str(exc)

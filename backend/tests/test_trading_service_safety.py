@@ -59,7 +59,7 @@ class _ProviderSnapshotClient:
     def __init__(self):
         self.cancel_calls: list[str] = []
 
-    def get_orders(self):
+    def get_open_orders(self):
         return [
             {
                 "id": "clob-1",
@@ -80,18 +80,19 @@ class _ProviderSnapshotClient:
             "avg_price": "0.52",
         }
 
-    def cancel(self, clob_order_id: str):
-        self.cancel_calls.append(clob_order_id)
-        return {"canceled": [clob_order_id]}
+    def cancel_orders(self, order_hashes):
+        order_hashes = list(order_hashes)
+        self.cancel_calls.extend(order_hashes)
+        return {"canceled": list(order_hashes)}
 
 
 class _ReinitSnapshotClient:
     def __init__(self):
-        self.get_orders_calls = 0
+        self.get_open_orders_calls = 0
 
-    def get_orders(self):
-        self.get_orders_calls += 1
-        if self.get_orders_calls == 1:
+    def get_open_orders(self):
+        self.get_open_orders_calls += 1
+        if self.get_open_orders_calls == 1:
             raise RuntimeError("session expired")
         return [
             {
@@ -108,22 +109,22 @@ class _ReinitSnapshotClient:
 
 
 class _NoOpenOrdersClient:
-    def get_orders(self):
+    def get_open_orders(self):
         return []
 
 
 class _FailingOpenOrdersClient:
-    def get_orders(self):
+    def get_open_orders(self):
         raise TimeoutError("simulated provider timeout")
 
 
 class _CachedSnapshotClient:
     def __init__(self):
-        self.get_orders_calls = 0
+        self.get_open_orders_calls = 0
         self.get_order_calls: list[str] = []
 
-    def get_orders(self):
-        self.get_orders_calls += 1
+    def get_open_orders(self):
+        self.get_open_orders_calls += 1
         return [
             {
                 "id": "clob-open",
@@ -140,40 +141,43 @@ class _CachedSnapshotClient:
 
 
 def _install_fake_clob_modules(monkeypatch) -> None:
-    py_clob_client = types.ModuleType("py_clob_client")
-    clob_types = types.ModuleType("py_clob_client.clob_types")
-    order_builder = types.ModuleType("py_clob_client.order_builder")
-    constants = types.ModuleType("py_clob_client.order_builder.constants")
+    py_clob_client = types.ModuleType("py_clob_client_v2")
+    clob_types = types.ModuleType("py_clob_client_v2.clob_types")
+    order_builder = types.ModuleType("py_clob_client_v2.order_builder")
+    constants = types.ModuleType("py_clob_client_v2.order_builder.constants")
 
     class OrderArgs:
-        def __init__(self, price, size, side, token_id):
+        def __init__(self, price, size, side, token_id, expiration=0, builder_code="0x" + "0" * 64, metadata="0x" + "0" * 64):
             self.price = price
             self.size = size
             self.side = side
             self.token_id = token_id
+            self.expiration = expiration
+            self.builder_code = builder_code
+            self.metadata = metadata
 
     class MarketOrderArgs:
-        def __init__(self, token_id, amount, side, price=0, fee_rate_bps=0, nonce=0, taker="0x0", order_type="FOK"):
+        def __init__(self, token_id, amount, side, price=0, order_type="FOK", user_usdc_balance=0, builder_code="0x" + "0" * 64, metadata="0x" + "0" * 64):
             self.token_id = token_id
             self.amount = amount
             self.side = side
             self.price = price
-            self.fee_rate_bps = fee_rate_bps
-            self.nonce = nonce
-            self.taker = taker
             self.order_type = order_type
+            self.user_usdc_balance = user_usdc_balance
+            self.builder_code = builder_code
+            self.metadata = metadata
 
     clob_types.OrderArgs = OrderArgs
     clob_types.MarketOrderArgs = MarketOrderArgs
     constants.BUY = "BUY"
     constants.SELL = "SELL"
 
-    monkeypatch.setitem(sys.modules, "py_clob_client", py_clob_client)
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", clob_types)
-    monkeypatch.setitem(sys.modules, "py_clob_client.order_builder", order_builder)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", py_clob_client)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder", order_builder)
     monkeypatch.setitem(
         sys.modules,
-        "py_clob_client.order_builder.constants",
+        "py_clob_client_v2.order_builder.constants",
         constants,
     )
 
@@ -389,7 +393,7 @@ async def test_get_order_snapshots_maps_invalid_status_to_failed(monkeypatch):
     _configure_limits(monkeypatch)
 
     class _InvalidStatusClient:
-        def get_orders(self):
+        def get_open_orders(self):
             return []
 
         def get_order(self, clob_order_id: str):
@@ -492,7 +496,7 @@ async def test_get_order_snapshots_reuses_recent_open_order_snapshot_cache(monke
 
     snapshots = await service.get_order_snapshots_by_clob_ids(["clob-open", "clob-filled"])
 
-    assert client.get_orders_calls == 1
+    assert client.get_open_orders_calls == 1
     assert client.get_order_calls == []
     assert snapshots["clob-open"]["normalized_status"] == "open"
     assert snapshots["clob-filled"]["normalized_status"] == "filled"
@@ -505,7 +509,7 @@ async def test_get_order_snapshots_respects_open_read_circuit_and_returns_cached
     _configure_limits(monkeypatch)
 
     class _CircuitClient:
-        def get_orders(self):
+        def get_open_orders(self):
             raise AssertionError("open-order circuit should suppress provider reads")
 
     service = LiveExecutionService()
@@ -647,7 +651,7 @@ async def test_sync_provider_open_orders_closes_stale_immediate_orders(monkeypat
     service._remember_order(stale_order)
 
     class _StaleOpenOrderClient:
-        def get_orders(self):
+        def get_open_orders(self):
             return {
                 "data": [
                     {

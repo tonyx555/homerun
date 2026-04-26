@@ -242,24 +242,58 @@ class PolymarketClient:
 
         return [Market.from_gamma_response(m) for m in data]
 
-    async def get_all_markets(self, active: bool = True) -> list[Market]:
-        """Fetch all markets with pagination.
+    async def _get_markets_keyset_page(
+        self,
+        *,
+        active: bool,
+        closed: bool,
+        limit: int,
+        after_cursor: Optional[str],
+        order: str,
+        ascending: bool,
+    ) -> tuple[list[Market], Optional[str]]:
+        """Fetch one page of markets via the cursor-based /markets/keyset endpoint.
 
-        Uses configurable page size, sort order, and market cap from DB settings.
-        Sorts by volume descending by default so the highest-value markets are
-        fetched first if the cap is reached before exhausting the API.
+        Returns (markets, next_cursor). next_cursor is None when the server
+        signals end of pagination.
         """
-        all_markets = []
-        offset = 0
+        params: dict = {
+            "active": str(active).lower(),
+            "closed": str(closed).lower(),
+            "limit": limit,
+        }
+        if after_cursor:
+            params["after_cursor"] = after_cursor
+        if order:
+            params["order"] = order
+            params["ascending"] = str(ascending).lower()
+
+        response = await self._rate_limited_get(f"{self.gamma_url}/markets/keyset", params=params)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("markets", []) if isinstance(payload, dict) else []
+        next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
+        return [Market.from_gamma_response(m) for m in items], next_cursor or None
+
+    async def get_all_markets(self, active: bool = True) -> list[Market]:
+        """Fetch all markets with cursor-based pagination.
+
+        Uses the /markets/keyset endpoint (added Apr 10 2026; offset-based
+        /markets is deprecated). Sorts by volume descending by default so the
+        highest-value markets are fetched first if the cap is reached.
+        """
+        all_markets: list[Market] = []
         page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
         order = settings.MARKET_FETCH_ORDER or ""
         cap = settings.MAX_MARKETS_TO_SCAN
+        after_cursor: Optional[str] = None
 
         while True:
-            markets = await self.get_markets(
+            markets, next_cursor = await self._get_markets_keyset_page(
                 active=active,
+                closed=False,
                 limit=page_size,
-                offset=offset,
+                after_cursor=after_cursor,
                 order=order,
                 ascending=False,
             )
@@ -267,10 +301,13 @@ class PolymarketClient:
                 break
 
             all_markets.extend(markets)
-            offset += page_size
 
             if cap > 0 and len(all_markets) >= cap:
                 break
+
+            if not next_cursor:
+                break
+            after_cursor = next_cursor
 
         return all_markets
 
@@ -281,35 +318,37 @@ class PolymarketClient:
     ) -> list[Market]:
         """Fetch only recently updated markets (incremental delta fetch).
 
-        Queries for markets ordered by updatedAt descending and stops once it
-        hits markets older than `since_minutes`.  Also picks up markets that
-        had price changes (not just newly created ones).
+        Queries for markets ordered by updatedAt descending via /markets/keyset
+        and stops once it hits markets older than `since_minutes`. Also picks
+        up markets that had price changes (not just newly created ones).
         """
-        all_markets = []
-        offset = 0
+        all_markets: list[Market] = []
         page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
         cutoff = utcnow() - timedelta(minutes=since_minutes)
+        after_cursor: Optional[str] = None
 
         while True:
             try:
-                params = {
+                params: dict = {
                     "active": str(active).lower(),
                     "closed": "false",
                     "limit": page_size,
-                    "offset": offset,
                     "order": "updatedAt",
                     "ascending": "false",
                 }
-                response = await self._rate_limited_get(f"{self.gamma_url}/markets", params=params)
+                if after_cursor:
+                    params["after_cursor"] = after_cursor
+                response = await self._rate_limited_get(f"{self.gamma_url}/markets/keyset", params=params)
                 response.raise_for_status()
-                data = response.json()
+                payload = response.json()
+                data = payload.get("markets", []) if isinstance(payload, dict) else []
+                next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
 
                 if not data:
                     break
 
                 page_markets = [Market.from_gamma_response(m) for m in data]
                 all_markets.extend(page_markets)
-                offset += page_size
 
                 # Check if the oldest market in this page is older than cutoff.
                 oldest_in_page = data[-1]
@@ -331,6 +370,10 @@ class PolymarketClient:
                 if len(all_markets) >= 500:
                     break
 
+                if not next_cursor:
+                    break
+                after_cursor = next_cursor
+
             except Exception as e:
                 _logger.warning("Incremental market fetch failed", error=str(e))
                 break
@@ -347,26 +390,53 @@ class PolymarketClient:
 
         return [Event.from_gamma_response(e) for e in data]
 
-    async def get_all_events(self, closed: bool = False) -> list[Event]:
-        """Fetch all events with pagination.
+    async def _get_events_keyset_page(
+        self,
+        *,
+        closed: bool,
+        limit: int,
+        after_cursor: Optional[str],
+    ) -> tuple[list[Event], Optional[str]]:
+        """Fetch one page of events via the cursor-based /events/keyset endpoint."""
+        params: dict = {"closed": str(closed).lower(), "limit": limit}
+        if after_cursor:
+            params["after_cursor"] = after_cursor
 
-        Uses configurable page size and event cap from DB settings.
+        response = await self._rate_limited_get(f"{self.gamma_url}/events/keyset", params=params)
+        response.raise_for_status()
+        payload = response.json()
+        items = payload.get("events", []) if isinstance(payload, dict) else []
+        next_cursor = payload.get("next_cursor") if isinstance(payload, dict) else None
+        return [Event.from_gamma_response(e) for e in items], next_cursor or None
+
+    async def get_all_events(self, closed: bool = False) -> list[Event]:
+        """Fetch all events with cursor-based pagination.
+
+        Uses the /events/keyset endpoint (added Apr 10 2026; offset-based
+        /events is deprecated).
         """
-        all_events = []
-        offset = 0
+        all_events: list[Event] = []
         page_size = max(50, min(500, settings.MARKET_FETCH_PAGE_SIZE))
         cap = settings.MAX_EVENTS_TO_SCAN
+        after_cursor: Optional[str] = None
 
         while True:
-            events = await self.get_events(closed=closed, limit=page_size, offset=offset)
+            events, next_cursor = await self._get_events_keyset_page(
+                closed=closed,
+                limit=page_size,
+                after_cursor=after_cursor,
+            )
             if not events:
                 break
 
             all_events.extend(events)
-            offset += page_size
 
             if cap > 0 and len(all_events) >= cap:
                 break
+
+            if not next_cursor:
+                break
+            after_cursor = next_cursor
 
         return all_events
 

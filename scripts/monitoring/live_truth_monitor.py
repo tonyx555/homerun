@@ -795,7 +795,7 @@ async def run_monitor(config: MonitorConfig) -> int:
                         if dependency_missing:
                             provider_rule = "provider_dependency_missing"
                             provider_root_cause = (
-                                "Live execution dependency py-clob-client is missing, so provider truth checks cannot run."
+                                "Live execution dependency py-clob-client-v2 is missing, so provider truth checks cannot run."
                             )
                             provider_required_fix = (
                                 "Install trading dependencies (`backend/requirements-trading.txt`) in the running backend environment."

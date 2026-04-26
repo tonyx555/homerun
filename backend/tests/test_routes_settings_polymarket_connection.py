@@ -21,9 +21,9 @@ def _install_fake_polymarket_modules(
     error: Exception | None = None,
     install_eth_account: bool = True,
 ):
-    py_clob_client = types.ModuleType("py_clob_client")
-    client_module = types.ModuleType("py_clob_client.client")
-    clob_types = types.ModuleType("py_clob_client.clob_types")
+    py_clob_client = types.ModuleType("py_clob_client_v2")
+    client_module = types.ModuleType("py_clob_client_v2.client")
+    clob_types = types.ModuleType("py_clob_client_v2.clob_types")
 
     class ClobClient:
         def __init__(self, host, key, chain_id, creds):
@@ -32,7 +32,7 @@ def _install_fake_polymarket_modules(
             self.chain_id = chain_id
             self.creds = creds
 
-        def get_orders(self):
+        def get_open_orders(self):
             if error is not None:
                 raise error
             return [] if response is None else response
@@ -46,9 +46,9 @@ def _install_fake_polymarket_modules(
     client_module.ClobClient = ClobClient
     clob_types.ApiCreds = ApiCreds
 
-    monkeypatch.setitem(sys.modules, "py_clob_client", py_clob_client)
-    monkeypatch.setitem(sys.modules, "py_clob_client.client", client_module)
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", py_clob_client)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.client", client_module)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", clob_types)
     if install_eth_account:
         eth_account = types.ModuleType("eth_account")
 

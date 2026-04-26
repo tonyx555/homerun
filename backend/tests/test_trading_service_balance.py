@@ -22,14 +22,14 @@ from services.live_execution_service import (
 
 
 class _BalanceClient:
-    def __init__(self, payload, *, fail_on_update: bool = False, builder_sig_type: int | None = 0):
+    def __init__(self, payload, *, fail_on_update: bool = False, builder_signature_type: int | None = 0):
         self.payload = payload
         self.fail_on_update = fail_on_update
         self.update_calls = 0
         self.get_calls = 0
-        if builder_sig_type is not None:
+        if builder_signature_type is not None:
             self.builder = type("Builder", (), {})()
-            self.builder.sig_type = builder_sig_type
+            self.builder.signature_type = builder_signature_type
 
     def update_balance_allowance(self, params=None):
         self.update_calls += 1
@@ -48,10 +48,10 @@ class _BalanceClient:
 
 
 def _install_balance_allowance_modules(monkeypatch) -> None:
-    py_clob_client = types.ModuleType("py_clob_client")
-    clob_types = types.ModuleType("py_clob_client.clob_types")
-    order_builder = types.ModuleType("py_clob_client.order_builder")
-    constants = types.ModuleType("py_clob_client.order_builder.constants")
+    py_clob_client = types.ModuleType("py_clob_client_v2")
+    clob_types = types.ModuleType("py_clob_client_v2.clob_types")
+    order_builder = types.ModuleType("py_clob_client_v2.order_builder")
+    constants = types.ModuleType("py_clob_client_v2.order_builder.constants")
 
     class AssetType:
         COLLATERAL = "COLLATERAL"
@@ -76,10 +76,10 @@ def _install_balance_allowance_modules(monkeypatch) -> None:
     constants.BUY = "BUY"
     constants.SELL = "SELL"
 
-    monkeypatch.setitem(sys.modules, "py_clob_client", py_clob_client)
-    monkeypatch.setitem(sys.modules, "py_clob_client.clob_types", clob_types)
-    monkeypatch.setitem(sys.modules, "py_clob_client.order_builder", order_builder)
-    monkeypatch.setitem(sys.modules, "py_clob_client.order_builder.constants", constants)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2", py_clob_client)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.clob_types", clob_types)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder", order_builder)
+    monkeypatch.setitem(sys.modules, "py_clob_client_v2.order_builder.constants", constants)
 
 
 @pytest.mark.asyncio
@@ -203,7 +203,7 @@ async def test_get_balance_probes_signature_types_and_picks_non_zero_bucket():
             },
             2: {"balance": "0", "allowances": {"exchange": "0"}},
         },
-        builder_sig_type=0,
+        builder_signature_type=0,
     )
 
     result = await service.get_balance()
@@ -211,7 +211,7 @@ async def test_get_balance_probes_signature_types_and_picks_non_zero_bucket():
     assert result["available"] == pytest.approx(72.675329)
     assert result["reserved"] == pytest.approx(0.0)
     assert service._balance_signature_type == 1
-    assert service._client.builder.sig_type == 1
+    assert service._client.builder.signature_type == 1
 
 
 @pytest.mark.asyncio
@@ -229,14 +229,14 @@ async def test_prepare_sell_balance_allowance_selects_signature_type_with_condit
             1: {"balance": "0", "allowance": "0"},
             2: {"balance": "12.5", "allowance": "100.0"},
         },
-        builder_sig_type=0,
+        builder_signature_type=0,
     )
 
     refreshed = await service.prepare_sell_balance_allowance("token-123")
 
     assert refreshed is True
     assert service._balance_signature_type == 2
-    assert service._client.builder.sig_type == 2
+    assert service._client.builder.signature_type == 2
 
 
 @pytest.mark.asyncio
@@ -252,7 +252,7 @@ async def test_sell_pre_submit_gate_blocks_when_conditional_shares_insufficient(
         {
             1: {"balance": "1.2", "allowance": "1.0"},
         },
-        builder_sig_type=1,
+        builder_signature_type=1,
     )
 
     gate_ok, gate_error = await service._enforce_sell_pre_submit_gate(token_id="token-123", size=2.0)
@@ -270,7 +270,7 @@ async def test_sell_pre_submit_gate_rechecks_fresh_snapshot_before_blocking(monk
 
     class _StaleThenFreshClient(_BalanceClient):
         def __init__(self):
-            super().__init__({}, builder_sig_type=1)
+            super().__init__({}, builder_signature_type=1)
             self.snapshot_calls = 0
 
         def get_balance_allowance(self, params=None):
@@ -308,7 +308,7 @@ async def test_buy_pre_submit_gate_blocks_when_collateral_insufficient(monkeypat
         {
             1: {"balance": "4.0", "allowance": "3.0"},
         },
-        builder_sig_type=1,
+        builder_signature_type=1,
     )
 
     gate_ok, gate_error = await service._enforce_buy_pre_submit_gate(
@@ -343,7 +343,7 @@ async def test_place_sell_order_fails_before_submit_when_pre_submit_gate_fails(m
                 {
                     1: {"balance": "1.2", "allowance": "1.0"},
                 },
-                builder_sig_type=1,
+                builder_signature_type=1,
             )
             self.post_calls = 0
 
@@ -395,7 +395,7 @@ async def test_place_buy_order_fails_before_submit_when_pre_submit_gate_fails(mo
                 {
                     1: {"balance": "2.0", "allowance": "2.0"},
                 },
-                builder_sig_type=1,
+                builder_signature_type=1,
             )
             self.post_calls = 0
 
@@ -433,7 +433,7 @@ async def test_buy_pre_submit_gate_auto_recovers_collateral_allowance(monkeypatc
 
     class _StaleThenFreshClient(_BalanceClient):
         def __init__(self):
-            super().__init__({}, builder_sig_type=1)
+            super().__init__({}, builder_signature_type=1)
             self.snapshot_calls = 0
 
         def get_balance_allowance(self, params=None):
@@ -469,7 +469,7 @@ async def test_prepare_sell_balance_allowance_refreshes_clob_cache_only(monkeypa
     service._wallet_address = "0x1234567890abcdef1234567890abcdef12345678"
     service._proxy_funder_address = service._wallet_address
     service._balance_signature_type = 1
-    service._client = _BalanceClient({1: {"balance": "1.0", "allowance": "1.0"}}, builder_sig_type=1)
+    service._client = _BalanceClient({1: {"balance": "1.0", "allowance": "1.0"}}, builder_signature_type=1)
     service.refresh_conditional_balance_allowance = AsyncMock(return_value=True)
     service._select_signature_type_for_conditional_token = AsyncMock(return_value=1)
 
