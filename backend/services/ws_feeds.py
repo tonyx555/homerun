@@ -162,6 +162,42 @@ class ConnectionState(str, Enum):
 
 
 # ---------------------------------------------------------------------------
+# Mid-price sanity guards for binary 0-1 contracts (Polymarket / Kalshi YES/NO)
+# ---------------------------------------------------------------------------
+
+# Prices outside this band are degenerate prints (sub-penny ladders, near-edge
+# crosses). Common during cycle resets on up/down markets and on illiquid books.
+_BINARY_PRICE_LO = 0.005
+_BINARY_PRICE_HI = 0.995
+
+# A spread wider than 50¢ on a 0-1 binary contract means there is no real
+# two-sided market — quoting a mid from it produces noise that fires spurious
+# exit-eval callbacks downstream.
+_BINARY_MAX_SPREAD = 0.50
+
+
+def _safe_binary_mid(best_bid: float, best_ask: float) -> Optional[float]:
+    """Compute a guarded mid for a 0-1 binary contract.
+
+    Returns ``None`` for degenerate books. Mirrors the behavior added in
+    the UpDownWalletMonitor reference implementation: rejects extreme-edge
+    prints and >50¢ spreads, but allows one-sided fallback when the
+    surviving side is in-range.
+    """
+    valid_bid = best_bid > _BINARY_PRICE_LO and best_bid < _BINARY_PRICE_HI
+    valid_ask = best_ask > _BINARY_PRICE_LO and best_ask < _BINARY_PRICE_HI
+    if valid_bid and valid_ask:
+        if best_ask - best_bid > _BINARY_MAX_SPREAD:
+            return None
+        return (best_bid + best_ask) / 2.0
+    if valid_bid:
+        return best_bid
+    if valid_ask:
+        return best_ask
+    return None
+
+
+# ---------------------------------------------------------------------------
 # PriceCache
 # ---------------------------------------------------------------------------
 
@@ -254,18 +290,18 @@ class PriceCache:
         best_bid = bids_sorted[0].price if bids_sorted else 0.0
         best_ask = asks_sorted[0].price if asks_sorted else 0.0
 
-        new_mid = (best_bid + best_ask) / 2.0 if best_bid > 0 and best_ask > 0 else best_bid or best_ask
+        # Guarded mid: returns None for degenerate books (extreme prints,
+        # >50¢ spread). When None, we still cache best_bid/best_ask but skip
+        # the history append and downstream change/update callbacks so
+        # exit-eval and other consumers don't act on noise.
+        safe_new_mid = _safe_binary_mid(best_bid, best_ask)
 
         now_mono = time.monotonic()
         now_epoch = time.time()
-        old_mid = 0.0
         prev = self._entries.get(token_id)
-        if prev:
-            old_mid = (
-                (prev.best_bid + prev.best_ask) / 2.0
-                if prev.best_bid > 0 and prev.best_ask > 0
-                else prev.best_bid or prev.best_ask
-            )
+        safe_old_mid: Optional[float] = (
+            _safe_binary_mid(prev.best_bid, prev.best_ask) if prev else None
+        )
         self._sequence += 1
         sequence = self._sequence
         parsed_exchange_ts = float(exchange_ts) if exchange_ts is not None and exchange_ts > 0 else now_epoch
@@ -279,32 +315,37 @@ class PriceCache:
             sequence=sequence,
         )
         self._entries[token_id] = entry
-        if new_mid > 0:
+        if safe_new_mid is not None:
             history = self._history.get(token_id)
             if history is None:
                 history = deque(maxlen=self._history_max_snapshots)
                 self._history[token_id] = history
-            history.append((now_epoch, new_mid, best_bid, best_ask))
+            history.append((now_epoch, safe_new_mid, best_bid, best_ask))
 
-        # Fire change callbacks outside the lock
+        # Fire change callbacks outside the lock. Only fires on guarded mids
+        # so a degenerate print can't trigger a spurious exit-eval.
         if (
             self._on_change_callbacks
-            and old_mid > 0
-            and new_mid > 0
-            and abs(new_mid - old_mid) / old_mid * 100 >= self._change_threshold_pct
+            and safe_old_mid is not None
+            and safe_old_mid > 0
+            and safe_new_mid is not None
+            and abs(safe_new_mid - safe_old_mid) / safe_old_mid * 100 >= self._change_threshold_pct
         ):
             for cb in self._on_change_callbacks:
                 try:
-                    cb(token_id, old_mid, new_mid)
+                    cb(token_id, safe_old_mid, safe_new_mid)
                 except Exception:
                     pass
 
-        if self._on_update_callbacks:
+        # Update callbacks fire only with a non-degenerate mid for the same
+        # reason. Consumers that need raw bid/ask without the guard should
+        # read them off the cache directly.
+        if self._on_update_callbacks and safe_new_mid is not None:
             for cb in self._on_update_callbacks:
                 try:
                     cb(
                         token_id,
-                        new_mid,
+                        safe_new_mid,
                         best_bid,
                         best_ask,
                         entry.exchange_ts,
@@ -396,17 +437,16 @@ class PriceCache:
     # -- queries ------------------------------------------------------------
 
     def get_mid_price(self, token_id: str) -> Optional[float]:
-        """Return mid price or ``None`` if not cached."""
+        """Return mid price or ``None`` if not cached or the book is degenerate.
+
+        A degenerate book is one where the spread exceeds 50¢ on a 0-1 binary
+        contract or both sides are at the extreme edges (sub-half-cent /
+        99.5¢+). See ``_safe_binary_mid``.
+        """
         entry = self._entries.get(token_id)
         if entry is None:
             return None
-        if entry.best_bid == 0.0 and entry.best_ask == 0.0:
-            return None
-        if entry.best_bid == 0.0:
-            return entry.best_ask
-        if entry.best_ask == 0.0:
-            return entry.best_bid
-        return (entry.best_bid + entry.best_ask) / 2.0
+        return _safe_binary_mid(entry.best_bid, entry.best_ask)
 
     def get_spread(self, token_id: str) -> Optional[float]:
         """Return absolute bid-ask spread or ``None``."""
