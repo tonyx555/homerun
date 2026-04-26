@@ -10,7 +10,6 @@ import {
   BarChart3,
   Brain,
   CheckCircle2,
-  ChevronDown,
   ChevronRight,
   Clock3,
   ExternalLink,
@@ -101,6 +100,18 @@ import { FlashNumber } from './AnimatedNumber'
 import { toTimeValueSeries } from '../lib/priceHistory'
 import StrategyConfigForm from './StrategyConfigForm'
 import AutoresearchView from './AutoresearchView'
+import { TraderConfigFlyout } from './TraderConfigFlyout'
+import {
+  DEFAULT_STRATEGY_KEY,
+  TRADING_SCHEDULE_DAYS,
+  type StrategyCatalogOption,
+  type StrategyOptionDetail,
+  type TradingScheduleDay,
+  type TradingScheduleDraft,
+  normalizeStrategyKey,
+  normalizeStrategyVersion,
+  normalizeVersionList,
+} from './tradingPanelFlyoutShared'
 
 const CortexView = lazy(() => import('./ai/CortexView'))
 
@@ -606,17 +617,6 @@ const STRATEGY_PARAM_GROUP_LABELS: Record<StrategyParamGroupKey, string> = {
   advanced: 'Advanced',
 }
 type TradersScopeMode = 'tracked' | 'pool' | 'individual' | 'group'
-type TradingScheduleDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'
-
-type TradingScheduleDraft = {
-  enabled: boolean
-  days: TradingScheduleDay[]
-  startTimeUtc: string
-  endTimeUtc: string
-  startDateUtc: string
-  endDateUtc: string
-  endAtUtc: string
-}
 
 type GlobalSettingsDraft = {
   runIntervalSeconds: string
@@ -694,19 +694,6 @@ const DEFAULT_ORCHESTRATOR_GLOBAL_RUNTIME = {
   },
   trader_cycle_timeout_seconds: null as number | null,
 } as const
-const TRADING_SCHEDULE_DAYS: TradingScheduleDay[] = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun']
-const TRADING_SCHEDULE_WEEKDAYS: TradingScheduleDay[] = ['mon', 'tue', 'wed', 'thu', 'fri']
-const TRADING_SCHEDULE_WEEKENDS: TradingScheduleDay[] = ['sat', 'sun']
-const TRADING_SCHEDULE_DAY_LABEL: Record<TradingScheduleDay, string> = {
-  mon: 'Mon',
-  tue: 'Tue',
-  wed: 'Wed',
-  thu: 'Thu',
-  fri: 'Fri',
-  sat: 'Sat',
-  sun: 'Sun',
-}
-
 const OPEN_ORDER_STATUSES = new Set(['submitted', 'executed', 'open'])
 const RESOLVED_ORDER_STATUSES = new Set([
   'resolved',
@@ -797,7 +784,6 @@ const STRATEGY_LABELS: Record<string, string> = {
   tail_end_carry: 'Opportunity Tail Carry',
 }
 
-const DEFAULT_STRATEGY_KEY = 'btc_eth_highfreq'
 const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
   crypto: 'btc_eth_highfreq',
   manual: 'manual_wallet_position',
@@ -810,16 +796,6 @@ const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
 type StrategyOption = {
   key: string
   label: string
-}
-
-type StrategyOptionDetail = {
-  key: string
-  label: string
-  defaultParams: Record<string, unknown>
-  paramFields: Array<Record<string, unknown>>
-  version: number | null
-  latestVersion: number | null
-  versions: number[]
 }
 
 const STABLE_OUTCOME_LABELS_BY_MARKET_SIDE = new Map<string, string>()
@@ -3469,41 +3445,10 @@ function uniqueSourceList(values: string[]): string[] {
   return out
 }
 
-function normalizeStrategyKey(value: unknown): string {
-  const key = String(value || '').trim().toLowerCase()
-  return key || DEFAULT_STRATEGY_KEY
-}
-
 function normalizeStrategyKeyForSource(sourceKey: string, value: unknown): string {
   const normalizedSource = normalizeSourceKey(sourceKey)
   const key = normalizeStrategyKey(value)
   return key || DEFAULT_STRATEGY_BY_SOURCE[normalizedSource] || DEFAULT_STRATEGY_KEY
-}
-
-function normalizeStrategyVersion(value: unknown): number | null {
-  if (value === null || value === undefined) return null
-  if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
-    return Math.trunc(value)
-  }
-  const raw = String(value || '').trim().toLowerCase()
-  if (!raw || raw === 'latest') return null
-  const parsed = Number(raw.startsWith('v') ? raw.slice(1) : raw)
-  if (!Number.isFinite(parsed) || parsed <= 0) return null
-  return Math.trunc(parsed)
-}
-
-function normalizeVersionList(value: unknown): number[] {
-  const raw = Array.isArray(value) ? value : []
-  const seen = new Set<number>()
-  const out: number[] = []
-  for (const item of raw) {
-    const normalized = normalizeStrategyVersion(item)
-    if (normalized == null || seen.has(normalized)) continue
-    seen.add(normalized)
-    out.push(normalized)
-  }
-  out.sort((left, right) => right - left)
-  return out
 }
 
 function normalizeTradingScheduleDay(value: unknown): TradingScheduleDay | null {
@@ -5372,67 +5317,6 @@ function groupStrategyParamFields(fields: Array<Record<string, unknown>>): Strat
   return orderedGroups
 }
 
-function FlyoutSection({
-  title,
-  subtitle,
-  icon: Icon,
-  count,
-  defaultOpen = true,
-  iconClassName = 'text-orange-500',
-  tone = 'default',
-  children,
-}: {
-  title: string
-  subtitle?: string
-  icon: any
-  count?: string
-  defaultOpen?: boolean
-  iconClassName?: string
-  tone?: 'default' | 'danger'
-  children: ReactNode
-}) {
-  const [open, setOpen] = useState(defaultOpen)
-
-  return (
-    <Card
-      className={cn(
-        'rounded-xl shadow-none overflow-hidden',
-        tone === 'danger' ? 'bg-red-500/5 border-red-500/25' : 'bg-card/40 border-border/40'
-      )}
-    >
-      <button
-        type="button"
-        onClick={() => setOpen((current) => !current)}
-        className={cn(
-          'w-full flex items-center justify-between gap-2 px-3 py-2 transition-colors border-b',
-          tone === 'danger'
-            ? 'border-red-500/20 hover:bg-red-500/10'
-            : 'border-border/40 hover:bg-muted/25'
-        )}
-      >
-        <div className="flex items-center gap-1.5">
-          <Icon className={cn('w-3.5 h-3.5', iconClassName)} />
-          <h4 className="text-[10px] uppercase tracking-widest font-semibold">{title}</h4>
-        </div>
-        <div className="flex items-center gap-1.5">
-          {count ? (
-            <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-muted/60 text-muted-foreground">
-              {count}
-            </span>
-          ) : null}
-          {open ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
-        </div>
-      </button>
-      {open ? (
-        <div className="px-3 py-3 space-y-3">
-          {subtitle ? <p className="text-[10px] text-muted-foreground/70 -mt-0.5">{subtitle}</p> : null}
-          {children}
-        </div>
-      ) : null}
-    </Card>
-  )
-}
-
 type TradingPanelProps = {
   isConnected?: boolean
 }
@@ -6026,14 +5910,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return out
   }, [sourceStrategyDetailsByKey])
-
-  type StrategyCatalogOption = {
-    key: string
-    label: string
-    sourceKey: string
-    sourceLabel: string
-    detail: StrategyOptionDetail
-  }
 
   const allStrategyOptions = useMemo<StrategyCatalogOption[]>(() => {
     const out: StrategyCatalogOption[] = []
@@ -12726,7 +12602,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         </SheetContent>
       </Sheet>
 
-      <Sheet
+      <TraderConfigFlyout
         open={traderFlyoutOpen}
         onOpenChange={(open) => {
           setTraderFlyoutOpen(open)
@@ -12738,557 +12614,51 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
             setTuneRevertError(null)
           }
         }}
-      >
-        <SheetContent side="right" className="w-full sm:max-w-3xl p-0">
-          <div className="h-full min-h-0 flex flex-col">
-            <div className="border-b border-border px-4 py-3">
-              <SheetHeader className="space-y-1 text-left">
-                <SheetTitle className="text-base">
-                  {traderFlyoutMode === 'create' ? 'Create Auto Bot' : 'Edit Auto Bot'}
-                </SheetTitle>
-                <SheetDescription>
-                  {traderFlyoutMode === 'create'
-                    ? 'Configure a new bot profile with explicit strategy, source, risk, and schedule controls.'
-                    : 'Update strategy, source, risk, and schedule settings for this bot.'}
-                </SheetDescription>
-              </SheetHeader>
-            </div>
-
-            <ScrollArea className="flex-1 min-h-0 px-4 py-3">
-              <div className="space-y-3 pb-2">
-                <FlyoutSection
-                  title="Bot Profile"
-                  icon={Sparkles}
-                  subtitle="Name this bot. The strategy and source are configured below."
-                >
-                  <div className="rounded-md border border-border/60 bg-muted/15 px-3 py-2">
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-[11px] uppercase tracking-wider text-muted-foreground">Bot Mode</p>
-                      <Badge className="h-5 px-1.5 text-[10px]" variant={draftMode === 'live' ? 'destructive' : 'outline'}>
-                        {draftMode.toUpperCase()}
-                      </Badge>
-                    </div>
-                    <p className="mt-1 text-[10px] text-muted-foreground/75">
-                      This bot is scoped to {draftMode === 'live' ? 'live' : 'sandbox'} execution only.
-                    </p>
-                  </div>
-
-                  <div>
-                    <Label>Name</Label>
-                    <Input value={draftName} onChange={(event) => setDraftName(event.target.value)} className="mt-1" />
-                  </div>
-
-                  <div>
-                    <Label>Description</Label>
-                    <Input value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} className="mt-1" />
-                  </div>
-
-                  <div>
-                    <Label>Latency Class</Label>
-                    <Select
-                      value={draftLatencyClass}
-                      onValueChange={(value: string) => setDraftLatencyClass((value === 'fast' || value === 'slow') ? (value as TraderLatencyClass) : 'normal')}
-                    >
-                      <SelectTrigger className="mt-1">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="fast">Fast — event-driven, sub-second single-leg</SelectItem>
-                        <SelectItem value="normal">Normal — shared orchestrator loop (default)</SelectItem>
-                        <SelectItem value="slow">Slow — relaxed budgets for multi-leg / recon-heavy strategies</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <p className="mt-1 text-[10px] text-muted-foreground/75 leading-tight">
-                      Fast-tier bots run in the ``fast_trader_runtime`` with an isolated DB pool and sub-second budgets.
-                      They MUST be single-leg strategies (one market per signal).
-                      Pick Normal unless you explicitly need sub-second latency.
-                    </p>
-                  </div>
-
-                  {traderFlyoutMode === 'create' ? (
-                    <div>
-                      <Label>Copy Settings From Existing Bot (Optional)</Label>
-                      <div className="mt-1 flex items-center gap-1">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={draftCopyFromMode === 'shadow' ? 'default' : 'outline'}
-                          className="h-6 px-2 text-[10px]"
-                          onClick={() => setDraftCopyFromMode('shadow')}
-                        >
-                          Sandbox Bots
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={draftCopyFromMode === 'live' ? 'default' : 'outline'}
-                          className="h-6 px-2 text-[10px]"
-                          onClick={() => setDraftCopyFromMode('live')}
-                        >
-                          Live Bots
-                        </Button>
-                      </div>
-                      <Select
-                        value={draftCopyFromTraderId || '__none__'}
-                        onValueChange={applyCreateCopyFromSelection}
-                      >
-                        <SelectTrigger className="mt-1">
-                          <SelectValue placeholder="Start from scratch" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="__none__">Start from scratch</SelectItem>
-                          {copySourceTraders.map((trader) => (
-                            <SelectItem key={trader.id} value={trader.id}>
-                              {trader.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {copySourceTraders.length === 0 ? (
-                        <p className="mt-1 text-[10px] text-muted-foreground/75 leading-tight">
-                          No {draftCopyFromMode === 'live' ? 'live' : 'sandbox'} bots available to copy from.
-                        </p>
-                      ) : null}
-                      <p className="mt-1 text-[10px] text-muted-foreground/75 leading-tight">
-                        Creates a new bot with copied source config, strategy params, interval, risk limits, and schedule settings
-                        from the selected bot. Trades, decisions, orders, and events are never copied.
-                      </p>
-                    </div>
-                  ) : null}
-                </FlyoutSection>
-
-                <FlyoutSection
-                  title="Strategy"
-                  icon={Zap}
-                  subtitle="Pick the strategy this bot will run. The signal source is derived from the strategy."
-                >
-                  {(() => {
-                    const detail = effectiveDraftStrategyDetail
-                    const sourceKey = effectiveDraftSourceKey
-                    const sourceLabel = draftStrategyOption?.sourceLabel || sourceKey.toUpperCase()
-                    const latestVersion = detail?.latestVersion ?? detail?.version ?? null
-                    const selectedVersion = effectiveDraftStrategyVersion
-                    const selectedVersionToken = selectedVersion == null ? 'latest' : `v${selectedVersion}`
-                    const availableVersions = (() => {
-                      const rows = normalizeVersionList(detail?.versions || [])
-                      if (latestVersion != null && !rows.includes(latestVersion)) rows.unshift(latestVersion)
-                      if (selectedVersion != null && !rows.includes(selectedVersion)) rows.unshift(selectedVersion)
-                      return rows
-                    })()
-                    return (
-                      <>
-                        <div>
-                          <Label>Strategy</Label>
-                          <Select
-                            value={normalizeStrategyKey(draftStrategyKey)}
-                            onValueChange={setDraftStrategy}
-                          >
-                            <SelectTrigger className="mt-1">
-                              <SelectValue placeholder="Choose a strategy" />
-                            </SelectTrigger>
-                            <SelectContent>
-                              {allStrategyOptions.map((option) => (
-                                <SelectItem key={option.key} value={option.key}>
-                                  <span>{option.label}</span>
-                                  <span className="ml-2 text-muted-foreground/70 text-[10px]">
-                                    {option.sourceLabel}
-                                  </span>
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                          <div className="mt-1.5 flex items-center gap-1.5 text-[10px] text-muted-foreground/80">
-                            <span>Source:</span>
-                            <Badge
-                              variant="outline"
-                              className="h-4 px-1.5 text-[9px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
-                            >
-                              {sourceLabel || 'AUTO'}
-                            </Badge>
-                            <span className="text-muted-foreground/60">auto-derived from strategy</span>
-                          </div>
-                        </div>
-
-                        {detail ? (
-                          <div className="mt-3">
-                            <Label>Version</Label>
-                            <div className="mt-1 flex min-w-0 items-center gap-1.5">
-                              <Badge
-                                variant="outline"
-                                className="h-5 min-w-0 flex-1 truncate px-1.5 text-[10px] font-mono border-emerald-500/30 text-emerald-300 bg-emerald-500/10"
-                              >
-                                {latestVersion != null ? `Latest v${latestVersion}` : 'Latest'}
-                              </Badge>
-                              <Select
-                                value={selectedVersionToken}
-                                onValueChange={setDraftStrategyVersionFromValue}
-                              >
-                                <SelectTrigger className="h-7 w-[160px] shrink-0 text-[10px] font-mono">
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  <SelectItem value="latest">
-                                    {latestVersion != null ? `latest (v${latestVersion})` : 'latest'}
-                                  </SelectItem>
-                                  {availableVersions.map((version) => (
-                                    <SelectItem key={`v${version}`} value={`v${version}`}>
-                                      {`v${version}`}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            </div>
-                          </div>
-                        ) : null}
-                      </>
-                    )
-                  })()}
-                </FlyoutSection>
-
-                <FlyoutSection
-                  title="Trading Schedule"
-                  icon={Clock3}
-                  iconClassName="text-cyan-500"
-                  count={tradingScheduleDraft.enabled ? 'active' : 'always-on'}
-                  subtitle="UTC-only bot gate by days, time window, and optional date bounds."
-                >
-                  <div className="rounded-md border border-border p-3 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div>
-                        <p className="text-sm font-medium">Enable Schedule Gate</p>
-                        <p className="text-[10px] text-muted-foreground">
-                          When off, this bot can trade any time.
-                        </p>
-                      </div>
-                      <Switch
-                        checked={tradingScheduleDraft.enabled}
-                        onCheckedChange={(checked) => setDraftTradingSchedule({ enabled: checked })}
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-1.5 md:grid-cols-6">
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            enabled: false,
-                          })
-                        }
-                      >
-                        Always On
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            enabled: true,
-                            days: [...TRADING_SCHEDULE_DAYS],
-                            startTimeUtc: '00:00',
-                            endTimeUtc: '23:59',
-                          })
-                        }
-                      >
-                        24/7
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            enabled: true,
-                            days: [...TRADING_SCHEDULE_WEEKDAYS],
-                            startTimeUtc: '00:00',
-                            endTimeUtc: '23:59',
-                          })
-                        }
-                      >
-                        Weekdays
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            enabled: true,
-                            days: [...TRADING_SCHEDULE_WEEKENDS],
-                            startTimeUtc: '00:00',
-                            endTimeUtc: '23:59',
-                          })
-                        }
-                      >
-                        Weekends
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            enabled: true,
-                            startTimeUtc: '00:00',
-                            endTimeUtc: '23:59',
-                          })
-                        }
-                      >
-                        Reset Window
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        variant="outline"
-                        className="h-6 px-2 text-[11px]"
-                        onClick={() =>
-                          setDraftTradingSchedule({
-                            startDateUtc: '',
-                            endDateUtc: '',
-                            endAtUtc: '',
-                          })
-                        }
-                      >
-                        Clear Bounds
-                      </Button>
-                    </div>
-
-                    <div>
-                      <Label className="text-[11px] text-muted-foreground">Days (UTC)</Label>
-                      <div className="mt-1 flex flex-wrap gap-1.5">
-                        {TRADING_SCHEDULE_DAYS.map((day) => {
-                          const selected = tradingScheduleDraft.days.includes(day)
-                          return (
-                            <Button
-                              key={day}
-                              type="button"
-                              size="sm"
-                              variant={selected ? 'default' : 'outline'}
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => toggleTradingScheduleDay(day)}
-                              disabled={!tradingScheduleDraft.enabled}
-                            >
-                              {TRADING_SCHEDULE_DAY_LABEL[day]}
-                            </Button>
-                          )
-                        })}
-                      </div>
-                    </div>
-
-                    <div className="grid gap-2 md:grid-cols-2">
-                      <div>
-                        <Label className="text-[11px] text-muted-foreground">Start Time (UTC)</Label>
-                        <Input
-                          type="time"
-                          value={tradingScheduleDraft.startTimeUtc}
-                          onChange={(event) => setDraftTradingSchedule({ startTimeUtc: event.target.value })}
-                          className="mt-1 h-8 text-xs font-mono"
-                          disabled={!tradingScheduleDraft.enabled}
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[11px] text-muted-foreground">End Time (UTC)</Label>
-                        <Input
-                          type="time"
-                          value={tradingScheduleDraft.endTimeUtc}
-                          onChange={(event) => setDraftTradingSchedule({ endTimeUtc: event.target.value })}
-                          className="mt-1 h-8 text-xs font-mono"
-                          disabled={!tradingScheduleDraft.enabled}
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[11px] text-muted-foreground">Start Date (UTC)</Label>
-                        <Input
-                          type="date"
-                          value={tradingScheduleDraft.startDateUtc}
-                          onChange={(event) => setDraftTradingSchedule({ startDateUtc: event.target.value })}
-                          className="mt-1 h-8 text-xs font-mono"
-                          disabled={!tradingScheduleDraft.enabled}
-                        />
-                      </div>
-                      <div>
-                        <Label className="text-[11px] text-muted-foreground">End Date (UTC)</Label>
-                        <Input
-                          type="date"
-                          value={tradingScheduleDraft.endDateUtc}
-                          onChange={(event) => setDraftTradingSchedule({ endDateUtc: event.target.value })}
-                          className="mt-1 h-8 text-xs font-mono"
-                          disabled={!tradingScheduleDraft.enabled}
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <Label className="text-[11px] text-muted-foreground">Hard End Timestamp (UTC ISO, optional)</Label>
-                      <Input
-                        value={tradingScheduleDraft.endAtUtc}
-                        onChange={(event) => setDraftTradingSchedule({ endAtUtc: event.target.value })}
-                        placeholder="2026-02-28T23:59:59Z"
-                        className="mt-1 h-8 text-xs font-mono"
-                        disabled={!tradingScheduleDraft.enabled}
-                      />
-                    </div>
-                  </div>
-                </FlyoutSection>
-
-                {traderFlyoutMode === 'edit' && selectedTrader ? (
-                  <FlyoutSection
-                    title="Delete / Disable Bot"
-                    icon={AlertTriangle}
-                    iconClassName="text-red-500"
-                    tone="danger"
-                    count={selectedTraderDeleteExposureSummary || 'No open exposure'}
-                    defaultOpen={false}
-                  >
-                    <p className="text-xs text-muted-foreground">
-                      Open live positions: {selectedTraderOpenLivePositions} • Open shadow positions: {selectedTraderOpenShadowPositions}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      Open live orders: {selectedTraderOpenLiveOrders} • Open shadow orders: {selectedTraderOpenShadowOrders}
-                    </p>
-                    <Select
-                      value={deleteAction}
-                      onValueChange={(value) => {
-                        setDeleteAction(value as 'block' | 'disable' | 'force_delete' | 'transfer_delete')
-                        setDeleteForceConfirm(false)
-                        if (value !== 'transfer_delete') setDeleteTransferTargetId(null)
-                      }}
-                    >
-                      <SelectTrigger className="h-8">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="disable">Disable (Recommended)</SelectItem>
-                        <SelectItem value="transfer_delete">Delete &amp; Transfer Trades</SelectItem>
-                        <SelectItem value="block">Delete (No Open Positions)</SelectItem>
-                        <SelectItem value="force_delete">Force Delete (Override Live Checks)</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    {deleteAction === 'transfer_delete' ? (
-                      <div className="space-y-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3">
-                        <p className="text-xs font-medium text-amber-700 dark:text-amber-100">
-                          Transfer open trades to another bot before deleting
-                        </p>
-                        <p className="text-[11px] text-amber-700/90 dark:text-amber-100/90">
-                          All open positions and active orders from {selectedTrader.name} will be reassigned to the selected bot, then {selectedTrader.name} will be permanently deleted.
-                        </p>
-                        <Select
-                          value={deleteTransferTargetId || ''}
-                          onValueChange={(value) => setDeleteTransferTargetId(value || null)}
-                        >
-                          <SelectTrigger className="h-8">
-                            <SelectValue placeholder="Select target bot..." />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {traders
-                              .filter((t) => t.id !== selectedTrader.id)
-                              .map((t) => (
-                                <SelectItem key={t.id} value={t.id}>
-                                  {t.name}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                    ) : null}
-                    {deleteAction === 'force_delete' ? (
-                      <div className="space-y-2 rounded-md border border-red-500/40 bg-red-500/10 p-3">
-                        <p className="text-xs font-medium text-red-700 dark:text-red-100">
-                          {selectedTraderHasLiveDeleteExposure ? 'Force delete with live exposure' : 'Confirm force delete'}
-                        </p>
-                        <p className="text-[11px] text-red-700/90 dark:text-red-100/90">
-                          {selectedTraderHasLiveDeleteExposure
-                            ? `This permanently deletes ${selectedTrader.name} while live exposure is still open. Only continue if those positions or orders were already flattened outside Homerun.`
-                            : `This permanently deletes ${selectedTrader.name} and bypasses the normal exposure safety check.`}
-                        </p>
-                        {selectedTraderHasAnyDeleteExposure ? (
-                          <p className="text-[11px] text-red-700/90 dark:text-red-100/90">
-                            Current exposure: {selectedTraderDeleteExposureSummary}.
-                          </p>
-                        ) : null}
-                        <div className="flex items-center justify-between gap-3 rounded-md border border-red-500/30 bg-background/70 px-3 py-2">
-                          <div className="space-y-0.5">
-                            <Label className="text-xs text-foreground">Confirm permanent deletion</Label>
-                            <p className="text-[11px] text-muted-foreground">
-                              {selectedTraderHasLiveDeleteExposure
-                                ? 'I understand this can orphan live exposure if it is still open.'
-                                : 'I understand this permanently deletes the bot.'}
-                            </p>
-                          </div>
-                          <Switch checked={deleteForceConfirm} onCheckedChange={setDeleteForceConfirm} />
-                        </div>
-                      </div>
-                    ) : null}
-                    <Button
-                      variant="destructive"
-                      className="h-8 text-xs"
-                      disabled={
-                        deleteTraderMutation.isPending ||
-                        (deleteAction === 'force_delete' && !deleteForceConfirm) ||
-                        (deleteAction === 'transfer_delete' && !deleteTransferTargetId)
-                      }
-                      onClick={() => deleteTraderMutation.mutate({
-                        traderId: selectedTrader.id,
-                        action: deleteAction,
-                        ...(deleteAction === 'transfer_delete' && deleteTransferTargetId
-                          ? { transferToTraderId: deleteTransferTargetId }
-                          : {}),
-                      })}
-                    >
-                      {deleteTraderMutation.isPending
-                        ? 'Processing...'
-                        : deleteAction === 'disable'
-                          ? 'Disable Bot'
-                          : deleteAction === 'transfer_delete'
-                            ? 'Delete & Transfer'
-                            : deleteAction === 'force_delete'
-                              ? 'Force Delete Bot'
-                              : 'Delete Bot'}
-                    </Button>
-                  </FlyoutSection>
-                ) : null}
-
-              </div>
-            </ScrollArea>
-
-            <div className="border-t border-border px-4 py-3 flex flex-wrap items-center justify-end gap-2">
-              {saveError ? (
-                <div className="mr-auto text-xs text-red-500 max-w-[65%] break-words leading-tight" title={saveError}>
-                  {saveError}
-                </div>
-              ) : null}
-              <Button variant="outline" onClick={() => setTraderFlyoutOpen(false)} disabled={traderFlyoutBusy}>
-                Close
-              </Button>
-              <Button
-                onClick={() => {
-                  if (traderFlyoutMode === 'create') {
-                    createTraderMutation.mutate()
-                    return
-                  }
-                  if (selectedTrader) {
-                    saveTraderMutation.mutate(selectedTrader.id)
-                  }
-                }}
-                disabled={
-                  traderFlyoutBusy ||
-                  !draftName.trim() ||
-                  (traderFlyoutMode === 'create' && !draftCopyFromTraderId && !effectiveDraftSourceKey)
-                }
-              >
-                {traderFlyoutMode === 'create' ? 'Create Bot' : 'Save Bot'}
-              </Button>
-            </div>
-          </div>
-        </SheetContent>
-      </Sheet>
+        mode={traderFlyoutMode}
+        busy={traderFlyoutBusy}
+        saveError={saveError}
+        draftMode={draftMode}
+        draftName={draftName}
+        setDraftName={setDraftName}
+        draftDescription={draftDescription}
+        setDraftDescription={setDraftDescription}
+        draftLatencyClass={draftLatencyClass}
+        setDraftLatencyClass={setDraftLatencyClass}
+        draftCopyFromMode={draftCopyFromMode}
+        setDraftCopyFromMode={setDraftCopyFromMode}
+        draftCopyFromTraderId={draftCopyFromTraderId}
+        copySourceTraders={copySourceTraders}
+        applyCreateCopyFromSelection={applyCreateCopyFromSelection}
+        draftStrategyKey={draftStrategyKey}
+        setDraftStrategy={setDraftStrategy}
+        setDraftStrategyVersionFromValue={setDraftStrategyVersionFromValue}
+        allStrategyOptions={allStrategyOptions}
+        draftStrategyOption={draftStrategyOption}
+        effectiveDraftSourceKey={effectiveDraftSourceKey}
+        effectiveDraftStrategyDetail={effectiveDraftStrategyDetail}
+        effectiveDraftStrategyVersion={effectiveDraftStrategyVersion}
+        tradingScheduleDraft={tradingScheduleDraft}
+        setDraftTradingSchedule={setDraftTradingSchedule}
+        toggleTradingScheduleDay={toggleTradingScheduleDay}
+        selectedTrader={selectedTrader}
+        selectedTraderDeleteExposureSummary={selectedTraderDeleteExposureSummary}
+        selectedTraderHasLiveDeleteExposure={selectedTraderHasLiveDeleteExposure}
+        selectedTraderHasAnyDeleteExposure={selectedTraderHasAnyDeleteExposure}
+        selectedTraderOpenLivePositions={selectedTraderOpenLivePositions}
+        selectedTraderOpenShadowPositions={selectedTraderOpenShadowPositions}
+        selectedTraderOpenLiveOrders={selectedTraderOpenLiveOrders}
+        selectedTraderOpenShadowOrders={selectedTraderOpenShadowOrders}
+        traders={traders}
+        deleteAction={deleteAction}
+        setDeleteAction={setDeleteAction}
+        deleteForceConfirm={deleteForceConfirm}
+        setDeleteForceConfirm={setDeleteForceConfirm}
+        deleteTransferTargetId={deleteTransferTargetId}
+        setDeleteTransferTargetId={setDeleteTransferTargetId}
+        deleteTraderMutation={deleteTraderMutation}
+        createTraderMutation={createTraderMutation}
+        saveTraderMutation={saveTraderMutation}
+      />
 
       <Sheet open={cortexFlyoutOpen} onOpenChange={setCortexFlyoutOpen}>
         <SheetContent side="right" className="w-full sm:max-w-2xl p-0">
