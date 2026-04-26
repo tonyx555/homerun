@@ -448,6 +448,260 @@ async def test_list_fast_traders_excludes_disabled_and_paused_traders():
 
 
 @pytest.mark.asyncio
+async def test_execute_fast_signal_pre_submits_skeleton_before_clob(monkeypatch):
+    """The skeleton TraderOrder row must exist in the DB by the time the
+    CLOB call runs — that's what makes the idempotency lock crash-safe.
+    Verified by inspecting the DB from the mock submit_execution_leg, which
+    fires while the fast path is mid-submit."""
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_pre_submit_skeleton")
+
+    skeleton_observed = {"row": None}
+
+    async def fake_submit_execution_leg(**_kwargs):
+        # The pre-submit row must already be visible to a fresh session at
+        # this point — i.e. it was committed before the CLOB call started.
+        async with session_factory() as probe_session:
+            row = (
+                await probe_session.execute(
+                    select(TraderOrder).where(TraderOrder.signal_id == "signal-skeleton")
+                )
+            ).scalar_one_or_none()
+            skeleton_observed["row"] = row
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="executed",
+            effective_price=0.42,
+            error_message=None,
+            payload={"provider_status": "filled"},
+            provider_order_id="provider-skel-1",
+            provider_clob_order_id="clob-skel-1",
+            shares=7.0,
+            notional_usd=3.0,
+        )
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-skeleton")
+            signal = await session.get(TradeSignal, "signal-skeleton")
+            result = await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id=None,
+                decision_audit=None,
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="skeleton test",
+            )
+            await session.commit()
+
+        # The skeleton observed mid-CLOB had the in-flight marker.
+        assert skeleton_observed["row"] is not None
+        assert skeleton_observed["row"].payload_json.get("fast_submission_state") == "in_flight"
+        assert skeleton_observed["row"].status == "submitted"
+
+        # After CLOB returned, the same row was UPDATED in place — there's
+        # exactly one TraderOrder, with the final state and provider IDs.
+        async with session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(TraderOrder).where(TraderOrder.signal_id == "signal-skeleton")
+                )
+            ).scalars().all()
+
+        assert len(rows) == 1
+        assert rows[0].id == skeleton_observed["row"].id
+        assert rows[0].status == "executed"
+        assert rows[0].provider_order_id == "provider-skel-1"
+        assert rows[0].payload_json.get("fast_submission_state") == "completed"
+        assert result.status == "executed"
+        assert result.orders_written == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_keeps_lock_when_clob_raises_after_pre_submit(monkeypatch):
+    """If the CLOB call raises after the pre-submit row was committed, the
+    row stays so the duplicate-check guard blocks any retry. Marker flips
+    to clob_exception so the reconcile sweep knows what to do with it."""
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_clob_exception_lock")
+
+    async def fake_submit_execution_leg(**_kwargs):
+        raise RuntimeError("transport error mid-call")
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-clob-raise")
+            signal = await session.get(TradeSignal, "signal-clob-raise")
+            result = await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id=None,
+                decision_audit=None,
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="clob raise test",
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(TraderOrder).where(TraderOrder.signal_id == "signal-clob-raise")
+                )
+            ).scalar_one()
+
+        assert row.status == "failed"
+        assert row.payload_json.get("fast_submission_state") == "clob_exception"
+        assert "transport error mid-call" in (row.payload_json.get("exception_message") or "")
+        assert result.status == "failed"
+        assert result.orders_written == 1  # row remains as the lock
+        assert result.payload.get("trader_order_id") == row.id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_stamps_deterministic_idempotency_key(monkeypatch):
+    """Every fast-tier submission must (1) derive the same key from
+    (trader_id, signal_id) on every call, (2) attach it to the leg dict so
+    the CLOB layer forwards it as ``OrderArgsV2.metadata``, and (3) persist
+    it on ``TraderOrder.payload_json["fast_idempotency_key"]`` so the
+    orphan-reconcile sweep can match a venue order back to the row even
+    after a crash that lost ``provider_clob_order_id``."""
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_idempotency_key")
+
+    captured_legs: list[dict] = []
+
+    async def fake_submit_execution_leg(*, leg, **_kwargs):
+        captured_legs.append(dict(leg))
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="executed",
+            effective_price=0.42,
+            error_message=None,
+            payload={"provider_status": "filled"},
+            provider_order_id="provider-1",
+            provider_clob_order_id="clob-1",
+            shares=7.0,
+            notional_usd=3.0,
+        )
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-idemp")
+            signal = await session.get(TradeSignal, "signal-idemp")
+            await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id=None,
+                decision_audit=None,
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="idempotency stamp test",
+            )
+            await session.commit()
+
+        # The key derivation is deterministic — re-derive and compare.
+        from services.trader_orchestrator.fast_idempotency import derive_fast_idempotency_key
+
+        expected_key = derive_fast_idempotency_key(trader_id="fast-trader", signal_id="signal-idemp")
+        # Sanity: real key shape, not the all-zero default.
+        assert expected_key.startswith("0x") and len(expected_key) == 66
+        assert expected_key != "0x" + ("0" * 64)
+
+        # (1) Stamped into the leg dict for the CLOB layer.
+        assert len(captured_legs) == 1
+        assert captured_legs[0].get("metadata") == expected_key
+
+        # (2) Persisted onto the TraderOrder row's payload.
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(TraderOrder).where(TraderOrder.signal_id == "signal-idemp")
+                )
+            ).scalar_one()
+        assert row.payload_json.get("fast_idempotency_key") == expected_key
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_records_latency_via_existing_metrics(monkeypatch):
+    """Fast path should hook into ``execution_latency_metrics`` — the same
+    sink used by the slow tier — so the SLO dashboard sees both paths."""
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_latency_metric")
+
+    recorded: list[dict] = []
+
+    async def fake_record(**kwargs):
+        recorded.append(kwargs)
+
+    async def fake_submit_execution_leg(**_kwargs):
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="executed",
+            effective_price=0.42,
+            error_message=None,
+            payload={"provider_status": "filled"},
+            provider_order_id="latency-provider",
+            provider_clob_order_id="latency-clob",
+            shares=7.0,
+            notional_usd=3.0,
+        )
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+    monkeypatch.setattr(fast_submit.execution_latency_metrics, "record", fake_record)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-latency")
+            signal = await session.get(TradeSignal, "signal-latency")
+            await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id=None,
+                decision_audit=None,
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="latency test",
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+    assert len(recorded) == 1
+    sample = recorded[0]
+    assert sample["trader_id"] == "fast-trader"
+    payload = sample["payload"]
+    # Stage we can actually measure on the fast path:
+    assert payload.get("submit_round_trip_ms") is not None
+    assert payload["submit_round_trip_ms"] >= 0
+
+
+@pytest.mark.asyncio
 async def test_execute_fast_signal_links_deferred_decision_to_order(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_deferred_decision_link")
 
@@ -504,6 +758,72 @@ async def test_execute_fast_signal_links_deferred_decision_to_order(monkeypatch)
         assert decision.decision == "selected"
         assert order.decision_id == "decision-linked"
         assert order.provider_order_id == "provider-order-1"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_fast_signal_refuses_duplicate_when_existing_order_for_signal(monkeypatch):
+    """If a TraderOrder already exists for (trader_id, signal_id), the fast
+    path must refuse to submit again — this is the recovery guard for the
+    'cursor advance silently failed' case described in the audit."""
+    engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_duplicate_guard")
+
+    submit_calls = {"count": 0}
+
+    async def fake_submit_execution_leg(**_kwargs):
+        submit_calls["count"] += 1
+        return LegSubmitResult(
+            leg_id="leg-1",
+            status="executed",
+            effective_price=0.42,
+            error_message=None,
+            payload={"provider_status": "filled"},
+            notional_usd=3.0,
+        )
+
+    monkeypatch.setattr(fast_submit, "submit_execution_leg", fake_submit_execution_leg)
+
+    try:
+        async with session_factory() as session:
+            await _seed_trader_and_signal(session, "signal-dup")
+            # Pre-populate a TraderOrder for this signal as if the previous
+            # submission attempt had succeeded but the cursor advance failed.
+            session.add(
+                TraderOrder(
+                    id="prev-order-1",
+                    trader_id="fast-trader",
+                    signal_id="signal-dup",
+                    source="generic-source",
+                    market_id="market-signal-dup",
+                    mode="live",
+                    status="executed",
+                    notional_usd=3.0,
+                    payload_json={"fast_tier": True},
+                )
+            )
+            await session.commit()
+
+            signal = await session.get(TradeSignal, "signal-dup")
+            result = await fast_submit.execute_fast_signal(
+                session,
+                trader_id="fast-trader",
+                signal=signal,
+                decision_id=None,
+                decision_audit=None,
+                strategy_key="generic-fast-strategy",
+                strategy_version=None,
+                strategy_params={},
+                mode="live",
+                size_usd=3.0,
+                reason="duplicate guard test",
+            )
+
+        assert result.status == "skipped"
+        assert result.orders_written == 0
+        assert result.payload.get("reason") == "duplicate_signal_existing_order"
+        assert result.payload.get("existing_trader_order_id") == "prev-order-1"
+        assert submit_calls["count"] == 0  # CLOB was NOT touched
     finally:
         await engine.dispose()
 

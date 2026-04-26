@@ -6728,6 +6728,155 @@ async def upsert_trader_signal_cursor(
         await _commit_with_retry(session)
 
 
+async def reconcile_orphaned_fast_submissions(
+    session: AsyncSession,
+    *,
+    trader_id: str,
+    min_age_seconds: float = 30.0,
+    commit: bool = True,
+) -> dict[str, Any]:
+    """Resolve fast-tier rows whose CLOB submission outcome was lost.
+
+    The fast path writes a skeleton ``TraderOrder`` row before the CLOB
+    submission and updates it in place when the venue replies. Two
+    failure modes leave the row in a half-resolved state:
+
+    1. ``fast_submission_state == "in_flight"`` — process killed
+       between CLOB success and the post-update flush. Venue may or may
+       not have an order; we don't know which.
+    2. ``fast_submission_state == "clob_exception"`` — submit raised; we
+       don't know if the request reached the venue.
+    3. ``fast_submission_state == "post_update_failed"`` — CLOB
+       succeeded, venue has the order, but our post-update DB write
+       failed so ``provider_clob_order_id`` is missing.
+
+    This function looks up live open orders at the venue by the
+    deterministic metadata key the fast path stamps on every
+    submission. For each match it patches ``provider_clob_order_id``
+    onto the local row, allowing the existing
+    ``reconcile_live_provider_orders`` to take over status syncing on
+    the next cycle. Rows older than ``min_age_seconds`` whose key is
+    not present at the venue are marked ``failed`` with reason
+    ``orphan_no_venue_match`` — the venue never received the order.
+
+    Returns a structured result for telemetry / log consumption.
+    """
+    from services.live_execution_service import live_execution_service
+    from services.trader_orchestrator.fast_idempotency import (
+        is_fast_idempotency_key,
+        normalize_metadata_for_match,
+    )
+
+    cutoff = _now() - timedelta(seconds=max(0.0, float(min_age_seconds)))
+    candidate_rows = list(
+        (
+            await session.execute(
+                select(TraderOrder)
+                .where(TraderOrder.trader_id == trader_id)
+                .where(TraderOrder.mode == "live")
+                .where(TraderOrder.provider_clob_order_id.is_(None))
+                .where(TraderOrder.created_at < cutoff)
+                .where(_visible_trader_order_query_clause())
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    eligible: list[tuple[TraderOrder, str]] = []
+    for row in candidate_rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else None
+        if not payload:
+            continue
+        if not bool(payload.get("fast_tier")):
+            continue
+        submission_state = str(payload.get("fast_submission_state") or "").strip()
+        if submission_state not in {"in_flight", "clob_exception", "post_update_failed"}:
+            continue
+        idempotency_key = str(payload.get("fast_idempotency_key") or "").strip()
+        if not is_fast_idempotency_key(idempotency_key):
+            continue
+        eligible.append((row, idempotency_key))
+
+    result: dict[str, Any] = {
+        "trader_id": trader_id,
+        "candidates_seen": len(candidate_rows),
+        "eligible": len(eligible),
+        "matched": 0,
+        "marked_orphan": 0,
+        "venue_unreachable": False,
+        "errors": [],
+    }
+    if not eligible:
+        if commit:
+            await _commit_with_retry(session)
+        return result
+
+    snapshots_by_metadata: dict[str, list[dict[str, Any]]] = {}
+    venue_reachable = False
+    # Don't ``release_conn`` here — that would detach the eligible ORM
+    # objects, and the patches below would silently fail to flush. The
+    # orphan sweep is a low-frequency operation (startup + periodic), so
+    # holding the connection across one venue HTTP call is acceptable.
+    try:
+        snapshots_by_metadata = await live_execution_service.get_open_order_snapshots_by_metadata()
+        venue_reachable = True
+    except Exception as exc:
+        logger.warning(
+            "Orphan reconcile: failed to fetch venue snapshots",
+            trader_id=trader_id,
+            exc_info=exc,
+        )
+        result["errors"].append(f"venue_fetch_failed: {type(exc).__name__}")
+    result["venue_unreachable"] = not venue_reachable
+
+    if not venue_reachable:
+        # Don't mark anything orphan when we can't verify against the venue.
+        if commit:
+            await _commit_with_retry(session)
+        return result
+
+    now_ts = _now()
+    for row, idempotency_key in eligible:
+        normalized = normalize_metadata_for_match(idempotency_key)
+        if not normalized:
+            continue
+        venue_orders = snapshots_by_metadata.get(normalized) or []
+        if venue_orders:
+            # Pick the most-recent snapshot if duplicates exist (shouldn't,
+            # but be defensive — same metadata + same maker + same market
+            # should be 1:1).
+            snapshot = venue_orders[0]
+            clob_order_id = str(snapshot.get("clob_order_id") or "").strip()
+            if not clob_order_id:
+                continue
+            row.provider_clob_order_id = clob_order_id
+            updated_payload = dict(row.payload_json or {})
+            updated_payload["fast_submission_state"] = "reconciled"
+            updated_payload["reconciled_at_iso"] = now_ts.isoformat()
+            updated_payload["reconciled_via"] = "orphan_metadata_match"
+            updated_payload["provider_clob_order_id"] = clob_order_id
+            row.payload_json = updated_payload
+            row.updated_at = now_ts
+            result["matched"] += 1
+        else:
+            # Venue has no order with this metadata. The submission never
+            # reached the venue (or was cancelled before our sweep ran).
+            # Either way, the local row should not stay live.
+            row.status = "failed"
+            row.error_message = (row.error_message or "orphan: no venue match for fast_idempotency_key")
+            updated_payload = dict(row.payload_json or {})
+            updated_payload["fast_submission_state"] = "orphan_no_venue_match"
+            updated_payload["resolved_at_iso"] = now_ts.isoformat()
+            row.payload_json = updated_payload
+            row.updated_at = now_ts
+            result["marked_orphan"] += 1
+
+    if commit:
+        await _commit_with_retry(session)
+    return result
+
+
 async def reconcile_live_provider_orders(
     session: AsyncSession,
     *,

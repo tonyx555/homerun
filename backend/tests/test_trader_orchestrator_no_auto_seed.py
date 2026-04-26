@@ -268,8 +268,8 @@ async def test_create_trader_pauses_live_start_without_explicit_risk_caps(postgr
     assert trader["mode"] == "live"
     assert trader["is_enabled"] is True
     assert trader["is_paused"] is True
-    assert float(trader["risk_limits"]["max_trade_notional_usd"]) == 350.0
-    assert float(trader["risk_limits"]["max_position_notional_usd"]) == 350.0
+    assert float(trader["risk_limits"]["max_trade_notional_usd"]) == 5.0
+    assert float(trader["risk_limits"]["max_position_notional_usd"]) == 5.0
 
 
 @pytest.mark.asyncio

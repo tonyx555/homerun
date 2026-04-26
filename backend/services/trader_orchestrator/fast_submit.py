@@ -29,14 +29,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from datetime import datetime
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import release_conn
+from models.database import TraderOrder, release_conn
 import services.trader_hot_state as hot_state
+from services.execution_latency_metrics import execution_latency_metrics
 from services.trader_order_verification import (
     TRADER_ORDER_VERIFICATION_LOCAL,
     append_trader_order_verification_event,
 )
+from services.trader_orchestrator.fast_idempotency import derive_fast_idempotency_key
 from services.trader_orchestrator.order_manager import LegSubmitResult, submit_execution_leg
 from services.signal_bus import set_trade_signal_status
 from services.trader_orchestrator_state import (
@@ -51,6 +56,27 @@ from utils.converters import safe_float
 from utils.logger import get_logger
 from utils.signal_helpers import normalize_position_side
 from utils.utcnow import utcnow
+
+# Marker key + values stored in TraderOrder.payload_json so we don't need a
+# new status enum value (which would ripple through every status filter in
+# trader_orchestrator_state). Reading these values is the cleanup-sweep /
+# reconcile job's responsibility — the in-flight skeleton looks like a
+# normal "submitted" row to existing code.
+_SUBMISSION_STATE_KEY = "fast_submission_state"
+_SUBMISSION_STATE_IN_FLIGHT = "in_flight"
+_SUBMISSION_STATE_COMPLETED = "completed"
+_SUBMISSION_STATE_CLOB_RAISED = "clob_exception"
+_SUBMISSION_STATE_POST_UPDATE_FAILED = "post_update_failed"
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return parsed
 
 logger = get_logger(__name__)
 
@@ -198,6 +224,49 @@ async def execute_fast_signal(
     mode_key = str(mode or "").strip().lower() or "shadow"
     notional = float(max(0.0, safe_float(size_usd, 0.0) or 0.0))
 
+    # ----- Idempotency guard --------------------------------------------------
+    # If a TraderOrder already exists for this (trader_id, signal_id), the
+    # signal was previously submitted — typically a crash/retry where the
+    # cursor advance silently failed (advance_fast_trader_cursor swallows
+    # errors so a stale cursor doesn't block future trades). Refusing here
+    # blocks the "DB row exists but cursor wasn't advanced" duplicate case.
+    #
+    # NOTE: this check does NOT protect against the rarer "CLOB order
+    # placed but DB row never written" case (process killed between
+    # submit_execution_leg succeeding and session.flush()). Closing that
+    # gap requires a deterministic provider client_order_id derived from
+    # the signal so a restart can reconcile against the provider; tracked
+    # as a follow-up — see ``docs/fast-lane-idempotency.md``.
+    signal_id = str(getattr(signal, "id", "") or "").strip()
+    if signal_id:
+        existing_id = (
+            await session.execute(
+                select(TraderOrder.id)
+                .where(TraderOrder.trader_id == trader_id)
+                .where(TraderOrder.signal_id == signal_id)
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if existing_id:
+            logger.info(
+                "Fast-tier refusing duplicate submission",
+                trader_id=trader_id,
+                signal_id=signal_id,
+                existing_order_id=str(existing_id),
+            )
+            return FastSubmitResult(
+                session_id="",
+                status="skipped",
+                effective_price=None,
+                error_message=f"trader_order already exists for signal {signal_id}",
+                orders_written=0,
+                payload={
+                    "fast_tier": True,
+                    "reason": "duplicate_signal_existing_order",
+                    "existing_trader_order_id": str(existing_id),
+                },
+            )
+
     position, parse_error = _extract_single_position(signal)
     if parse_error is not None or position is None:
         return FastSubmitResult(
@@ -211,57 +280,35 @@ async def execute_fast_signal(
 
     leg = _leg_from_position(position, signal)
 
-    # Release the DB connection (if the session has one checked out)
-    # while the external CLOB submission is in flight.  The submission
-    # is pure network IO and does not touch ``session``; holding a
-    # fast-tier pool slot across a 300-500ms upstream roundtrip both
-    # starves the pool and creates a window in which an outer
-    # cancellation can tear the asyncpg extended-protocol state in
-    # half (the ``cannot switch to state X; another operation in
-    # progress`` pattern).  ``release_conn`` is a no-op when the
-    # session is still lazy.
-    try:
-        async with release_conn(session):
-            leg_result = await submit_execution_leg(
-                mode=mode_key,
-                signal=signal,
-                leg=leg,
-                notional_usd=notional,
-                strategy_params=strategy_params,
-            )
-    except Exception as exc:
-        logger.warning("Fast-tier leg submit raised", trader_id=trader_id, exc_info=exc)
-        return FastSubmitResult(
-            session_id="",
-            status="failed",
-            effective_price=None,
-            error_message=f"submit_execution_leg raised: {type(exc).__name__}: {exc}",
-            orders_written=0,
-            payload={"fast_tier": True, "reason": "submit_exception"},
-        )
+    # ----- Deterministic idempotency key --------------------------------------
+    # Derived from (trader_id, signal_id) so a retry produces the same key.
+    # Stamped into the venue's order metadata field AND onto the skeleton
+    # row's payload_json so the orphan-reconcile sweep can match a venue
+    # order back to its TraderOrder when the local DB write was lost.
+    idempotency_key = derive_fast_idempotency_key(
+        trader_id=trader_id,
+        signal_id=signal_id,
+    )
+    if mode_key == "live" and idempotency_key:
+        # Maker/taker submission goes through the leg dict; stamp metadata
+        # there so order_manager + live_execution_adapter forward it
+        # untouched into ``OrderArgsV2.metadata``.
+        leg = {**leg, "metadata": idempotency_key}
 
-    # Map leg result status onto trader_order status.  submit_execution_leg
-    # returns: executed | failed | skipped | cancelled.  "skipped" is a
-    # pre-submit gate rejection (e.g. buy gate) and produces no order.
-    leg_status = str(leg_result.status or "").strip().lower()
-    if leg_status == "skipped":
-        return FastSubmitResult(
-            session_id="",
-            status="skipped",
-            effective_price=leg_result.effective_price,
-            error_message=leg_result.error_message,
-            orders_written=0,
-            payload={"fast_tier": True, "reason": "pre_submit_gate", "leg": leg_result.payload},
-        )
-
-    order_status = {
-        "executed": "executed",
-        "failed": "failed",
-        "cancelled": "cancelled",
-    }.get(leg_status, "failed")
-
-    order_payload = _result_payload_for_trader_order(leg_result=leg_result, now_iso=now_iso)
-
+    # ----- Pre-submit skeleton row (idempotency lock) -------------------------
+    # Write a TraderOrder row marked in-flight BEFORE the CLOB submission so
+    # that if the process dies between CLOB success and the post-submit DB
+    # update, the next runtime cycle's duplicate-check guard sees this row
+    # and refuses to re-submit. The row is mutated to its final state on
+    # CLOB return — we never INSERT twice. The marker lives in payload_json
+    # so existing status filters (UNFILLED_ORDER_STATUSES, cleanup sweeps)
+    # continue to work unchanged.
+    pre_submit_payload: dict[str, Any] = {
+        "fast_tier": True,
+        _SUBMISSION_STATE_KEY: _SUBMISSION_STATE_IN_FLIGHT,
+        "pre_submit_at_iso": now_iso,
+        "fast_idempotency_key": idempotency_key,
+    }
     try:
         if decision_audit is not None and decision_id:
             await create_trader_decision(
@@ -287,19 +334,182 @@ async def execute_fast_signal(
             strategy_key=strategy_key,
             strategy_version=strategy_version,
             mode=mode_key,
-            status=order_status,
-            notional_usd=leg_result.notional_usd if leg_result.notional_usd is not None else notional,
-            effective_price=leg_result.effective_price,
+            status="submitted",
+            notional_usd=notional,
+            effective_price=None,
             reason=reason,
-            payload=order_payload,
-            error_message=leg_result.error_message,
+            payload=pre_submit_payload,
         )
         session.add(order)
+        # Commit the skeleton so the lock is durable across the CLOB call.
+        # ``release_conn`` (used below to free the pool slot during the
+        # network I/O) calls ``session.reset()`` which would otherwise drop
+        # any unflushed/uncommitted state. Committing here is the price of
+        # crash-survivability — without it, a process kill mid-CLOB leaves
+        # the venue with an order and our DB with nothing, defeating the
+        # idempotency guard.
+        await session.commit()
+    except Exception as exc:
+        try:
+            await session.rollback()
+        except Exception as rollback_exc:
+            logger.debug("Fast-tier pre-submit rollback failed", trader_id=trader_id, exc_info=rollback_exc)
+        logger.error("Fast-tier pre-submit row write failed", trader_id=trader_id, exc_info=exc)
+        return FastSubmitResult(
+            session_id="",
+            status="failed",
+            effective_price=None,
+            error_message=f"fast pre-submit raised: {type(exc).__name__}: {exc}",
+            orders_written=0,
+            payload={"fast_tier": True, "reason": "pre_submit_persist_failed"},
+        )
+    pre_submit_order_id = str(order.id)
+
+    # ----- CLOB submission ----------------------------------------------------
+    # Release the DB connection (if the session has one checked out)
+    # while the external CLOB submission is in flight.  The submission
+    # is pure network IO and does not touch ``session``; holding a
+    # fast-tier pool slot across a 300-500ms upstream roundtrip both
+    # starves the pool and creates a window in which an outer
+    # cancellation can tear the asyncpg extended-protocol state in
+    # half (the ``cannot switch to state X; another operation in
+    # progress`` pattern).  ``release_conn`` is a no-op when the
+    # session is still lazy.
+    submit_started_at = utcnow()
+    try:
+        async with release_conn(session):
+            leg_result = await submit_execution_leg(
+                mode=mode_key,
+                signal=signal,
+                leg=leg,
+                notional_usd=notional,
+                strategy_params=strategy_params,
+            )
+    except Exception as exc:
+        logger.warning(
+            "Fast-tier leg submit raised",
+            trader_id=trader_id,
+            pre_submit_order_id=pre_submit_order_id,
+            exc_info=exc,
+        )
+        # CLOB call raised — we don't know if the venue accepted the order.
+        # Mark the skeleton row as failed-with-clob-exception so the reconcile
+        # sweep can match it against any orders the venue actually has, and
+        # so the duplicate-check guard still blocks re-submission.
+        try:
+            # ``release_conn`` detached the pre-submit ``order`` ORM object;
+            # re-attach it before mutating so the UPDATE actually flushes.
+            refetched_after_raise = await session.get(TraderOrder, pre_submit_order_id)
+            target = refetched_after_raise if refetched_after_raise is not None else order
+            target.status = "failed"
+            target.error_message = f"submit_execution_leg raised: {type(exc).__name__}: {exc}"
+            target.payload_json = {
+                **(target.payload_json or {}),
+                _SUBMISSION_STATE_KEY: _SUBMISSION_STATE_CLOB_RAISED,
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+            }
+            await session.flush()
+        except Exception as flush_exc:
+            logger.debug(
+                "Fast-tier flush of clob-exception marker failed",
+                trader_id=trader_id,
+                exc_info=flush_exc,
+            )
+        return FastSubmitResult(
+            session_id="",
+            status="failed",
+            effective_price=None,
+            error_message=f"submit_execution_leg raised: {type(exc).__name__}: {exc}",
+            orders_written=1,
+            payload={
+                "fast_tier": True,
+                "reason": "submit_exception",
+                "trader_order_id": pre_submit_order_id,
+            },
+            created_orders=[{"id": pre_submit_order_id}],
+        )
+    submit_completed_at = utcnow()
+
+    # ``release_conn`` resets the session, which detaches the pre-submit
+    # ``order`` ORM object. Re-attach by fetching it back so subsequent
+    # attribute mutations propagate to an UPDATE on flush.
+    refetched = await session.get(TraderOrder, pre_submit_order_id)
+    if refetched is not None:
+        order = refetched
+
+    # Map leg result status onto trader_order status.  submit_execution_leg
+    # returns: executed | failed | skipped | cancelled.  "skipped" is a
+    # pre-submit gate rejection (e.g. buy gate) and produces no order.
+    leg_status = str(leg_result.status or "").strip().lower()
+    if leg_status == "skipped":
+        # The CLOB never received an order — the buy-gate (or similar) rejected
+        # before submission. Repurpose the skeleton row to reflect that so we
+        # don't leave a "submitted" ghost; cancelled is the closest taxonomy.
+        try:
+            order.status = "cancelled"
+            order.error_message = leg_result.error_message
+            order.payload_json = {
+                **(order.payload_json or {}),
+                _SUBMISSION_STATE_KEY: _SUBMISSION_STATE_COMPLETED,
+                "reason": "pre_submit_gate",
+                "leg": leg_result.payload,
+            }
+            await session.flush()
+        except Exception as flush_exc:
+            logger.debug(
+                "Fast-tier flush of pre-submit-gate marker failed",
+                trader_id=trader_id,
+                exc_info=flush_exc,
+            )
+        return FastSubmitResult(
+            session_id="",
+            status="skipped",
+            effective_price=leg_result.effective_price,
+            error_message=leg_result.error_message,
+            orders_written=1,
+            payload={
+                "fast_tier": True,
+                "reason": "pre_submit_gate",
+                "leg": leg_result.payload,
+                "trader_order_id": pre_submit_order_id,
+            },
+            created_orders=[{"id": pre_submit_order_id}],
+        )
+
+    order_status = {
+        "executed": "executed",
+        "failed": "failed",
+        "cancelled": "cancelled",
+    }.get(leg_status, "failed")
+
+    order_payload = _result_payload_for_trader_order(leg_result=leg_result, now_iso=now_iso)
+    order_payload[_SUBMISSION_STATE_KEY] = _SUBMISSION_STATE_COMPLETED
+    order_payload["fast_tier"] = True
+    order_payload["fast_idempotency_key"] = idempotency_key
+    submit_completed_iso = submit_completed_at.isoformat()
+    order_payload.setdefault("submit_started_at_iso", submit_started_at.isoformat())
+    order_payload.setdefault("submit_completed_at_iso", submit_completed_iso)
+
+    # ----- Post-submit update -------------------------------------------------
+    # Mutate the same skeleton row in place (no second INSERT) so the
+    # idempotency lock survives even if this update fails. Critically, we
+    # do *not* roll back on failure — the CLOB has already executed, and
+    # rolling back the lock would let the next runtime cycle re-submit.
+    try:
+        order.status = order_status
+        order.notional_usd = leg_result.notional_usd if leg_result.notional_usd is not None else notional
+        order.effective_price = leg_result.effective_price
+        order.error_message = leg_result.error_message
+        order.payload_json = order_payload
+        order.provider_order_id = leg_result.provider_order_id or order.provider_order_id
+        order.provider_clob_order_id = leg_result.provider_clob_order_id or order.provider_clob_order_id
+
         event_payload = dict(order.payload_json or {})
         event_payload.update({"status": str(order.status or ""), "mode": str(order.mode or "")})
         append_trader_order_verification_event(
             session,
-            trader_order_id=str(order.id),
+            trader_order_id=pre_submit_order_id,
             verification_status=str(order.verification_status or TRADER_ORDER_VERIFICATION_LOCAL),
             source=order.verification_source,
             event_type="order_created",
@@ -316,7 +526,7 @@ async def execute_fast_signal(
             hot_state.upsert_active_order(
                 trader_id=trader_id,
                 mode=mode_key,
-                order_id=str(order.id),
+                order_id=pre_submit_order_id,
                 status=order_status,
                 market_id=str(order.market_id or ""),
                 direction=str(order.direction or ""),
@@ -328,19 +538,81 @@ async def execute_fast_signal(
                 payload=order_payload,
             )
     except Exception as exc:
+        # CLOB has already executed — DO NOT rollback. Mark the row so the
+        # reconcile sweep knows post-update is incomplete and can repair
+        # the missing fields against the venue snapshot.
+        logger.error(
+            "Fast-tier trader_order post-submit update failed",
+            trader_id=trader_id,
+            pre_submit_order_id=pre_submit_order_id,
+            exc_info=exc,
+        )
         try:
-            await session.rollback()
-        except Exception as rollback_exc:
-            logger.debug("Fast-tier trader_order write rollback failed", trader_id=trader_id, exc_info=rollback_exc)
-        logger.error("Fast-tier trader_order write failed", trader_id=trader_id, exc_info=exc)
+            order.payload_json = {
+                **(order.payload_json or {}),
+                _SUBMISSION_STATE_KEY: _SUBMISSION_STATE_POST_UPDATE_FAILED,
+                "post_update_error_type": type(exc).__name__,
+                "post_update_error_message": str(exc),
+            }
+            await session.flush()
+        except Exception as flush_exc:
+            logger.debug(
+                "Fast-tier flush of post-update marker failed",
+                trader_id=trader_id,
+                exc_info=flush_exc,
+            )
         return FastSubmitResult(
             session_id="",
             status="failed",
             effective_price=leg_result.effective_price,
-            error_message=f"fast order persist raised: {type(exc).__name__}: {exc}",
-            orders_written=0,
-            payload={"fast_tier": True, "reason": "persist_failed"},
+            error_message=f"fast order post-update raised: {type(exc).__name__}: {exc}",
+            orders_written=1,
+            payload={
+                "fast_tier": True,
+                "reason": "post_update_failed",
+                "trader_order_id": pre_submit_order_id,
+            },
+            created_orders=[{"id": pre_submit_order_id}],
         )
+
+    # ----- Latency telemetry --------------------------------------------------
+    # Hook into the existing execution_latency_metrics buffer so the fast
+    # path shows up in the same SLO dashboard as the orchestrated slow
+    # tier. We populate the stage keys this path can actually measure;
+    # the slow-tier-only stages (wake_to_context_ready_ms etc.) stay None.
+    try:
+        signal_payload_dict = getattr(signal, "payload_json", None)
+        signal_payload_dict = signal_payload_dict if isinstance(signal_payload_dict, dict) else {}
+        emitted_at = (
+            _parse_iso(str(signal_payload_dict.get("signal_emitted_at") or signal_payload_dict.get("ingested_at") or ""))
+            or getattr(signal, "created_at", None)
+        )
+        if emitted_at is not None and getattr(emitted_at, "tzinfo", None) is None:
+            from datetime import timezone as _tz
+            emitted_at = emitted_at.replace(tzinfo=_tz.utc)
+
+        def _delta_ms(start: Any, end: Any) -> int | None:
+            if start is None or end is None:
+                return None
+            try:
+                return max(0, int((end - start).total_seconds() * 1000))
+            except Exception:
+                return None
+
+        latency_payload = {
+            "submit_round_trip_ms": _delta_ms(submit_started_at, submit_completed_at),
+            "emit_to_submit_start_ms": _delta_ms(emitted_at, submit_started_at),
+        }
+        await execution_latency_metrics.record(
+            trader_id=trader_id,
+            source=str(getattr(signal, "source", "") or ""),
+            strategy_key=str(strategy_key or getattr(signal, "strategy_type", "") or ""),
+            payload=latency_payload,
+        )
+    except Exception as exc:
+        # Telemetry is best-effort; never let a metric failure roll back a
+        # successful trade.
+        logger.debug("Fast-tier latency record failed", trader_id=trader_id, exc_info=exc)
 
     return FastSubmitResult(
         session_id="",
@@ -350,12 +622,14 @@ async def execute_fast_signal(
         orders_written=1,
         payload={
             "fast_tier": True,
-            "trader_order_id": str(getattr(order, "id", "")),
+            "trader_order_id": pre_submit_order_id,
             "leg": leg_result.payload,
             "mode": mode_key,
             "submitted_at": now_iso,
+            "submit_started_at_iso": submit_started_at.isoformat(),
+            "submit_completed_at_iso": submit_completed_iso,
         },
-        created_orders=[{"id": str(getattr(order, "id", ""))}],
+        created_orders=[{"id": pre_submit_order_id}],
     )
 
 

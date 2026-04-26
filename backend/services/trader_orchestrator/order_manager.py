@@ -865,6 +865,7 @@ async def submit_execution_leg(
         allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
         aggressive_limit_buy_submit_as_gtc=aggressive_limit_buy_submit_as_gtc,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
+        metadata=str(leg.get("metadata") or "") or None,
     )
 
     execution_error_text = str(execution.error_message or "").lower()
