@@ -18,6 +18,21 @@ DB_RETRY_ATTEMPTS = 4
 DB_RETRY_BASE_DELAY_SECONDS = 0.05
 DB_RETRY_MAX_DELAY_SECONDS = 0.4
 
+_DB_CONNECTION_BROKEN_MARKERS = (
+    "cannot switch to state",
+    "another operation",
+    "connection is closed",
+    "underlying connection is closed",
+    "connection has been closed",
+    "connection was closed",
+    "closed the connection unexpectedly",
+    "terminating connection",
+    "connection reset by peer",
+    "broken pipe",
+    "connectiondoesnotexist",
+    "closed in the middle of operation",
+)
+
 _DB_RETRYABLE_MARKERS = (
     "deadlock detected",
     "serialization failure",
@@ -27,19 +42,28 @@ _DB_RETRYABLE_MARKERS = (
     "sorry, too many clients already",
     "remaining connection slots are reserved",
     "cannot connect now",
-    "connection is closed",
-    "underlying connection is closed",
-    "connection has been closed",
-    "closed the connection unexpectedly",
-    "terminating connection",
-    "connection reset by peer",
-    "broken pipe",
-    "connection was closed",
-    "connectiondoesnotexist",
-    "closed in the middle of operation",
-    "another operation",
-    "cannot switch to state",
-)
+) + _DB_CONNECTION_BROKEN_MARKERS
+
+
+def _db_error_message(exc: Exception) -> str:
+    return str(getattr(exc, "orig", exc)).lower()
+
+
+def is_db_connection_broken(exc: Exception) -> bool:
+    """True when the SQLAlchemy session's asyncpg connection is in a state
+    no further work can recover from on the same connection.
+
+    Examples include the asyncpg ``InternalClientError: cannot switch to
+    state X; another operation in progress`` raised after a query is
+    cancelled mid extended-query protocol, plus the various
+    ``connection is closed`` / disconnect markers.  When this returns
+    True the session must be invalidated (``session.invalidate()``)
+    before the connection can be released to the pool — otherwise the
+    next checkout reuses a poisoned connection and produces the same
+    error.
+    """
+    message = _db_error_message(exc)
+    return any(marker in message for marker in _DB_CONNECTION_BROKEN_MARKERS)
 
 
 def is_retryable_db_error(exc: Exception) -> bool:
@@ -53,7 +77,7 @@ def is_retryable_db_error(exc: Exception) -> bool:
     context = getattr(exc, "__context__", None)
     if isinstance(context, timeout_types):
         return False
-    message = str(getattr(exc, "orig", exc)).lower()
+    message = _db_error_message(exc)
     return any(marker in message for marker in _DB_RETRYABLE_MARKERS)
 
 
@@ -116,19 +140,39 @@ async def commit_with_retry(
             # Commit has already succeeded under the shield OR was never
             # started; in either case there is nothing to roll back.
             raise
-        except Exception:
+        except Exception as exc:
             try:
                 await asyncio.shield(session.rollback())
             except Exception:
                 pass
+            if is_db_connection_broken(exc):
+                # The asyncpg connection's protocol state is corrupted
+                # (e.g. mid-cancel "another operation in progress").  Drop
+                # the connection so the pool replaces it instead of handing
+                # the same poisoned socket back on the next checkout.
+                try:
+                    await asyncio.shield(session.invalidate())
+                except Exception:
+                    pass
             raise
+
+    def _commit_is_retryable(exc: Exception) -> bool:
+        # Connection-broken errors during commit are NOT retried here.
+        # The original transaction's writes are already gone — retrying
+        # commit() on a freshly-reconnected (and therefore empty) session
+        # would silently report success without persisting anything.
+        # Bubble the error so the caller can either re-issue the writes
+        # or abandon the cycle.
+        if is_db_connection_broken(exc):
+            return False
+        return is_retryable(exc)
 
     await run_with_db_retries(
         _commit,
         max_attempts=max_attempts,
         base_delay=base_delay,
         max_delay=max_delay,
-        is_retryable=is_retryable,
+        is_retryable=_commit_is_retryable,
     )
 
 

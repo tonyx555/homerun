@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from threading import Lock
@@ -73,6 +74,25 @@ _SCANNER_ACTIVITY_WRITE_STATEMENT_TIMEOUT_MS = 2500
 _TRADERS_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS = 4000
 _MARKET_CATALOG_WRITE_STATEMENT_TIMEOUT_MS = 8000
 _SCANNER_STATE_PROJECTION_STATEMENT_TIMEOUT_MS = 8000
+
+# Process-local TTL cache for the market_catalog row.  The catalog row
+# carries a tens-of-megabytes ``markets_json`` payload; reading it
+# costs ~1s end-to-end (TOAST decompression + transfer + deserialise)
+# regardless of how warm the buffer cache is.  The catalog updates at
+# roughly the scanner cadence (~1 write/minute), so a 5s TTL keeps
+# every reader within one cycle of fresh data while collapsing dozens
+# of redundant 68 MB transfers per minute into a single fetch.
+#
+# The cache is per-process; cross-process invalidation relies solely
+# on the TTL.  ``write_market_catalog`` clears it eagerly so the
+# writer's own process sees its own write immediately.
+_MARKET_CATALOG_CACHE_TTL_SECONDS = 5.0
+_market_catalog_cache: dict[str, Any] = {}
+_market_catalog_cache_lock = asyncio.Lock()
+
+
+def _market_catalog_cache_invalidate() -> None:
+    _market_catalog_cache.clear()
 
 
 async def _commit_with_retry(session: AsyncSession) -> None:
@@ -503,6 +523,79 @@ async def write_market_catalog(
     if int(update_result.rowcount or 0) == 0:
         session.add(MarketCatalog(id=CATALOG_ID, **values))
     await _commit_with_retry(session)
+    # Drop the read-side cache so this process's next read sees the
+    # write it just made.  Other processes pick it up via TTL.
+    _market_catalog_cache_invalidate()
+
+
+async def _fetch_market_catalog_metadata(session: AsyncSession) -> dict[str, Any]:
+    """Read just the small scalar columns from market_catalog (no JSON)."""
+    from models.database import MarketCatalog
+
+    stmt = select(
+        MarketCatalog.updated_at,
+        MarketCatalog.event_count,
+        MarketCatalog.market_count,
+        MarketCatalog.fetch_duration_seconds,
+        MarketCatalog.error,
+    ).where(MarketCatalog.id == CATALOG_ID)
+    row = (await session.execute(stmt)).one_or_none()
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
+    if row is None:
+        return {"updated_at": None, "error": None}
+    rm = row._mapping
+    return {
+        "updated_at": rm.get("updated_at"),
+        "event_count": rm.get("event_count"),
+        "market_count": rm.get("market_count"),
+        "fetch_duration_seconds": rm.get("fetch_duration_seconds"),
+        "error": rm.get("error"),
+    }
+
+
+async def _fetch_market_catalog_full(
+    session: AsyncSession,
+) -> tuple[list[Any], list[Any], dict[str, Any]]:
+    """Fetch the full row (both events_json and markets_json + metadata)."""
+    from models.database import MarketCatalog
+
+    stmt = select(
+        MarketCatalog.updated_at,
+        MarketCatalog.event_count,
+        MarketCatalog.market_count,
+        MarketCatalog.fetch_duration_seconds,
+        MarketCatalog.error,
+        MarketCatalog.events_json,
+        MarketCatalog.markets_json,
+    ).where(MarketCatalog.id == CATALOG_ID)
+    # The JSON columns can be tens of megabytes; extend the timeout
+    # so this query isn't killed by the default global 60s.
+    await session.execute(text("SET LOCAL statement_timeout = '120s'"))
+    row = (await session.execute(stmt)).one_or_none()
+    try:
+        if session.in_transaction():
+            await session.rollback()
+    except Exception:
+        pass
+    if row is None:
+        return [], [], {"updated_at": None, "error": None}
+    rm = row._mapping
+    events_raw = rm.get("events_json")
+    markets_raw = rm.get("markets_json")
+    events_payload = list(events_raw) if isinstance(events_raw, list) else []
+    markets_payload = list(markets_raw) if isinstance(markets_raw, list) else []
+    metadata = {
+        "updated_at": rm.get("updated_at"),
+        "event_count": rm.get("event_count"),
+        "market_count": rm.get("market_count"),
+        "fetch_duration_seconds": rm.get("fetch_duration_seconds"),
+        "error": rm.get("error"),
+    }
+    return events_payload, markets_payload, metadata
 
 
 async def read_market_catalog(
@@ -512,73 +605,61 @@ async def read_market_catalog(
     include_markets: bool = True,
     validate: bool = True,
 ) -> tuple[list, list, dict[str, Any]]:
-    """Read persisted market catalog. Returns (events, markets, metadata)."""
-    from models.database import MarketCatalog
+    """Read persisted market catalog. Returns (events, markets, metadata).
+
+    Backed by a process-local TTL cache (~5s) for the JSON-heavy paths
+    so dozens of readers within a single scanner cycle share one DB
+    fetch.  The metadata-only path bypasses the cache because it does
+    not touch the JSON columns and is already cheap.
+    """
     from models.market import Event, Market
 
-    columns = [
-        MarketCatalog.updated_at,
-        MarketCatalog.event_count,
-        MarketCatalog.market_count,
-        MarketCatalog.fetch_duration_seconds,
-        MarketCatalog.error,
-    ]
-    if include_events:
-        columns.append(MarketCatalog.events_json)
-    if include_markets:
-        columns.append(MarketCatalog.markets_json)
+    # Metadata-only callers never touch the JSON columns; serve them
+    # directly without consulting or warming the cache.
+    if not include_events and not include_markets:
+        metadata = await _fetch_market_catalog_metadata(session)
+        return [], [], metadata
 
-    stmt = select(*columns).where(MarketCatalog.id == CATALOG_ID)
-    # The market catalog JSON can be tens of megabytes; extend
-    # the statement timeout so the query isn't killed by the
-    # default 30s limit.
-    if include_markets or include_events:
-        await session.execute(text("SET LOCAL statement_timeout = '120s'"))
-    row = (await session.execute(stmt)).one_or_none()
-    if row is None:
-        return [], [], {"updated_at": None, "error": None}
+    cache = _market_catalog_cache
+    loaded_at = cache.get("loaded_at_mono")
+    fresh = (
+        loaded_at is not None
+        and (time.monotonic() - loaded_at) < _MARKET_CATALOG_CACHE_TTL_SECONDS
+    )
+    if not fresh:
+        async with _market_catalog_cache_lock:
+            # Another coroutine may have populated the cache while we
+            # were waiting on the lock.
+            loaded_at = cache.get("loaded_at_mono")
+            fresh = (
+                loaded_at is not None
+                and (time.monotonic() - loaded_at) < _MARKET_CATALOG_CACHE_TTL_SECONDS
+            )
+            if not fresh:
+                events_payload, markets_payload, metadata = await _fetch_market_catalog_full(session)
+                cache["events_payload"] = events_payload
+                cache["markets_payload"] = markets_payload
+                cache["metadata"] = metadata
+                cache["loaded_at_mono"] = time.monotonic()
 
-    row_map = row._mapping
-    updated_at = row_map.get("updated_at")
-    event_count = row_map.get("event_count")
-    market_count = row_map.get("market_count")
-    fetch_duration_seconds = row_map.get("fetch_duration_seconds")
-    error = row_map.get("error")
-    events_raw = row_map.get("events_json") if include_events else []
-    markets_raw = row_map.get("markets_json") if include_markets else []
-
-    events_payload = list(events_raw or []) if include_events and isinstance(events_raw, list) else []
-    markets_payload = list(markets_raw or []) if include_markets and isinstance(markets_raw, list) else []
-
-    metadata: dict[str, Any] = {
-        "updated_at": updated_at,
-        "event_count": event_count,
-        "market_count": market_count,
-        "fetch_duration_seconds": fetch_duration_seconds,
-        "error": error,
-    }
-
-    try:
-        if session.in_transaction():
-            await session.rollback()
-    except Exception:
-        pass
+    cached_events_payload: list[Any] = list(cache.get("events_payload") or []) if include_events else []
+    cached_markets_payload: list[Any] = list(cache.get("markets_payload") or []) if include_markets else []
+    metadata = dict(cache.get("metadata") or {"updated_at": None, "error": None})
 
     if not validate:
-        return events_payload, markets_payload, metadata
+        return cached_events_payload, cached_markets_payload, metadata
 
     def _deserialize_payload() -> tuple[list, list]:
-        events = []
+        events: list[Any] = []
         if include_events:
-            for d in events_payload:
+            for d in cached_events_payload:
                 try:
                     events.append(Event.model_validate(d))
                 except Exception:
                     pass
-
-        markets = []
+        markets: list[Any] = []
         if include_markets:
-            for d in markets_payload:
+            for d in cached_markets_payload:
                 try:
                     markets.append(Market.model_validate(d))
                 except Exception:

@@ -31,6 +31,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from models.database import release_conn
 import services.trader_hot_state as hot_state
 from services.trader_order_verification import (
     TRADER_ORDER_VERIFICATION_LOCAL,
@@ -210,14 +211,24 @@ async def execute_fast_signal(
 
     leg = _leg_from_position(position, signal)
 
+    # Release the DB connection (if the session has one checked out)
+    # while the external CLOB submission is in flight.  The submission
+    # is pure network IO and does not touch ``session``; holding a
+    # fast-tier pool slot across a 300-500ms upstream roundtrip both
+    # starves the pool and creates a window in which an outer
+    # cancellation can tear the asyncpg extended-protocol state in
+    # half (the ``cannot switch to state X; another operation in
+    # progress`` pattern).  ``release_conn`` is a no-op when the
+    # session is still lazy.
     try:
-        leg_result = await submit_execution_leg(
-            mode=mode_key,
-            signal=signal,
-            leg=leg,
-            notional_usd=notional,
-            strategy_params=strategy_params,
-        )
+        async with release_conn(session):
+            leg_result = await submit_execution_leg(
+                mode=mode_key,
+                signal=signal,
+                leg=leg,
+                notional_usd=notional,
+                strategy_params=strategy_params,
+            )
     except Exception as exc:
         logger.warning("Fast-tier leg submit raised", trader_id=trader_id, exc_info=exc)
         return FastSubmitResult(

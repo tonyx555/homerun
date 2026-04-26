@@ -55,6 +55,14 @@ DEFAULT_INTERVAL_SECONDS = 1
 _IDLE_SLEEP_SECONDS = 1
 _POSITION_MARK_SYNC_INTERVAL_SECONDS = 10.0
 _last_position_mark_sync_at = 0.0
+# Refresh the LiveExecutionService in-memory position snapshot from the
+# Polymarket data API on this cadence.  Without this, the in-memory
+# ledger is only updated at service init; off-app activity (manual sells
+# on the UI, transfers, redemptions) silently drifts the ledger and
+# causes "balance is not enough" rejections at exit time.
+_LIVE_WALLET_POSITIONS_SYNC_INTERVAL_SECONDS = 90.0
+_last_live_wallet_positions_sync_at = 0.0
+_LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
 _MAX_CONSECUTIVE_DB_FAILURES = 3
 _CONTROL_REFRESH_SECONDS = 5.0
 _ACTIVE_POSITION_TICK_SECONDS = 60.0
@@ -402,6 +410,41 @@ async def _pg_notify_position_changes(
                 pass
             _pg_notify_conn = None
             break
+
+
+async def _sync_live_wallet_positions() -> None:
+    """Periodically refresh ``live_execution_service`` in-memory position snapshot.
+
+    The ``LiveExecutionService._positions`` dict is the authoritative
+    source for wallet share holdings used by exit-size computation.  It
+    is rebuilt from the Polymarket positions API only at service init
+    and on rare reconciliation paths (an order going "not found").
+    Without a periodic refresh, off-app activity (manual sells via the
+    UI, transfers, redemptions) is invisible to the orchestrator until
+    the next worker restart — producing exit attempts sized against
+    the original wallet state and CLOB ``balance is not enough``
+    rejections (see live_execution_service share-balance shortage path).
+    Calling ``sync_positions()`` on a sane interval closes that gap.
+    """
+    global _last_live_wallet_positions_sync_at
+    now = time.monotonic()
+    if (now - _last_live_wallet_positions_sync_at) < _LIVE_WALLET_POSITIONS_SYNC_INTERVAL_SECONDS:
+        return
+    _last_live_wallet_positions_sync_at = now
+    try:
+        if not live_execution_service.is_ready():
+            return
+        await asyncio.wait_for(
+            live_execution_service.sync_positions(),
+            timeout=_LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "live wallet positions sync timed out after %.1fs",
+            _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning("live wallet positions sync failed", exc_info=exc)
 
 
 async def _sync_position_marks_and_exit_registry() -> None:
@@ -1076,6 +1119,10 @@ async def run_worker_loop() -> None:
 
                 # Sync position marks and exit registry for event-driven updates
                 await _sync_position_marks_and_exit_registry()
+                # Refresh the live wallet position snapshot from the data API
+                # so the in-memory ledger does not silently drift from chain
+                # state when off-app activity touches the wallet.
+                await _sync_live_wallet_positions()
                 last_open_positions = int(cycle_summary.get("inventory_open_positions", 0) or 0)
                 if provider_pass:
                     last_provider_pass_at = time.monotonic()

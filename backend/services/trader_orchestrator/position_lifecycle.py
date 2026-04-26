@@ -5441,7 +5441,30 @@ async def reconcile_live_positions(
     exit_submissions_this_pass: list[int] = [0]
     live_position_notional_cap = _live_position_notional_cap(params)
 
+    # Per-candidate timing: capture wall time spent on each row so the
+    # timing log can surface the slowest candidates and operators can
+    # attribute the ``processing=Xs`` bucket to specific orders.  We
+    # bracket iterations using the loop boundary itself rather than
+    # try/finally because the processing block has many ``continue``
+    # exits.
+    _per_candidate_timings: list[tuple[str, float]] = []
+    _last_iter_start: float = _time.monotonic()
+    _last_iter_row_id: str | None = None
+
     for row in candidates:
+        _now_iter = _time.monotonic()
+        if _last_iter_row_id is not None:
+            _per_candidate_timings.append((_last_iter_row_id, _now_iter - _last_iter_start))
+        _last_iter_row_id = str(getattr(row, "id", "") or "")
+        _last_iter_start = _now_iter
+        # The per-candidate processing block below is pure Python and
+        # historically runs ~3s/candidate × 7 candidates = ~20s of
+        # synchronous compute, which blocks the asyncio loop and
+        # starves the fast-tier trader cycle running concurrently.
+        # Yield once per candidate so other tasks can interleave; this
+        # does not change total reconcile time, only the latency
+        # other tasks see while it runs.
+        await asyncio.sleep(0)
         payload = dict(row.payload_json or {})
         terminal_position_close = payload.get("position_close")
         if isinstance(terminal_position_close, dict) and _position_close_has_terminal_external_authority(
@@ -8777,6 +8800,13 @@ async def reconcile_live_positions(
                 row.updated_at = now
                 state_updates += 1
 
+    # Capture the final candidate's elapsed (the loop boundary based
+    # tracker only records on the *next* iteration, so the last row
+    # would be missed without this).
+    if _last_iter_row_id is not None:
+        _per_candidate_timings.append(
+            (_last_iter_row_id, _time.monotonic() - _last_iter_start)
+        )
     _lc_t3 = _time.monotonic()
 
     if not dry_run and (closed > 0 or state_updates > 0):
@@ -8833,12 +8863,20 @@ async def reconcile_live_positions(
             await session.commit()
             _lc_t3c = _time.monotonic()
             _total_elapsed = _lc_t3c - _lc_t0
+            # Top-3 slowest candidates (by elapsed wall time inside the
+            # processing loop).  Surfacing the order ids tells us which
+            # rows hit which expensive branch — the data we need to
+            # decide whether the 20s ``processing=`` is concentrated in
+            # a few outliers or spread evenly.
+            _slowest = sorted(_per_candidate_timings, key=lambda item: item[1], reverse=True)[:3]
+            _slowest_str = ", ".join(f"{rid[:8]}={dt:.2f}s" for rid, dt in _slowest)
             _timing_msg = (
                 f"  lifecycle_detail: pre_io={_lc_t1 - _lc_t0:.1f}s "
                 f"external_io={_lc_t2 - _lc_t1:.1f}s processing={_lc_t3 - _lc_t2:.1f}s "
                 f"executemany={_lc_t3b - _lc_t3a:.1f}s(n={len(touched_rows)}) "
                 f"commit={_lc_t3c - _lc_t3b:.1f}s total={_total_elapsed:.1f}s "
-                f"(candidates={len(candidates)} terminal_audit={len(terminal_rows)})"
+                f"(candidates={len(candidates)} terminal_audit={len(terminal_rows)}"
+                f" slowest=[{_slowest_str}])"
             )
             if _total_elapsed >= _RECONCILE_TIMING_WARN_SECONDS:
                 logger.warning("reconcile_live_positions timing: %s", _timing_msg)

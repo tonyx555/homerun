@@ -16,6 +16,7 @@ Setup:
 """
 
 import asyncio
+import re
 import time as _time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -130,6 +131,38 @@ def _is_post_only_cross_reject(error_message: str | None) -> bool:
     if not text:
         return False
     return "post-only" in text and "crosses book" in text
+
+
+# CLOB rejects sells with this exact format when the wallet does not hold
+# enough outcome-token shares to cover the order:
+#   "the balance is not enough -> balance: 9080, order amount: 10790000"
+# Both numbers are atomic units (10**6 per share).  This is a *share*
+# shortage and is unrelated to the wallet's USDC allowance — refreshing
+# the allowance cannot fix it.  When we can parse this shape out of an
+# error, we know the live_trading_positions ledger has drifted from the
+# chain and further retries with the same exit_size are futile.
+_INSUFFICIENT_SHARE_BALANCE_PATTERN = re.compile(
+    r"balance\s+is\s+not\s+enough.*?balance:\s*(\d+)\s*,\s*order\s+amount:\s*(\d+)",
+    re.DOTALL,
+)
+
+
+def _parse_clob_share_balance_shortage(error_text: str | None) -> tuple[int, int] | None:
+    """Return (actual_balance_atomic, requested_amount_atomic) or None.
+
+    None means the message does NOT carry a share-balance shortage
+    (e.g. it might be an allowance-only failure, which the caller
+    should still retry by refreshing the USDC allowance).
+    """
+    if not error_text:
+        return None
+    match = _INSUFFICIENT_SHARE_BALANCE_PATTERN.search(error_text)
+    if not match:
+        return None
+    try:
+        return int(match.group(1)), int(match.group(2))
+    except (TypeError, ValueError):
+        return None
 
 
 # Markers in exception text that indicate a transient network/proxy failure
@@ -2929,18 +2962,34 @@ class LiveExecutionService:
                             continue
                     if (
                         side == OrderSide.SELL
-                        and not sell_allowance_retry_used
                         and "not enough balance / allowance" in error_text
                     ):
-                        sell_allowance_retry_used = True
-                        if await self.prepare_sell_balance_allowance(token_key):
-                            logger.warning(
-                                "Sell order creation failed with stale balance/allowance cache; refreshed allowances and retrying",
-                                attempt=attempt + 1,
+                        share_drift = _parse_clob_share_balance_shortage(error_text)
+                        if share_drift is not None:
+                            actual_atomic, requested_atomic = share_drift
+                            logger.error(
+                                "Sell order rejected: outcome-token share balance below requested exit size. "
+                                "Refusing further retries — refreshing USDC allowance cannot fix a share shortage; "
+                                "the live_trading_positions ledger has drifted from the chain.",
                                 token_id=token_key,
+                                actual_balance_atomic=actual_atomic,
+                                requested_amount_atomic=requested_atomic,
+                                shortfall_atomic=requested_atomic - actual_atomic,
+                                attempt=attempt + 1,
                             )
-                            await asyncio.sleep(0)
-                            continue
+                            # Fall through; the for-loop will not retry because
+                            # we don't `continue`, and after this block the
+                            # exception is re-raised at the end of the handler.
+                        elif not sell_allowance_retry_used:
+                            sell_allowance_retry_used = True
+                            if await self.prepare_sell_balance_allowance(token_key):
+                                logger.warning(
+                                    "Sell order creation failed with stale balance/allowance cache; refreshed allowances and retrying",
+                                    attempt=attempt + 1,
+                                    token_id=token_key,
+                                )
+                                await asyncio.sleep(0)
+                                continue
                     if (
                         post_only
                         and _is_post_only_cross_reject(error_text)
@@ -3062,18 +3111,32 @@ class LiveExecutionService:
                     continue
                 if (
                     side == OrderSide.SELL
-                    and not sell_allowance_retry_used
                     and "not enough balance / allowance" in error_message.lower()
                 ):
-                    sell_allowance_retry_used = True
-                    if await self.prepare_sell_balance_allowance(token_key):
-                        logger.warning(
-                            "Sell order rejected with stale balance/allowance cache; refreshed allowances and retrying",
-                            attempt=attempt + 1,
+                    share_drift = _parse_clob_share_balance_shortage(error_message.lower())
+                    if share_drift is not None:
+                        actual_atomic, requested_atomic = share_drift
+                        logger.error(
+                            "Sell order rejected: outcome-token share balance below requested exit size. "
+                            "Refusing further retries — refreshing USDC allowance cannot fix a share shortage; "
+                            "the live_trading_positions ledger has drifted from the chain.",
                             token_id=token_key,
+                            actual_balance_atomic=actual_atomic,
+                            requested_amount_atomic=requested_atomic,
+                            shortfall_atomic=requested_atomic - actual_atomic,
+                            attempt=attempt + 1,
                         )
-                        await asyncio.sleep(0)
-                        continue
+                        # Fall through — exit the retry loop with a normal failure.
+                    elif not sell_allowance_retry_used:
+                        sell_allowance_retry_used = True
+                        if await self.prepare_sell_balance_allowance(token_key):
+                            logger.warning(
+                                "Sell order rejected with stale balance/allowance cache; refreshed allowances and retrying",
+                                attempt=attempt + 1,
+                                token_id=token_key,
+                            )
+                            await asyncio.sleep(0)
+                            continue
                 if (
                     post_only
                     and _is_post_only_cross_reject(error_message)

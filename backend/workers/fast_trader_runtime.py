@@ -58,10 +58,14 @@ logger = get_logger(__name__)
 
 WORKER_NAME = "fast_trader_runtime"
 
-# Budgets for the fast tier.  These are deliberately tiny: if something
-# in this path takes longer than a budget, the fast tier is the wrong
-# home for it and the trader should be moved to normal/slow.
-_CYCLE_HARD_BUDGET_SECONDS = 1.5
+# Budgets for the fast tier.  The cycle budget covers up to
+# _MAX_SIGNALS_PER_CYCLE (4) signal submissions; each submission is a
+# CLOB roundtrip of ~300-500ms even on a clean network, so a 4-signal
+# cycle realistically lands around 1.5-2s today.  Hold the budget
+# warning at a value that still catches genuine outliers (loop
+# starvation, reconciler stalls, slow CLOB) without crying wolf on
+# every healthy cycle.
+_CYCLE_HARD_BUDGET_SECONDS = 3.0
 _EVALUATE_BUDGET_SECONDS = 0.2
 _SUBMIT_BUDGET_SECONDS = 1.0
 _POLL_FALLBACK_SECONDS = 0.25
@@ -483,6 +487,72 @@ class _FastTraderTask:
             last_runtime_sequence=runtime_sequence,
         )
 
+    async def _process_signals_parallel_by_market(
+        self,
+        signals: list[Any],
+        *,
+        mode: str,
+        default_size_usd: float,
+    ) -> None:
+        """Process signals in parallel, but serialize within each market.
+
+        Each ``_process_one`` is dominated by the CLOB submission network
+        roundtrip (~300-500ms).  Running the four signals of a cycle
+        sequentially produces ~1.6s cycles; running them in parallel
+        collapses that to roughly the slowest single network call.
+
+        Signals that target the *same* market_id, however, must stay
+        serial — the strategy's ``evaluate`` step consults
+        ``trader_hot_state`` to decide whether the trader is already
+        positioned on that market, and racing two concurrent submits on
+        the same market can defeat the per-market position cap.  Grouping
+        by ``market_id`` and running each group serially while the groups
+        execute concurrently preserves the cap while still capturing the
+        bulk of the speedup (most cycles see signals on different
+        markets).
+        """
+        if not signals:
+            return
+        trader_id = self.trader_id
+        groups: dict[str, list[Any]] = {}
+        for signal in signals:
+            market_key = str(getattr(signal, "market_id", "") or "").strip().lower()
+            # Empty market_key all share the same bucket; this is degenerate
+            # and means the signal is malformed, but the surrounding
+            # _process_one will reject it without submitting.
+            groups.setdefault(market_key, []).append(signal)
+
+        async def _process_group(group_signals: list[Any]) -> None:
+            for signal in group_signals:
+                try:
+                    await self._process_one(
+                        None,
+                        signal=signal,
+                        mode=mode,
+                        default_size_usd=default_size_usd,
+                    )
+                except Exception as exc:
+                    if _is_retryable_db_error(exc):
+                        logger.debug(
+                            "Fast trader signal processing hit retryable DB error",
+                            exc_info=exc,
+                        )
+                    logger.warning(
+                        "Fast trader signal processing failed",
+                        trader_id=trader_id,
+                        signal_id=getattr(signal, "id", None),
+                        exc_info=exc,
+                    )
+
+        if len(groups) == 1:
+            # Single market — no benefit from gather, save the overhead.
+            await _process_group(next(iter(groups.values())))
+            return
+        await asyncio.gather(
+            *(_process_group(group) for group in groups.values()),
+            return_exceptions=True,
+        )
+
     async def _run_once(self) -> None:
         trader_id = self.trader_id
         accepted_sources = self._accepted_sources()
@@ -507,23 +577,11 @@ class _FastTraderTask:
             mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
             risk_limits = dict(self._trader.get("risk_limits") or {})
             default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
-            for signal in runtime_signals:
-                try:
-                    await self._process_one(
-                        None,
-                        signal=signal,
-                        mode=mode,
-                        default_size_usd=default_size_usd,
-                    )
-                except Exception as exc:
-                    if _is_retryable_db_error(exc):
-                        logger.debug("Fast trader signal processing hit retryable DB error", exc_info=exc)
-                    logger.warning(
-                        "Fast trader signal processing failed",
-                        trader_id=trader_id,
-                        signal_id=getattr(signal, "id", None),
-                        exc_info=exc,
-                    )
+            await self._process_signals_parallel_by_market(
+                runtime_signals,
+                mode=mode,
+                default_size_usd=default_size_usd,
+            )
             return
         if cursor_runtime_sequence is not None:
             if is_db_pressure_active():
@@ -576,23 +634,11 @@ class _FastTraderTask:
         risk_limits = dict(self._trader.get("risk_limits") or {})
         default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
 
-        for signal in signals:
-            try:
-                await self._process_one(
-                    None,
-                    signal=signal,
-                    mode=mode,
-                    default_size_usd=default_size_usd,
-                )
-            except Exception as exc:
-                if _is_retryable_db_error(exc):
-                    logger.debug("Fast trader signal processing hit retryable DB error", exc_info=exc)
-                logger.warning(
-                    "Fast trader signal processing failed",
-                    trader_id=trader_id,
-                    signal_id=getattr(signal, "id", None),
-                    exc_info=exc,
-                )
+        await self._process_signals_parallel_by_market(
+            signals,
+            mode=mode,
+            default_size_usd=default_size_usd,
+        )
 
     async def _process_one(
         self,
