@@ -88,3 +88,14 @@ export const draftTradingScheduleAtom = atom<TradingScheduleDraft>({ ...DEFAULT_
 // Owned by the Risk view itself; TradingPanel reads at save time via
 // useStore().get() and writes at load time via useSetAtom.
 export const draftRiskValuesAtom = atom<Record<string, unknown>>({})
+
+// Bot roster (left sidebar) filter / sort / group state. Owned entirely by
+// BotRosterPanel — TradingPanel never subscribes, so typing in the search
+// box, toggling Hide Inactive, or changing sort/group doesn't re-render
+// the rest of the panel.
+export type BotRosterSort = 'name_asc' | 'name_desc' | 'pnl_desc' | 'pnl_asc' | 'open_desc' | 'activity_desc'
+export type BotRosterGroupBy = 'none' | 'status' | 'source'
+export const botRosterSearchAtom = atom<string>('')
+export const botRosterHideInactiveAtom = atom<boolean>(true)
+export const botRosterSortAtom = atom<BotRosterSort>('name_asc')
+export const botRosterGroupByAtom = atom<BotRosterGroupBy>('status')

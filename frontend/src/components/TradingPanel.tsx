@@ -16,7 +16,6 @@ import {
   Loader2,
   PieChart,
   Play,
-  Plus,
   Settings,
   ShieldAlert,
   Sparkles,
@@ -101,6 +100,7 @@ import { toTimeValueSeries } from '../lib/priceHistory'
 import AutoresearchView from './AutoresearchView'
 import { TraderConfigFlyout } from './TraderConfigFlyout'
 import { RiskLimitsView } from './RiskLimitsView'
+import { BotRosterPanel } from './BotRosterPanel'
 import {
   DEFAULT_STRATEGY_KEY,
   DEFAULT_TRADING_SCHEDULE_DRAFT,
@@ -124,8 +124,6 @@ type DirectionSide = 'YES' | 'NO'
 type PositionDirectionFilter = 'all' | 'yes' | 'no'
 type PositionSortField = 'exposure' | 'updated' | 'edge' | 'confidence' | 'unrealized'
 type PositionSortDirection = 'asc' | 'desc'
-type BotRosterSort = 'name_asc' | 'name_desc' | 'pnl_desc' | 'pnl_asc' | 'open_desc' | 'activity_desc'
-type BotRosterGroupBy = 'none' | 'status' | 'source'
 type TerminalDensity = 'compact' | 'expanded'
 type TraderToggleAction = 'start' | 'stop' | 'activate' | 'deactivate'
 type ExecutionLatencyStageKey =
@@ -5281,10 +5279,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [tradeSearch, setTradeSearch] = useState('')
   const [decisionSearch, setDecisionSearch] = useState('')
   const [decisionOutcomeFilter, setDecisionOutcomeFilter] = useState<DecisionOutcomeFilter>('all')
-  const [botRosterSearch, setBotRosterSearch] = useState('')
-  const [botRosterHideInactive, setBotRosterHideInactive] = useState(true)
-  const [botRosterSort, setBotRosterSort] = useState<BotRosterSort>('name_asc')
-  const [botRosterGroupBy, setBotRosterGroupBy] = useState<BotRosterGroupBy>('status')
+  // Bot roster filter / sort / group state lives entirely in BotRosterPanel
+  // via jotai atoms — TradingPanel never subscribes, so typing in the roster
+  // search box doesn't bubble a re-render up to here.
   const [confirmLiveStartOpen, setConfirmLiveStartOpen] = useState(false)
   const [confirmTraderStartOpen, setConfirmTraderStartOpen] = useState(false)
   const [confirmTraderStopOpen, setConfirmTraderStopOpen] = useState(false)
@@ -8607,97 +8604,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }, [orchestratorRunning, sourceLabelByKey, traderPerformanceById, traders])
 
-  const filteredBotRosterRows = useMemo(() => {
-    const query = botRosterSearch.trim().toLowerCase()
-    const rows = botRosterRows.filter((row) => {
-      if (botRosterHideInactive && row.isInactive) return false
-      if (!query) return true
-      const haystack = `${row.trader.name} ${row.trader.id} ${row.status.label} ${row.sourceLabels.join(' ')}`.toLowerCase()
-      return haystack.includes(query)
-    })
-    rows.sort((left, right) => {
-      if (botRosterSort === 'name_asc') {
-        return left.trader.name.localeCompare(right.trader.name)
-      }
-      if (botRosterSort === 'name_desc') {
-        return right.trader.name.localeCompare(left.trader.name)
-      }
-      if (botRosterSort === 'pnl_desc') {
-        if (left.pnl !== right.pnl) return right.pnl - left.pnl
-      }
-      if (botRosterSort === 'pnl_asc') {
-        if (left.pnl !== right.pnl) return left.pnl - right.pnl
-      }
-      if (botRosterSort === 'open_desc') {
-        if (left.open !== right.open) return right.open - left.open
-      }
-      if (botRosterSort === 'activity_desc') {
-        if (left.latestActivityTs !== right.latestActivityTs) return right.latestActivityTs - left.latestActivityTs
-      }
-      if (left.pnl !== right.pnl) return right.pnl - left.pnl
-      return left.trader.name.localeCompare(right.trader.name)
-    })
-    return rows
-  }, [botRosterHideInactive, botRosterRows, botRosterSearch, botRosterSort])
+  // filteredBotRosterRows + groupedBotRosterRows now live inside
+  // BotRosterPanel; it owns the search/sort/group atoms and computes the
+  // derived rows there so typing the search box doesn't bubble up.
 
-  const groupedBotRosterRows = useMemo(() => {
-    const groups = new Map<string, { key: string; label: string; order: number; rows: typeof filteredBotRosterRows }>()
-
-    if (botRosterGroupBy === 'none') {
-      return [{
-        key: 'all',
-        label: 'All Bots',
-        order: 0,
-        rows: filteredBotRosterRows,
-      }]
-    }
-
-    for (const row of filteredBotRosterRows) {
-      let key = ''
-      let label = ''
-      let order = 99
-      if (botRosterGroupBy === 'status') {
-        key = row.status.key
-        if (row.status.key === 'running') {
-          label = 'Running'
-          order = 0
-        } else if (row.status.key === 'engine_stopped') {
-          label = 'Engine Stopped'
-          order = 1
-        } else if (row.status.key === 'bot_stopped') {
-          label = 'Bot Stopped'
-          order = 2
-        } else {
-          label = 'Inactive'
-          order = 3
-        }
-      } else {
-        key = row.primarySourceKey
-        if (key === 'multi') {
-          label = 'Multi-source'
-          order = sourceGroupOrderByKey.size + 1
-        } else if (key === 'unknown') {
-          label = 'Unassigned'
-          order = sourceGroupOrderByKey.size + 2
-        } else {
-          label = sourceLabelByKey[key] || key.toUpperCase()
-          order = sourceGroupOrderByKey.get(key) ?? sourceGroupOrderByKey.size
-        }
-      }
-
-      if (!groups.has(key)) {
-        groups.set(key, { key, label, order, rows: [] })
-      }
-      const group = groups.get(key)
-      if (!group) continue
-      group.rows.push(row)
-    }
-
-    return Array.from(groups.values()).sort((a, b) => {
-      if (a.order !== b.order) return a.order - b.order
-      return a.label.localeCompare(b.label)
-    })
-  }, [botRosterGroupBy, filteredBotRosterRows, sourceGroupOrderByKey, sourceLabelByKey])
   const showCreatingTraderSkeleton = Boolean(
     creatingTraderPreview
     && createTraderMutation.isPending
@@ -9931,200 +9841,20 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
       {/* ── Main: Roster Rail + Work Area ── */}
       <div className="flex-1 min-h-0 grid gap-2 xl:grid-cols-[240px_minmax(0,1fr)]">
-        {/* Left rail — Bot Roster */}
-        <div className="hidden xl:flex flex-col min-h-0 rounded-lg border border-border/70 bg-card overflow-hidden">
-          <div className="shrink-0 px-2.5 py-2 border-b border-border/50 flex items-center justify-between gap-1">
-            <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Bots</span>
-            <Button size="sm" className="h-6 w-6 p-0" variant="outline" onClick={openCreateTraderFlyout} title="New bot">
-              <Plus className="w-3.5 h-3.5" />
-            </Button>
-          </div>
-          <div className="shrink-0 px-1.5 py-1.5 border-b border-border/50 space-y-1">
-            <Input
-              value={botRosterSearch}
-              onChange={(event) => setBotRosterSearch(event.target.value)}
-              placeholder="Search bots, source, status..."
-              className="h-6 text-[10px]"
-            />
-            <div className="grid grid-cols-2 gap-1">
-              <Select value={botRosterSort} onValueChange={(value) => setBotRosterSort(value as BotRosterSort)}>
-                <SelectTrigger className="h-6 text-[10px] px-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="name_asc">Name A-Z</SelectItem>
-                  <SelectItem value="name_desc">Name Z-A</SelectItem>
-                  <SelectItem value="pnl_desc">P&amp;L High-Low</SelectItem>
-                  <SelectItem value="pnl_asc">P&amp;L Low-High</SelectItem>
-                  <SelectItem value="open_desc">Open Orders</SelectItem>
-                  <SelectItem value="activity_desc">Latest Activity</SelectItem>
-                </SelectContent>
-              </Select>
-              <Select value={botRosterGroupBy} onValueChange={(value) => setBotRosterGroupBy(value as BotRosterGroupBy)}>
-                <SelectTrigger className="h-6 text-[10px] px-2">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="status">Group: Status</SelectItem>
-                  <SelectItem value="source">Group: Source</SelectItem>
-                  <SelectItem value="none">Group: None</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <label className="h-6 rounded border border-border/50 bg-background/50 px-2 flex items-center gap-1.5">
-              <Switch
-                checked={botRosterHideInactive}
-                onCheckedChange={setBotRosterHideInactive}
-                className="scale-[0.75]"
-              />
-              <span className="text-[10px] text-muted-foreground">Hide inactive</span>
-              <span className="ml-auto text-[10px] font-mono text-muted-foreground">
-                {filteredBotRosterRows.length}/{traders.length}
-              </span>
-            </label>
-          </div>
-          <ScrollArea className="flex-1 min-h-0">
-            <div className="p-1.5 space-y-1.5">
-              {/* "All Bots" aggregate */}
-              <button
-                type="button"
-                onClick={() => setSelectedTraderId(null)}
-                className={cn(
-                  'w-full text-left rounded-md px-2 py-1.5 text-[11px] transition-colors',
-                  !selectedTraderId
-                    ? 'bg-cyan-500/15 text-foreground font-medium'
-                    : 'text-muted-foreground hover:bg-muted/40'
-                )}
-              >
-                <div className="flex min-w-0 items-center justify-between gap-2">
-                  <span className="truncate">All Bots</span>
-                  <span className={cn('shrink-0 font-mono text-[10px]', globalSummary.resolvedPnl > 0 ? 'text-emerald-500' : globalSummary.resolvedPnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
-                    {formatCurrency(globalSummary.resolvedPnl, true)}
-                  </span>
-                </div>
-                <div className="mt-0.5 truncate text-[9px] text-muted-foreground">
-                  Showing {filteredBotRosterRows.length}/{traders.length}
-                </div>
-              </button>
-              {showCreatingTraderSkeleton ? (
-                <div className="w-full rounded-md border border-cyan-500/35 bg-cyan-500/10 px-2 py-1.5 animate-pulse">
-                  <div className="flex items-center justify-between gap-1.5">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 shrink-0" />
-                        <span className="text-[11px] font-medium truncate leading-tight text-foreground">
-                          {creatingTraderPreview?.name || 'Creating bot...'}
-                        </span>
-                      </div>
-                      <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
-                        Provisioning {String(creatingTraderPreview?.mode || selectedAccountMode).toUpperCase()} bot...
-                      </div>
-                    </div>
-                    <Loader2 className="w-3.5 h-3.5 text-cyan-300 animate-spin shrink-0" />
-                  </div>
-                </div>
-              ) : null}
-              {groupedBotRosterRows.length === 0 ? (
-                <p className="py-6 text-center text-[11px] text-muted-foreground">No bots match these filters.</p>
-              ) : (
-                groupedBotRosterRows.map((group) => {
-                  const groupPnl = group.rows.reduce((sum, row) => sum + row.pnl, 0)
-                  return (
-                    <div key={group.key} className="space-y-0.5">
-                      {botRosterGroupBy !== 'none' ? (
-                        <div className="px-1 py-0.5 flex items-center justify-between">
-                          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">{group.label}</span>
-                          <span className={cn('text-[9px] font-mono', groupPnl > 0 ? 'text-emerald-500' : groupPnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
-                            {group.rows.length} · {formatCurrency(groupPnl, true)}
-                          </span>
-                        </div>
-                      ) : null}
-                      {group.rows.map((row) => {
-                        const isActive = row.trader.id === selectedTraderId
-                        const pendingToggleAction = traderTogglePendingById[row.trader.id] || null
-                        const rowTogglePending = pendingToggleAction !== null
-                        return (
-                          <button
-                            key={row.trader.id}
-                            type="button"
-                            onClick={() => setSelectedTraderId(row.trader.id)}
-                            disabled={rowTogglePending}
-                            className={cn(
-                              'w-full text-left rounded-md px-2 py-1.5 transition-colors group',
-                              isActive
-                                ? 'bg-cyan-500/15 text-foreground'
-                                : 'text-muted-foreground hover:bg-muted/40 hover:text-foreground',
-                              rowTogglePending && 'cursor-wait border border-cyan-500/35 bg-cyan-500/10 text-foreground/85'
-                            )}
-                          >
-                            {rowTogglePending ? (
-                              <div className="flex items-center justify-between gap-2">
-                                <div className="min-w-0 flex-1 animate-pulse space-y-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="w-1.5 h-1.5 rounded-full bg-cyan-300/80 shrink-0" />
-                                    <div className="h-2.5 w-24 max-w-full rounded bg-muted/70" />
-                                  </div>
-                                  <div className="pl-3 h-2 w-28 max-w-full rounded bg-muted/60" />
-                                  <div className="pl-3 flex gap-1">
-                                    <span className="h-2 w-10 rounded bg-muted/60" />
-                                    <span className="h-2 w-12 rounded bg-muted/50" />
-                                  </div>
-                                </div>
-                                <div className="shrink-0 flex items-center gap-1 text-[9px] text-cyan-300">
-                                  <Loader2 className="w-3 h-3 animate-spin" />
-                                  {pendingToggleAction === 'start'
-                                    ? 'Starting...'
-                                    : pendingToggleAction === 'stop'
-                                      ? 'Stopping...'
-                                      : pendingToggleAction === 'activate'
-                                        ? 'Activating...'
-                                        : 'Deactivating...'}
-                                </div>
-                              </div>
-                            ) : (
-                              <>
-                                <div className="flex items-center justify-between gap-1.5">
-                                  <div className="min-w-0">
-                                    <div className="flex items-center gap-1.5">
-                                      <span className={cn(
-                                        'w-1.5 h-1.5 rounded-full shrink-0',
-                                        row.status.dotClassName
-                                      )} />
-                                      <span className="text-[11px] font-medium truncate leading-tight">{row.trader.name}</span>
-                                    </div>
-                                    <div className="pl-3 mt-0.5 text-[9px] text-muted-foreground">
-                                      <span>{row.open} open</span>
-                                      {row.partialOpenBundles > 0 && (
-                                        <span className="text-amber-500" title="Bundles with one filled leg and one still working">
-                                          {' · '}{row.partialOpenBundles} partial
-                                        </span>
-                                      )}
-                                      <span>{' · '}{row.resolved} resolved</span>
-                                    </div>
-                                  </div>
-                                  <span className={cn('shrink-0 text-[10px] font-mono', row.pnl > 0 ? 'text-emerald-500' : row.pnl < 0 ? 'text-red-500' : 'text-muted-foreground')}>
-                                    {formatCurrency(row.pnl, true)}
-                                  </span>
-                                </div>
-                                <div className="flex flex-wrap gap-0.5 mt-0.5 pl-3">
-                                  {row.sourceLabels.length > 0 ? row.sourceLabels.map((sourceLabel) => (
-                                    <span key={`${row.trader.id}:${sourceLabel}`} className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">{sourceLabel}</span>
-                                  )) : (
-                                    <span className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">Unassigned</span>
-                                  )}
-                                </div>
-                              </>
-                            )}
-                          </button>
-                        )
-                      })}
-                    </div>
-                  )
-                })
-              )}
-            </div>
-          </ScrollArea>
-        </div>
+        <BotRosterPanel
+          rows={botRosterRows}
+          totalTraderCount={traders.length}
+          globalResolvedPnl={globalSummary.resolvedPnl}
+          selectedTraderId={selectedTraderId}
+          setSelectedTraderId={setSelectedTraderId}
+          traderTogglePendingById={traderTogglePendingById}
+          showCreatingTraderSkeleton={showCreatingTraderSkeleton}
+          creatingTraderPreview={creatingTraderPreview}
+          selectedAccountMode={selectedAccountMode}
+          openCreateTraderFlyout={openCreateTraderFlyout}
+          sourceLabelByKey={sourceLabelByKey}
+          sourceGroupOrderByKey={sourceGroupOrderByKey}
+        />
 
         {/* Right — Work Area */}
         <div className="flex flex-col min-h-0 min-w-0 gap-1.5">
