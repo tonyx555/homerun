@@ -1313,21 +1313,72 @@ async def _audit_flush_loop() -> None:
             logger.warning("Audit flush failed", exc_info=exc)
 
 
+async def _audit_run_group_inner(
+    body: Callable[[Any], Awaitable[None]],
+) -> tuple[float, float]:
+    """Inner of _audit_run_group, separated so it can be wrapped in shield.
+
+    Returns (insert_seconds, commit_seconds). Raises on any failure.
+    Statement_timeout (5s) and lock_timeout (2s) bound how long the
+    shielded section can hold against cancellation — worst case the
+    caller's CancelledError is delayed by ~5s, which is the cost of
+    not corrupting the audit pool with mid-protocol asyncpg state.
+    """
+    import time as _time
+    insert_started = _time.monotonic()
+    async with AuditAsyncSessionLocal() as session:
+        try:
+            await session.execute(
+                sa_text(f"SET LOCAL statement_timeout = '{_AUDIT_STATEMENT_TIMEOUT_MS}'")
+            )
+            await session.execute(
+                sa_text(f"SET LOCAL lock_timeout = '{_AUDIT_LOCK_TIMEOUT_MS}'")
+            )
+            with session.no_autoflush:
+                await body(session)
+            insert_s = _time.monotonic() - insert_started
+            commit_started = _time.monotonic()
+            await session.commit()
+            commit_s = _time.monotonic() - commit_started
+            return insert_s, commit_s
+        except BaseException:
+            # Invalidate the connection so SQLAlchemy throws it away
+            # rather than returning a possibly-mid-protocol asyncpg
+            # connection to the pool. asyncpg "cannot switch to state"
+            # / "got result for unknown protocol state" errors come
+            # from re-using a connection whose protocol state was
+            # left dangling by an earlier error or cancellation.
+            try:
+                bind = await session.connection()
+                await bind.invalidate()
+            except Exception:
+                pass
+            try:
+                await session.rollback()
+            except Exception:
+                pass
+            raise
+
+
 async def _audit_run_group(
     label: str,
     body: Callable[[Any], Awaitable[None]],
 ) -> tuple[bool, float, float, BaseException | None]:
-    """Run an audit-write *body* in its own short transaction.
+    """Run an audit-write *body* in its own short shielded transaction.
 
     Returns (success, insert_seconds, commit_seconds, exception). Body
-    receives the open AsyncSession and is expected to perform writes
-    only — no commit. Each call:
+    receives the open AsyncSession and performs writes only — no
+    commit. Each call:
 
       * checks out a fresh connection from the audit pool
       * sets SET LOCAL statement_timeout/lock_timeout for the tx
-      * runs body
+      * runs body inside an asyncio.shield (cancellation cannot
+        interrupt mid-asyncpg-protocol — that path leaves zombie
+        connections in the pool that fail later flushes with
+        "cannot switch to state" / "got result for unknown protocol
+        state" errors and snowballs into a death spiral)
       * commits
-      * on exception, rolls back; success=False
+      * on exception, invalidates the connection + rolls back
 
     Splitting flush_audit_buffer into per-kind groups means a lock-
     contention failure on consumption/cursor (the read-modify-write
@@ -1335,34 +1386,11 @@ async def _audit_run_group(
     same trader_id rows) does NOT roll back the decision/event INSERTs
     in the same buffer drain — those land cleanly in their own tx.
     """
-    import time as _time
-    insert_started = _time.monotonic()
-    insert_s = 0.0
-    commit_s = 0.0
     try:
-        async with AuditAsyncSessionLocal() as session:
-            try:
-                await session.execute(
-                    sa_text(f"SET LOCAL statement_timeout = '{_AUDIT_STATEMENT_TIMEOUT_MS}'")
-                )
-                await session.execute(
-                    sa_text(f"SET LOCAL lock_timeout = '{_AUDIT_LOCK_TIMEOUT_MS}'")
-                )
-                with session.no_autoflush:
-                    await body(session)
-                insert_s = _time.monotonic() - insert_started
-                commit_started = _time.monotonic()
-                await session.commit()
-                commit_s = _time.monotonic() - commit_started
-            except BaseException:
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
-                raise
+        insert_s, commit_s = await asyncio.shield(_audit_run_group_inner(body))
         return True, insert_s, commit_s, None
     except BaseException as exc:
-        return False, insert_s, commit_s, exc
+        return False, 0.0, 0.0, exc
 
 
 async def flush_audit_buffer() -> int:
