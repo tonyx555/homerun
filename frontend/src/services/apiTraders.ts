@@ -896,6 +896,7 @@ export interface Trader {
   metadata: Record<string, any>
   is_enabled: boolean
   is_paused: boolean
+  block_new_orders?: boolean
   interval_seconds: number
   requested_run_at: string | null
   last_run_at: string | null
@@ -1411,6 +1412,18 @@ export const activateTrader = async (traderId: string, payload?: { requested_by?
 
 export const deactivateTrader = async (traderId: string, payload?: { requested_by?: string; reason?: string }): Promise<Trader> => {
   const { data } = await api.post(`/traders/${traderId}/deactivate`, payload || {})
+  return normalizeTraderFields(data)
+}
+
+export const setTraderBlockNewOrders = async (
+  traderId: string,
+  enabled: boolean,
+  payload?: { requested_by?: string; reason?: string },
+): Promise<Trader> => {
+  const { data } = await api.post(`/traders/${traderId}/block-new-orders`, {
+    enabled,
+    ...(payload || {}),
+  })
   return normalizeTraderFields(data)
 }
 

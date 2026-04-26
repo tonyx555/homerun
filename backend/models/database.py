@@ -3028,6 +3028,7 @@ class Trader(Base):
     latency_class = Column(String, nullable=False, default="normal")
     is_enabled = Column(Boolean, default=True)
     is_paused = Column(Boolean, default=False)
+    block_new_orders = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     interval_seconds = Column(Integer, default=60)
     requested_run_at = Column(DateTime, nullable=True)
     last_run_at = Column(DateTime, nullable=True)

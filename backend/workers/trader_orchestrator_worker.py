@@ -4927,10 +4927,20 @@ async def _run_trader_once(
         copy_inventory_loaded = False
 
         # Kill switch is the very first gate: short-circuit before any signal
-        # fetching, live-market context building, or risk evaluation.
+        # fetching, live-market context building, or risk evaluation. The
+        # per-trader block_new_orders flag has the same semantics scoped to
+        # this trader — manage-only mode where reconciliation/exits keep
+        # running but no new entry signals get processed.
         if bool(control.get("kill_switch")):
             logger.info(
                 "Kill switch active for trader %s — skipping all signal processing",
+                trader_id,
+            )
+            await _persist_trader_cycle_heartbeat(session, trader_id)
+            return 0, 0, processed_signals
+        if bool(trader.get("block_new_orders")):
+            logger.info(
+                "block_new_orders active for trader %s — skipping all signal processing",
                 trader_id,
             )
             await _persist_trader_cycle_heartbeat(session, trader_id)

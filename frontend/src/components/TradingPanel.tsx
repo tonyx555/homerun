@@ -32,6 +32,7 @@ import {
 import type { CryptoMarket } from '../services/apiCore'
 import {
   activateTrader,
+  setTraderBlockNewOrders,
   armTraderOrchestratorLiveStart,
   createTrader,
   deactivateTrader,
@@ -6917,6 +6918,29 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     onSuccess: refreshAll,
   })
 
+  const traderBlockNewOrdersMutation = useMutation({
+    mutationFn: ({ traderId, enabled }: { traderId: string; enabled: boolean }) =>
+      setTraderBlockNewOrders(traderId, enabled, {}),
+    onMutate: () => {
+      setSaveError(null)
+    },
+    onSuccess: (updatedTrader) => {
+      queryClient.setQueriesData({ queryKey: ['traders-list'] }, (current: unknown) => {
+        if (!Array.isArray(current)) return current
+        return current.map((candidate) => {
+          if (!candidate || typeof candidate !== 'object') return candidate
+          const trader = candidate as Trader
+          if (trader.id !== updatedTrader.id) return candidate
+          return updatedTrader
+        })
+      })
+      refreshAll()
+    },
+    onError: (error: unknown) => {
+      setSaveError(errorMessage(error, 'Failed to update block-new-orders setting'))
+    },
+  })
+
   const saveTuneParametersMutation = useMutation({
     mutationFn: async () => {
       if (!selectedTrader) {
@@ -10696,6 +10720,35 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                     >
                       <Zap className="w-3 h-3 mr-0.5" /> Once
                     </Button>
+                    <div className="flex items-center gap-1.5 rounded border border-red-500/30 bg-red-500/5 px-1.5 py-0.5">
+                      <ShieldAlert className="w-3 h-3 text-red-400" />
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <span className="inline-flex">
+                            <Switch
+                              checked={Boolean(selectedTrader.block_new_orders)}
+                              onCheckedChange={(enabled) =>
+                                traderBlockNewOrdersMutation.mutate({
+                                  traderId: selectedTrader.id,
+                                  enabled,
+                                })
+                              }
+                              disabled={traderBlockNewOrdersMutation.isPending}
+                              className="scale-[0.8]"
+                            />
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom" className="max-w-[320px] text-xs leading-snug">
+                          Per-bot kill switch. Blocks new entry orders for this bot only. Existing positions and
+                          orders keep being monitored, sold, and reconciled.
+                        </TooltipContent>
+                      </Tooltip>
+                      {traderBlockNewOrdersMutation.isPending ? (
+                        <Loader2 className="w-3 h-3 animate-spin text-red-300" />
+                      ) : selectedTrader.block_new_orders ? (
+                        <span className="text-[10px] font-medium text-red-300">Blocking</span>
+                      ) : null}
+                    </div>
                     <Button size="sm" variant="outline" className="h-6 px-2 text-[10px]" onClick={() => openEditTraderFlyout(selectedTrader)}>
                       <Settings className="w-3 h-3 mr-0.5" /> Config
                     </Button>

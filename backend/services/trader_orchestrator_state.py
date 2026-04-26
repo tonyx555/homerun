@@ -4076,6 +4076,7 @@ def _serialize_trader(row: Trader) -> dict[str, Any]:
         "metadata": metadata,
         "is_enabled": bool(row.is_enabled),
         "is_paused": bool(row.is_paused),
+        "block_new_orders": bool(getattr(row, "block_new_orders", False)),
         "interval_seconds": int(row.interval_seconds or 60),
         "requested_run_at": to_iso(row.requested_run_at),
         "last_run_at": to_iso(row.last_run_at),
@@ -4826,6 +4827,7 @@ async def _normalize_trader_payload(
         "metadata": metadata,
         "is_enabled": bool(payload.get("is_enabled", True)),
         "is_paused": bool(payload.get("is_paused", False)),
+        "block_new_orders": bool(payload.get("block_new_orders", False)),
         "interval_seconds": max(1, min(86400, safe_int(payload.get("interval_seconds"), 60))),
     }
 
@@ -4907,6 +4909,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
             "metadata": copy.deepcopy(source_trader.get("metadata", {})),
             "is_enabled": bool(source_trader.get("is_enabled", True)),
             "is_paused": bool(source_trader.get("is_paused", False)),
+            "block_new_orders": bool(source_trader.get("block_new_orders", False)),
         }
         copied_payload.update(create_payload)
         create_payload = copied_payload
@@ -4957,6 +4960,7 @@ async def create_trader(session: AsyncSession, payload: dict[str, Any]) -> dict[
         latency_class=normalized["latency_class"],
         is_enabled=normalized["is_enabled"],
         is_paused=normalized["is_paused"],
+        block_new_orders=normalized["block_new_orders"],
         interval_seconds=normalized["interval_seconds"],
         created_at=_now(),
         updated_at=_now(),
@@ -5019,6 +5023,8 @@ async def update_trader(
         row.is_enabled = bool(payload.get("is_enabled"))
     if "is_paused" in payload:
         row.is_paused = bool(payload.get("is_paused"))
+    if "block_new_orders" in payload:
+        row.block_new_orders = bool(payload.get("block_new_orders"))
     if "interval_seconds" in payload:
         row.interval_seconds = normalized["interval_seconds"]
 

@@ -150,6 +150,7 @@ class TraderRequest(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     is_enabled: bool = True
     is_paused: bool = False
+    block_new_orders: bool = False
     requested_by: Optional[str] = None
     reason: Optional[str] = None
 
@@ -178,6 +179,7 @@ class TraderPatchRequest(BaseModel):
     metadata: Optional[dict[str, Any]] = None
     is_enabled: Optional[bool] = None
     is_paused: Optional[bool] = None
+    block_new_orders: Optional[bool] = None
     requested_by: Optional[str] = None
     reason: Optional[str] = None
 
@@ -1734,6 +1736,50 @@ async def deactivate_trader(
         payload=payload or None,
     )
     return trader
+
+
+class TraderBlockNewOrdersRequest(BaseModel):
+    enabled: bool
+    requested_by: Optional[str] = None
+    reason: Optional[str] = None
+
+
+@router.post("/{trader_id}/block-new-orders")
+async def set_trader_block_new_orders(
+    trader_id: str,
+    request: TraderBlockNewOrdersRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Per-bot analogue of the global kill switch.
+
+    When enabled, the trader keeps running (reconciliation, exits,
+    manage-only mode) but the entry-decision path short-circuits before
+    opening any new positions.
+    """
+    before = await get_trader(session, trader_id)
+    if before is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+    after = await update_trader(
+        session,
+        trader_id,
+        {"block_new_orders": bool(request.enabled)},
+    )
+    if after is None:
+        raise HTTPException(status_code=404, detail="Trader not found")
+    payload: dict[str, Any] = {"enabled": bool(request.enabled)}
+    if request.reason:
+        payload["reason"] = request.reason
+    await create_trader_event(
+        session,
+        trader_id=trader_id,
+        event_type="trader_block_new_orders",
+        severity="warn" if request.enabled else "info",
+        source="operator",
+        operator=request.requested_by,
+        message="block_new_orders enabled" if request.enabled else "block_new_orders disabled",
+        payload=payload,
+    )
+    return after
 
 
 @router.post("/{trader_id}/positions/cleanup")

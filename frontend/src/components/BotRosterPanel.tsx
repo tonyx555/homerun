@@ -312,6 +312,14 @@ function BotRosterPanelImpl({
                               )) : (
                                 <span className="px-1 py-0 text-[8px] rounded bg-muted/60 text-muted-foreground leading-relaxed">Unassigned</span>
                               )}
+                              {row.trader.block_new_orders ? (
+                                <span
+                                  className="px-1 py-0 text-[8px] rounded bg-red-500/15 text-red-300 border border-red-500/30 leading-relaxed"
+                                  title="New entry orders blocked. Existing positions still managed."
+                                >
+                                  No new orders
+                                </span>
+                              ) : null}
                             </div>
                           </>
                         )}

@@ -705,6 +705,18 @@ class _FastTraderTask:
         default_size_usd: float,
     ) -> None:
         trader_id = self.trader_id
+        # Per-bot block_new_orders is the fast-tier analogue of the global
+        # kill switch. Advance the cursor so this signal won't be re-fed
+        # next cycle; the trader's exit/reconciliation paths are unaffected.
+        if bool(self._trader.get("block_new_orders")):
+            await self._advance_cursor_buffered(
+                signal=signal,
+                mode=mode,
+                decision_id=None,
+                outcome="skipped",
+                reason="trader_block_new_orders",
+            )
+            return
         source_key = str(getattr(signal, "source", "") or "").strip().lower()
         allowed_strategy_types = set(self._accepted_strategy_types_by_source().get(source_key) or [])
         signal_strategy_type = str(getattr(signal, "strategy_type", "") or "").strip().lower()
