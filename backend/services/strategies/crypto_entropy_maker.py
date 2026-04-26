@@ -28,7 +28,6 @@ from services.strategies.crypto_strategy_utils import (
     parse_datetime_utc,
     pick_oracle_source,
     polymarket_taker_fee_pct,
-    timeframe_seconds,
 )
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float

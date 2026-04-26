@@ -6,6 +6,7 @@ from typing import Any
 
 from models import Market
 from utils.converters import clamp, safe_float
+from utils.kelly import polymarket_taker_fee_pct
 
 
 def parse_datetime_utc(value: Any) -> datetime | None:
@@ -123,32 +124,6 @@ def normalize_signed_ratio(value: Any) -> float | None:
     if abs(ratio) > 1.0 and abs(ratio) <= 100.0:
         ratio /= 100.0
     return max(-1.0, min(1.0, ratio))
-
-
-def normalize_timeframe(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"5m", "5min", "5-minute", "5minutes", "five", "fivemin", "fiveminute"}:
-        return "5min"
-    if text in {"15m", "15min", "15-minute", "15minutes", "fifteen", "fifteenmin"}:
-        return "15min"
-    if text in {"1h", "1hr", "1hour", "60m"}:
-        return "1hr"
-    if text in {"4h", "4hr", "4hour", "240m"}:
-        return "4hr"
-    return text
-
-
-def timeframe_seconds(value: Any) -> int:
-    timeframe = normalize_timeframe(value)
-    if timeframe == "5min":
-        return 300
-    if timeframe == "15min":
-        return 900
-    if timeframe == "1hr":
-        return 3600
-    if timeframe == "4hr":
-        return 14400
-    return 300
 
 
 def history_cancel_peak(history_tail: Any) -> float | None:
@@ -339,17 +314,6 @@ def timeframe_seconds(value: Any, default: int = 900) -> int:
     """
     normalized = normalize_timeframe(value)
     return _TIMEFRAME_SECONDS.get(normalized, int(default))
-
-
-# Single source of truth for the Polymarket taker-fee schedule lives in
-# ``utils.kelly``; re-export here for convenient strategy-side access. The
-# helpers below were originally written when ``utils.kelly`` carried the
-# wrong (linear) formula — that's been fixed, so we delegate instead of
-# maintaining a parallel implementation.
-from utils.kelly import (
-    polymarket_taker_fee as polymarket_taker_fee_per_share,
-    polymarket_taker_fee_pct,
-)
 
 
 def fee_aware_min_edge_pct(price: float, multiplier: float = 2.0) -> float:
