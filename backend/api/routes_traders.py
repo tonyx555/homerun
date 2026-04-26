@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
@@ -561,13 +562,68 @@ async def get_all_trader_orders_all(
     }
 
 
+# Process-local TTL cache for the trader orders summary endpoint.  The
+# UI polls this on a few-second cadence; the underlying query pulls
+# every visible ``trader_orders`` row including ``payload_json`` (one
+# of the multi-MB JSON columns) and runs ~1.5s server-side, with
+# asyncpg holding the connection in ClientWrite the whole time.  A
+# short cache (3s default; bounded by the rate at which the dashboard
+# can perceptibly refresh anyway) collapses dozens of concurrent and
+# back-to-back polls into a single DB read without any visible
+# staleness — every response is at most ``_TRADER_ORDERS_SUMMARY_TTL``
+# seconds older than the next forced refresh, which is well under the
+# human-perceptible refresh threshold of this dashboard.
+#
+# The lock coalesces in-flight cache misses: when ten polls land
+# during the 1.5s window between cache-miss and cache-fill, only the
+# first runs the DB query; the other nine wait on the same Future.
+_TRADER_ORDERS_SUMMARY_TTL = 3.0
+_trader_orders_summary_cache: dict[str, dict[str, Any]] = {}
+_trader_orders_summary_cache_locks: dict[str, asyncio.Lock] = {}
+_trader_orders_summary_cache_locks_guard = asyncio.Lock()
+
+
+async def _trader_orders_summary_lock_for(mode_key: str) -> asyncio.Lock:
+    async with _trader_orders_summary_cache_locks_guard:
+        lock = _trader_orders_summary_cache_locks.get(mode_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _trader_orders_summary_cache_locks[mode_key] = lock
+        return lock
+
+
 @router.get("/orders/summary")
 async def get_trader_orders_summary(
     mode: Optional[str] = Query(default=None),
-    session: AsyncSession = Depends(get_db_session),
 ):
-    from services.trader_orchestrator_state import get_trader_orders_summary
-    return await get_trader_orders_summary(session, mode=mode)
+    # Note: this route deliberately does not declare a ``session``
+    # dependency.  The cache hit path returns without touching the DB
+    # at all — declaring ``session: AsyncSession = Depends(...)`` would
+    # acquire a pool connection just to discard it, undoing part of the
+    # point of caching.  The miss path opens its own session inline.
+    from services.trader_orchestrator_state import (
+        get_trader_orders_summary as _get_trader_orders_summary_db,
+    )
+
+    mode_key = (mode or "").strip().lower()
+    cached = _trader_orders_summary_cache.get(mode_key)
+    if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < _TRADER_ORDERS_SUMMARY_TTL:
+        return cached["payload"]
+
+    lock = await _trader_orders_summary_lock_for(mode_key)
+    async with lock:
+        # Re-check inside the lock — another coroutine may have filled
+        # the cache while we were queued.
+        cached = _trader_orders_summary_cache.get(mode_key)
+        if cached is not None and (time.monotonic() - cached["loaded_at_mono"]) < _TRADER_ORDERS_SUMMARY_TTL:
+            return cached["payload"]
+        async with AsyncSessionLocal() as session:
+            payload = await _get_trader_orders_summary_db(session, mode=mode)
+        _trader_orders_summary_cache[mode_key] = {
+            "payload": payload,
+            "loaded_at_mono": time.monotonic(),
+        }
+        return payload
 
 
 @router.get("/events/all")
