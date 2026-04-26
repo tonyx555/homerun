@@ -337,6 +337,16 @@ class TradersCopyTradeSignalService:
 
     def _is_duplicate_event(self, event: WalletTradeEvent) -> bool:
         now = utcnow()
+        # NOTE: do NOT include block_number in the dedupe key. tx_hash
+        # already uniquely identifies a chain event; block_number is 0
+        # for pre-confirmation observations and N for post-confirmation,
+        # so including it caused the *same* (wallet, tx, log) tuple to
+        # produce two different keys and slip through both times — which
+        # is what flooded the logs with paired
+        # "unresolved token outcome" warnings (one with block=0, one
+        # with block=N) for every dropped signal. The signal-emission
+        # dedupe at the bottom of _process_wallet_trade_event already
+        # excludes block_number; keep the two consistent.
         event_key = make_dedupe_key(
             "traders_copy_trade",
             str(event.wallet_address or "").strip().lower(),
@@ -345,7 +355,6 @@ class TradersCopyTradeSignalService:
             int(event.log_index or 0),
             str(event.token_id or "").strip(),
             str(event.side or "").strip().upper(),
-            int(event.block_number or 0),
             round(max(0.0, safe_float(event.price, 0.0)), 8),
             round(max(0.0, safe_float(event.size, 0.0)), 8),
         )
@@ -389,7 +398,12 @@ class TradersCopyTradeSignalService:
 
         market = await self._resolve_market_snapshot(token_id)
         if market.outcome not in {"YES", "NO"}:
-            logger.warning(
+            # Demoted from warning → info: the skip is correct behavior
+            # for tokens that aren't in our outcome catalog. WARNING
+            # should be reserved for genuinely actionable issues; this
+            # event was previously firing many times per second for
+            # routine catalog gaps and drowned the signal channel.
+            logger.info(
                 "Skipping copy-trade signal; unresolved token outcome",
                 wallet=source_wallet,
                 token_id=token_id,
