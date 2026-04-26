@@ -82,7 +82,7 @@ import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getTraderOrderPlatformLinks } from '../lib/marketUrls'
-import { accountModeAtom, draftDescriptionAtom, draftIntervalAtom, draftNameAtom, draftTradingScheduleAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
+import { accountModeAtom, draftDescriptionAtom, draftIntervalAtom, draftNameAtom, draftRiskValuesAtom, draftTradingScheduleAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -98,9 +98,9 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Tooltip, TooltipContent, TooltipTrigger } from './ui/tooltip'
 import { FlashNumber } from './AnimatedNumber'
 import { toTimeValueSeries } from '../lib/priceHistory'
-import StrategyConfigForm from './StrategyConfigForm'
 import AutoresearchView from './AutoresearchView'
 import { TraderConfigFlyout } from './TraderConfigFlyout'
+import { RiskLimitsView } from './RiskLimitsView'
 import {
   DEFAULT_STRATEGY_KEY,
   DEFAULT_TRADING_SCHEDULE_DRAFT,
@@ -5326,7 +5326,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [draftStrategyKey, setDraftStrategyKey] = useState<string>(DEFAULT_STRATEGY_KEY)
   const [draftStrategyVersion, setDraftStrategyVersion] = useState<number | null>(null)
   const [draftStrategyParams, setDraftStrategyParams] = useState<Record<string, unknown>>({})
-  const [draftRisk, setDraftRisk] = useState('{}')
+  // draftRisk values live in draftRiskValuesAtom (parsed record, not JSON
+  // string). The Risk view subscribes via useAtom; TradingPanel writes via
+  // setDraftRiskAtom on load and reads via atomStore.get on save.
+  const setDraftRiskAtom = useSetAtom(draftRiskValuesAtom)
   const [draftMetadata, setDraftMetadata] = useState('{}')
   const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
   const [draftLatencyClass, setDraftLatencyClass] = useState<TraderLatencyClass>('normal')
@@ -5974,7 +5977,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         .sort((left, right) => left.label.localeCompare(right.label)),
     [tradersScopeGroups]
   )
-  const parsedDraftRisk = useMemo(() => parseJsonObject(draftRisk || '{}'), [draftRisk])
   const dynamicStrategyParamSections = useMemo(() => {
     const sections: DynamicStrategyParamSection[] = []
 
@@ -6071,10 +6073,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   // TradingPanel reads it at save time via atomStore.get and writes at load
   // time via setDraftTradingScheduleAtom.
   const setDraftTradingScheduleAtom = useSetAtom(draftTradingScheduleAtom)
-  const riskFormValues = useMemo(
-    () => (isRecord(parsedDraftRisk.value) ? parsedDraftRisk.value : {}),
-    [parsedDraftRisk.value]
-  )
   const setDraftStrategy = (strategyKey: string) => {
     const normalized = normalizeStrategyKey(strategyKey)
     const opt = strategyOptionByKey.get(normalized)
@@ -6184,7 +6182,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftInterval(String(trader.interval_seconds || 60))
     const risk = trader.risk_limits || {}
     const metadata = trader.metadata || {}
-    setDraftRisk(JSON.stringify(risk, null, 2))
+    setDraftRiskAtom(isRecord(risk) ? (risk as Record<string, unknown>) : {})
     setDraftMetadata(JSON.stringify(metadata, null, 2))
     setDraftTradingScheduleAtom(
       normalizeTradingScheduleDraft(
@@ -6256,7 +6254,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       buildSourceStrategyParams({}, fallbackSourceKey, fallbackStrategyDetail),
     )
     setDraftInterval('5')
-    setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
+    setDraftRiskAtom(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {})
     setDraftMetadata('{}')
     setDraftTradingScheduleAtom({ ...DEFAULT_TRADING_SCHEDULE_DRAFT })
     setDraftMode(selectedAccountMode)
@@ -6333,11 +6331,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       }
       return next
     })
-  }
-
-  const setDraftRiskFromForm = (values: Record<string, unknown>) => {
-    setDraftRisk(JSON.stringify(values, null, 2))
-    if (!traderFlyoutOpen) setRiskDraftDirty(true)
   }
 
   const buildDraftSourceConfigs = (
@@ -6961,12 +6954,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       if (!selectedTrader) {
         throw new Error('Select a bot before saving risk limits.')
       }
-      const parsedRisk = parseJsonObject(draftRisk || '{}')
-      if (!parsedRisk.value) {
-        throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
-      }
       return updateTrader(selectedTrader.id, {
-        risk_limits: parsedRisk.value,
+        risk_limits: atomStore.get(draftRiskValuesAtom),
       })
     },
     onMutate: () => {
@@ -7062,10 +7051,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const createTraderMutation = useMutation({
     mutationFn: async () => {
       const copyFromTraderId = String(draftCopyFromTraderId || '').trim()
-      const parsedRisk = parseJsonObject(draftRisk || '{}')
-      if (!parsedRisk.value) {
-        throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
-      }
 
       const parsedMetadata = parseJsonObject(draftMetadata || '{}')
       if (!parsedMetadata.value) {
@@ -7086,7 +7071,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         latency_class: draftLatencyClass,
         interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
-        risk_limits: parsedRisk.value,
+        risk_limits: atomStore.get(draftRiskValuesAtom),
         metadata: metadataWithSchedule,
         is_enabled: true,
         is_paused: false,
@@ -7125,11 +7110,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const saveTraderMutation = useMutation({
     mutationFn: async (traderId: string) => {
-      const parsedRisk = parseJsonObject(draftRisk || '{}')
-      if (!parsedRisk.value) {
-        throw new Error(`Risk limits JSON error: ${parsedRisk.error || 'invalid object'}`)
-      }
-
       const parsedMetadata = parseJsonObject(draftMetadata || '{}')
       if (!parsedMetadata.value) {
         throw new Error(`Metadata JSON error: ${parsedMetadata.error || 'invalid object'}`)
@@ -7149,7 +7129,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         latency_class: draftLatencyClass,
         interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
-        risk_limits: parsedRisk.value,
+        risk_limits: atomStore.get(draftRiskValuesAtom),
         metadata: metadataWithSchedule,
       })
     },
@@ -11230,78 +11210,16 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                 )}
 
                 {workTab === 'risk' && (
-                  <div className="h-full min-h-0 overflow-auto px-1">
-                    <div className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10 p-2">
-                      {!selectedTrader ? (
-                        <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-100">
-                          Select a bot to configure risk limits.
-                        </div>
-                      ) : (
-                        <div className="flex h-full min-h-0 flex-col gap-2">
-                          <div className="flex flex-wrap items-center justify-between gap-2">
-                            <div className="flex items-center gap-1.5">
-                              <AlertTriangle className="h-3.5 w-3.5 text-rose-500" />
-                              <p className="text-[11px] font-medium">Risk Limits</p>
-                              <Badge variant="outline" className="h-4 px-1.5 text-[9px] font-mono">
-                                {riskFormSchema.param_fields.length} fields
-                              </Badge>
-                              {riskDraftDirty ? (
-                                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-500">
-                                  UNSAVED
-                                </span>
-                              ) : null}
-                            </div>
-                            <div className="flex items-center gap-1.5">
-                              <Button
-                                type="button"
-                                size="sm"
-                                variant="outline"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={() => {
-                                  applyTraderDraftSettings(selectedTrader)
-                                  setRiskDraftDirty(false)
-                                }}
-                                disabled={!riskDraftDirty}
-                              >
-                                Discard
-                              </Button>
-                              <Button
-                                type="button"
-                                size="sm"
-                                className="h-6 px-2 text-[10px]"
-                                onClick={() => saveRiskLimitsMutation.mutate()}
-                                disabled={saveRiskLimitsMutation.isPending || !riskDraftDirty}
-                              >
-                                {saveRiskLimitsMutation.isPending ? (
-                                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                                ) : null}
-                                Save Risk Limits
-                              </Button>
-                            </div>
-                          </div>
-                          <p className="text-[10px] text-muted-foreground/80">
-                            Rendered directly from StrategySDK risk limit schema.
-                          </p>
-                          {riskSaveError ? (
-                            <div className="rounded-md border border-red-500/30 bg-red-500/10 px-2 py-1 text-[10px] text-red-500">
-                              {riskSaveError}
-                            </div>
-                          ) : null}
-                          <div className="flex-1 min-h-0 overflow-auto">
-                            {riskFormSchema.param_fields.length > 0 ? (
-                              <StrategyConfigForm
-                                schema={riskFormSchema as { param_fields: any[] }}
-                                values={riskFormValues}
-                                onChange={setDraftRiskFromForm}
-                              />
-                            ) : (
-                              <p className="text-[10px] text-muted-foreground/80">No risk schema available.</p>
-                            )}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  <RiskLimitsView
+                    selectedTrader={selectedTrader}
+                    riskFormSchema={riskFormSchema}
+                    riskDraftDirty={riskDraftDirty}
+                    setRiskDraftDirty={setRiskDraftDirty}
+                    riskSaveError={riskSaveError}
+                    saveRiskLimitsMutation={saveRiskLimitsMutation}
+                    onDiscard={() => selectedTrader && applyTraderDraftSettings(selectedTrader)}
+                    flyoutOpen={traderFlyoutOpen}
+                  />
                 )}
 
                 {workTab === 'decisions' && (

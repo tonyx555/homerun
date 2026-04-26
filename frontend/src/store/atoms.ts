@@ -81,3 +81,10 @@ export const draftIntervalAtom = atom<string>('60')
 // TradingPanel and its query memos. TradingPanel reads at save time via
 // useStore().get() and writes at load time via useSetAtom.
 export const draftTradingScheduleAtom = atom<TradingScheduleDraft>({ ...DEFAULT_TRADING_SCHEDULE_DRAFT })
+
+// Risk-limit form values for the Risk tab in the bot detail panel. Stored
+// as a parsed record (not a JSON string) so editing a single field doesn't
+// cycle through JSON.stringify → parse → form re-render on every keystroke.
+// Owned by the Risk view itself; TradingPanel reads at save time via
+// useStore().get() and writes at load time via useSetAtom.
+export const draftRiskValuesAtom = atom<Record<string, unknown>>({})
