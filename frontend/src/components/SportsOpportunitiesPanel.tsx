@@ -20,6 +20,10 @@ import OpportunityTerminal from './OpportunityTerminal'
 import OpportunityEmptyState from './OpportunityEmptyState'
 import OpportunityCard from './OpportunityCard'
 import BuyButton from './BuyButton'
+import { Liveline } from 'liveline'
+import type { LivelinePoint } from 'liveline'
+import { useAtomValue } from 'jotai'
+import { themeAtom } from '../store/atoms'
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -79,6 +83,29 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(diff / 86_400_000)}d ago`
 }
 
+function extractSportsLivelinePoints(opportunity: Opportunity): LivelinePoint[] {
+  const market = opportunity.markets?.[0] as { price_history?: unknown } | undefined
+  const raw = Array.isArray(market?.price_history) ? market!.price_history : []
+  const points: LivelinePoint[] = []
+  for (const entry of raw) {
+    if (!entry) continue
+    const obj = (Array.isArray(entry) ? null : entry) as Record<string, unknown> | null
+    const arr = Array.isArray(entry) ? (entry as unknown[]) : null
+    const tRaw = obj ? (obj.t ?? obj.time ?? obj.timestamp) : (arr ? arr[0] : null)
+    const pRaw = obj
+      ? (obj.yes ?? obj.y ?? obj.p ?? obj.price)
+      : (arr ? arr[1] : null)
+    const t = typeof tRaw === 'number' ? tRaw : Number(tRaw)
+    const p = typeof pRaw === 'number' ? pRaw : Number(pRaw)
+    if (!Number.isFinite(t) || !Number.isFinite(p)) continue
+    // Normalize ms → s if the timestamp looks like a millisecond epoch.
+    const time = t > 1e12 ? Math.floor(t / 1000) : Math.floor(t)
+    points.push({ time, value: p })
+  }
+  points.sort((a, b) => a.time - b.time)
+  return points
+}
+
 function extractSportFromQuestion(question: string): string {
   const q = question.toLowerCase()
   if (q.includes('nba') || q.includes('basketball')) return 'NBA'
@@ -101,6 +128,15 @@ function SportsGameCard({
 }: {
   opportunity: Opportunity
 }) {
+  const themeMode = useAtomValue(themeAtom)
+  const isDarkTheme = themeMode === 'dark'
+  const livelinePoints = useMemo(() => extractSportsLivelinePoints(opportunity), [opportunity])
+  const livelineValue = livelinePoints.length > 0
+    ? livelinePoints[livelinePoints.length - 1].value
+    : null
+  const livelineWindow = livelinePoints.length >= 2
+    ? Math.max(60, livelinePoints[livelinePoints.length - 1].time - livelinePoints[0].time)
+    : 0
   const ctx = (opportunity.strategy_context || {}) as Record<string, unknown>
   const entryPrice = Number(ctx.entry_price || 0)
   const baselinePrice = Number(ctx.baseline_price || 0)
@@ -171,6 +207,28 @@ function SportsGameCard({
         <p className="text-sm font-medium text-foreground/90 leading-snug line-clamp-2">
           {question}
         </p>
+
+        {/* Price Backhistory Sparkline */}
+        {livelinePoints.length >= 2 && livelineValue !== null && (
+          <div className="relative h-12 w-full bg-muted/10 rounded-lg overflow-hidden">
+            <Liveline
+              data={livelinePoints}
+              value={livelineValue}
+              theme={isDarkTheme ? 'dark' : 'light'}
+              window={livelineWindow}
+              grid={false}
+              badge={false}
+              fill
+              pulse={false}
+              momentum={false}
+              scrub={false}
+              lerpSpeed={0.12}
+              padding={{ top: 4, right: 4, bottom: 4, left: 4 }}
+              formatValue={(value) => `${(value * 100).toFixed(1)}¢`}
+              style={{ height: 48 }}
+            />
+          </div>
+        )}
 
         {/* Price Movement Visualization */}
         <div className="rounded-lg bg-muted/30 border border-border/30 p-3 space-y-2">
@@ -303,6 +361,7 @@ export default function SportsOpportunitiesPanel({
         category: 'sports',
         limit: ITEMS_PER_PAGE,
         offset: currentPage * ITEMS_PER_PAGE,
+        include_price_history: true,
       }),
     refetchInterval: isConnected ? false : 15000,
   })

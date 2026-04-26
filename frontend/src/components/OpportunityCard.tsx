@@ -56,6 +56,7 @@ const STRATEGY_COLORS: Record<string, string> = {
   combinatorial: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
   settlement_lag: 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20',
   flash_crash_reversion: 'bg-red-500/10 text-red-400 border-red-500/20',
+  news_momentum_breakout: 'bg-rose-500/10 text-rose-400 border-rose-500/20',
   tail_end_carry: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20',
   spread_dislocation: 'bg-slate-500/10 text-slate-400 border-slate-500/20',
   // Weather detectors
@@ -86,6 +87,7 @@ const STRATEGY_ABBREV: Record<string, string> = {
   combinatorial: 'CMB',
   settlement_lag: 'SET',
   flash_crash_reversion: 'FCR',
+  news_momentum_breakout: 'NMB',
   tail_end_carry: 'TEC',
   spread_dislocation: 'SPR',
   weather_edge: 'WTH',
@@ -114,6 +116,7 @@ const STRATEGY_NAMES: Record<string, string> = {
   combinatorial: 'Combinatorial',
   settlement_lag: 'Settlement Lag',
   flash_crash_reversion: 'Flash Crash',
+  news_momentum_breakout: 'News Momentum',
   tail_end_carry: 'Tail-End Carry',
   spread_dislocation: 'Spread Dislocation',
   weather_edge: 'Weather Edge',
