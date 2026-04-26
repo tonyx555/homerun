@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import Text, and_, cast, or_, select, text
 
 from config import settings
 from models.database import AsyncSessionLocal, TradeSignal, TradeSignalEmission
@@ -1415,8 +1415,21 @@ class IntentRuntime:
         active_statuses = tuple(sorted(_SIGNAL_ACTIVE_STATUSES))
         terminal_statuses = tuple(sorted(_SIGNAL_TERMINAL_STATUSES))
         terminal_cutoff = now - timedelta(hours=_BOOTSTRAP_REACTIVATABLE_LOOKBACK_HOURS)
+        # Cast the three JSON columns to text in the SELECT.  The
+        # ``trade_signals`` JSON columns total ~6.7 GB across the table;
+        # asyncpg's default behaviour decodes each row's JSON synchronously
+        # on the event loop, which can block for many seconds when this
+        # bootstrap fetch returns thousands of rows.  Decoding the text
+        # in ``asyncio.to_thread`` keeps the loop responsive.
+        payload_text_col = cast(TradeSignal.payload_json, Text).label("payload_json_text")
+        strategy_context_text_col = cast(
+            TradeSignal.strategy_context_json, Text
+        ).label("strategy_context_json_text")
+        quality_rejection_reasons_text_col = cast(
+            TradeSignal.quality_rejection_reasons, Text
+        ).label("quality_rejection_reasons_text")
         async with AsyncSessionLocal() as session:
-            rows = (
+            raw_rows = (
                 (
                     await session.execute(
                         select(
@@ -1435,10 +1448,10 @@ class IntentRuntime:
                             TradeSignal.liquidity,
                             TradeSignal.expires_at,
                             TradeSignal.status,
-                            TradeSignal.payload_json,
-                            TradeSignal.strategy_context_json,
+                            payload_text_col,
+                            strategy_context_text_col,
                             TradeSignal.quality_passed,
-                            TradeSignal.quality_rejection_reasons,
+                            quality_rejection_reasons_text_col,
                             TradeSignal.dedupe_key,
                             TradeSignal.runtime_sequence,
                             TradeSignal.created_at,
@@ -1457,6 +1470,30 @@ class IntentRuntime:
                 .mappings()
                 .all()
             )
+
+        import json as _json
+
+        def _decode_rows() -> list[dict[str, Any]]:
+            decoded: list[dict[str, Any]] = []
+            for raw in raw_rows:
+                row = dict(raw)
+                for src_key, dst_key in (
+                    ("payload_json_text", "payload_json"),
+                    ("strategy_context_json_text", "strategy_context_json"),
+                    ("quality_rejection_reasons_text", "quality_rejection_reasons"),
+                ):
+                    text_value = row.pop(src_key, None)
+                    if text_value:
+                        try:
+                            row[dst_key] = _json.loads(text_value)
+                        except Exception:
+                            row[dst_key] = None
+                    else:
+                        row[dst_key] = None
+                decoded.append(row)
+            return decoded
+
+        rows = await asyncio.to_thread(_decode_rows)
         tokens_to_subscribe: set[str] = set()
         async with self._lock:
             self._signals_by_id.clear()

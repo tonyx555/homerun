@@ -291,9 +291,20 @@ async def upsert_scanner_market_history(
 async def read_scanner_market_history(
     session: AsyncSession,
     *,
-    market_ids: Optional[set[str] | list[str] | tuple[str, ...]] = None,
+    market_ids: set[str] | list[str] | tuple[str, ...],
 ) -> dict[str, list[dict[str, Any]]]:
-    stmt = select(ScannerMarketHistory.market_id, ScannerMarketHistory.points_json)
+    """Read per-market history points for the given ``market_ids``.
+
+    ``market_ids`` is required.  An unfiltered scan pulls hundreds of MB
+    of ``points_json`` (47k rows × ~15 KB JSON), and asyncpg decodes
+    every row's JSON synchronously on the event loop — a 20 s+ loop
+    block that tears asyncpg cursors and saturates async session
+    flushes.  Callers must scope to the markets they actually need.
+
+    The JSON column is read as text (``cast(... AS text)``) so asyncpg
+    skips its on-loop ``json.loads``; the actual parse happens in a
+    worker thread via ``asyncio.to_thread``.
+    """
     normalized_market_ids = sorted(
         {
             normalize_market_id(market_id)
@@ -301,17 +312,38 @@ async def read_scanner_market_history(
             if normalize_market_id(market_id)
         }
     )
-    if normalized_market_ids:
-        stmt = stmt.where(_chunked_in(ScannerMarketHistory.market_id, normalized_market_ids))
+    if not normalized_market_ids:
+        # Empty filter ⇒ no rows.  Refusing to scan the entire table
+        # protects the event loop from the 20 s+ block above.
+        return {}
+
+    points_text = cast(ScannerMarketHistory.points_json, Text).label("points_json_text")
+    stmt = (
+        select(ScannerMarketHistory.market_id, points_text)
+        .where(_chunked_in(ScannerMarketHistory.market_id, normalized_market_ids))
+    )
     result = await session.execute(stmt)
-    history_map: dict[str, list[dict[str, Any]]] = {}
-    for raw_market_id, raw_points in result.all():
-        market_id = normalize_market_id(raw_market_id)
-        points = _normalize_history_points(raw_points)
-        if not market_id or not points:
-            continue
-        history_map[market_id] = points
-    return history_map
+    raw_rows = [(raw_market_id, raw_points_text) for raw_market_id, raw_points_text in result.all()]
+
+    import json as _json
+
+    def _decode_rows() -> dict[str, list[dict[str, Any]]]:
+        decoded: dict[str, list[dict[str, Any]]] = {}
+        for raw_market_id, raw_points_text in raw_rows:
+            market_id = normalize_market_id(raw_market_id)
+            if not market_id or not raw_points_text:
+                continue
+            try:
+                parsed = _json.loads(raw_points_text)
+            except Exception:
+                continue
+            points = _normalize_history_points(parsed)
+            if points:
+                decoded[market_id] = points
+        return decoded
+
+    async with release_conn(session):
+        return await asyncio.to_thread(_decode_rows)
 
 
 def _normalize_weather_edge_title(title: str) -> str:
@@ -978,19 +1010,43 @@ async def update_scanner_activity(session: AsyncSession, activity: str) -> None:
         pass  # fire-and-forget
 
 
-async def _read_active_market_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
-    payload_rows = (
-        (
-            await session.execute(
-                select(OpportunityState.opportunity_json)
-                .where(OpportunityState.is_active == True)  # noqa: E712
-                .order_by(OpportunityState.last_updated_at.desc(), OpportunityState.stable_id.asc())
-            )
-        )
-        .scalars()
-        .all()
+async def read_active_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
+    """Read all active opportunity payloads as dicts.
+
+    Casts ``opportunity_json`` to text in the SELECT so asyncpg does
+    not ``json.loads`` each row on the event loop — a 224 MB table
+    parsed on the loop is a multi-second loop block that tears asyncpg
+    cursors and saturates async session flushes.  The actual JSON
+    parse runs in ``asyncio.to_thread``.
+    """
+    payload_text_col = cast(OpportunityState.opportunity_json, Text).label("opportunity_json_text")
+    stmt = (
+        select(payload_text_col)
+        .where(OpportunityState.is_active == True)  # noqa: E712
+        .order_by(OpportunityState.last_updated_at.desc(), OpportunityState.stable_id.asc())
     )
-    return [dict(payload) for payload in payload_rows if isinstance(payload, dict)]
+    result = await session.execute(stmt)
+    raw_texts = [text_value for text_value in result.scalars().all() if text_value]
+
+    import json as _json
+
+    def _decode_rows() -> list[dict[str, Any]]:
+        decoded: list[dict[str, Any]] = []
+        for text_value in raw_texts:
+            try:
+                obj = _json.loads(text_value)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                decoded.append(obj)
+        return decoded
+
+    async with release_conn(session):
+        return await asyncio.to_thread(_decode_rows)
+
+
+# Back-compat alias for callers that imported the private name.
+_read_active_market_opportunity_payloads = read_active_opportunity_payloads
 
 
 async def read_scanner_snapshot(

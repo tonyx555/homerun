@@ -14,7 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
-from models.database import AsyncSessionLocal, MarketCatalog, OpportunityState, TraderOrder, get_db_session
+from models.database import AsyncSessionLocal, TraderOrder, get_db_session
 from services.live_price_snapshot import normalize_binary_price_history
 from services.pause_state import global_pause_state
 from services import shared_state as scanner_shared_state
@@ -658,21 +658,18 @@ async def get_trader_market_history(
     # Use at least 960 points to fill the 7d/3d/24h chart windows properly.
     normalize_max_points = max(limit, scanner_max_points, 960)
 
-    history_map = await scanner_shared_state.read_scanner_market_history(session)
-    opportunities = list(
-        (
-            await session.execute(
-                select(OpportunityState.opportunity_json).where(OpportunityState.is_active == True)  # noqa: E712
-            )
-        ).scalars().all()
+    history_map = await scanner_shared_state.read_scanner_market_history(
+        session, market_ids=requested_ids
     )
-    market_catalog = (
-        (
-            await session.execute(
-                select(MarketCatalog.markets_json).where(MarketCatalog.id == "latest")
-            )
-        ).scalar_one_or_none()
-        or []
+    opportunities = await scanner_shared_state.read_active_opportunity_payloads(session)
+    # Reuse the cached, off-loop catalog reader rather than a direct
+    # ``select(MarketCatalog.markets_json)`` — the latter forces asyncpg
+    # to ``json.loads`` the multi-MB blob on the event loop.
+    _events, market_catalog, _meta = await scanner_shared_state.read_market_catalog(
+        session,
+        include_events=False,
+        include_markets=True,
+        validate=False,
     )
     if not isinstance(market_catalog, list):
         market_catalog = []

@@ -600,10 +600,18 @@ def _labels_look_like_yes_no(labels: list[str]) -> bool:
     return yes_text in yes_aliases and no_text in no_aliases
 
 
-async def _load_scanner_market_history(session: AsyncSession) -> dict[str, list[dict]]:
+async def _load_scanner_market_history(
+    session: AsyncSession,
+    *,
+    market_ids: set[str] | list[str] | tuple[str, ...],
+) -> dict[str, list[dict]]:
     """Read scanner snapshot market history map used by main opportunities sparklines."""
     out: dict[str, list[dict]] = {}
-    for market_id, points in (await scanner_shared_state.read_scanner_market_history(session)).items():
+    if not market_ids:
+        return out
+    for market_id, points in (
+        await scanner_shared_state.read_scanner_market_history(session, market_ids=market_ids)
+    ).items():
         key = normalize_market_id(market_id)
         if not key or not isinstance(points, list):
             continue
@@ -2720,7 +2728,12 @@ async def get_traders_overview(
             limit=confluence_limit,
             include_filtered=False,
         )
-        market_history = await _load_scanner_market_history(session)
+        signal_market_ids = {
+            normalize_market_id(row.get("market_id"))
+            for row in confluence_signals
+            if normalize_market_id(row.get("market_id"))
+        }
+        market_history = await _load_scanner_market_history(session, market_ids=signal_market_ids)
         _attach_market_history_to_signal_rows(confluence_signals, market_history)
         await _attach_signal_market_metadata(confluence_signals)
         _attach_history_from_aliases(confluence_signals, market_history)

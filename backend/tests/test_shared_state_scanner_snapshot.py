@@ -312,8 +312,14 @@ async def test_write_traders_snapshot_serializes_before_db_checkout(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_read_scanner_snapshot_reads_active_opportunities_from_state_rows():
+    import json as _json
+
     opportunity = _build_opportunity(market_id="market-9")
     payload = opportunity.model_dump(mode="json")
+    # ``opportunity_json`` is now selected as ``cast(... AS text)`` so
+    # asyncpg does not parse it on the event loop.  The fake session
+    # therefore returns the JSON-encoded text the way the real DB does.
+    payload_text = _json.dumps(payload)
     snapshot_row = SimpleNamespace(
         running=True,
         enabled=True,
@@ -326,19 +332,21 @@ async def test_read_scanner_snapshot_reads_active_opportunities_from_state_rows(
         ws_feeds_json={},
         opportunities_count=1,
     )
+    # Same applies to ``points_json`` — read_scanner_market_history now
+    # selects the column as text for off-loop decode.
+    points_text = _json.dumps(
+        [
+            {"t": 1.0, "yes": 0.11, "no": 0.89},
+            {"t": 2.0, "yes": 0.09, "no": 0.91},
+        ]
+    )
     session = _FakeSession(
         execute_results=[
             {"scalar_value": snapshot_row},
-            {"scalars_list": [payload]},
+            {"scalars_list": [payload_text]},
             {
                 "scalars_list": [
-                    (
-                        "market-9",
-                        [
-                            {"t": 1.0, "yes": 0.11, "no": 0.89},
-                            {"t": 2.0, "yes": 0.09, "no": 0.91},
-                        ],
-                    )
+                    ("market-9", points_text),
                 ]
             },
         ]

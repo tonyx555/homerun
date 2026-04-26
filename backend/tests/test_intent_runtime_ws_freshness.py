@@ -1071,6 +1071,31 @@ async def test_hydrate_from_db_keeps_cold_scanner_signal_deferred_until_ws_ready
         def all(self) -> list[dict[str, object]]:
             return self._rows
 
+    # ``hydrate_from_db`` now selects the heavy JSON columns as text
+    # (``payload_json``, ``strategy_context_json``,
+    # ``quality_rejection_reasons``) so asyncpg does not parse them on
+    # the event loop.  The fake row therefore returns the JSON-encoded
+    # text under the ``*_text`` aliases the SELECT uses.
+    import json as _json
+
+    payload_text = _json.dumps(
+        {
+            "signal_emitted_at": now.isoformat().replace("+00:00", "Z"),
+            "strategy_runtime": {
+                "source_key": "scanner",
+                "execution_activation": "ws_current",
+                "subscriptions": ["market_data_refresh"],
+            },
+            "positions_to_take": [{"token_id": "scanner-token"}],
+        }
+    )
+    strategy_context_text = _json.dumps(
+        {
+            "source_key": "scanner",
+            "execution_activation": "ws_current",
+        }
+    )
+
     class _Session:
         async def execute(self, *args, **kwargs) -> _Result:
             del args, kwargs
@@ -1092,20 +1117,10 @@ async def test_hydrate_from_db_keeps_cold_scanner_signal_deferred_until_ws_ready
                         "liquidity": 120.0,
                         "expires_at": now,
                         "status": "pending",
-                        "payload_json": {
-                            "signal_emitted_at": now.isoformat().replace("+00:00", "Z"),
-                            "strategy_runtime": {
-                                "source_key": "scanner",
-                                "execution_activation": "ws_current",
-                                "subscriptions": ["market_data_refresh"],
-                            },
-                            "positions_to_take": [{"token_id": "scanner-token"}],
-                        },
-                        "strategy_context_json": {
-                            "source_key": "scanner",
-                            "execution_activation": "ws_current",
-                        },
+                        "payload_json_text": payload_text,
+                        "strategy_context_json_text": strategy_context_text,
                         "quality_passed": True,
+                        "quality_rejection_reasons_text": None,
                         "dedupe_key": "dedupe-cold-1",
                         "runtime_sequence": None,
                         "created_at": now,

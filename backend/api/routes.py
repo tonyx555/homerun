@@ -399,18 +399,7 @@ async def _get_market_opportunity_counts_fast(
 
 
 async def _read_market_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:
-    payload_rows = (
-        (
-            await session.execute(
-                select(OpportunityState.opportunity_json)
-                .where(OpportunityState.is_active == True)  # noqa: E712
-                .order_by(OpportunityState.last_updated_at.desc(), OpportunityState.stable_id.asc())
-            )
-        )
-        .scalars()
-        .all()
-    )
-    return [dict(payload) for payload in payload_rows if isinstance(payload, Mapping)]
+    return await shared_state.read_active_opportunity_payloads(session)
 
 
 async def _read_trader_opportunity_payloads(session: AsyncSession) -> list[dict[str, Any]]:

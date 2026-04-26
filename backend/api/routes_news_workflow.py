@@ -445,9 +445,15 @@ def _history_candidates_for_finding(
 
 async def _load_scanner_market_history(
     session: AsyncSession,
+    *,
+    market_ids: set[str] | list[str] | tuple[str, ...],
 ) -> dict[str, list[dict[str, float]]]:
     history_map: dict[str, list[dict[str, float]]] = {}
-    for raw_market_id, raw_points in (await scanner_shared_state.read_scanner_market_history(session)).items():
+    if not market_ids:
+        return history_map
+    for raw_market_id, raw_points in (
+        await scanner_shared_state.read_scanner_market_history(session, market_ids=market_ids)
+    ).items():
         market_id = normalize_market_id(raw_market_id)
         if not market_id:
             continue
@@ -999,7 +1005,12 @@ async def get_findings(
         cached_rows = article_result.scalars().all()
         article_cache_by_id = {row.article_id: row for row in cached_rows if row.article_id}
     market_context_overrides = await _resolve_market_context_overrides(rows)
-    market_history = await _load_scanner_market_history(session)
+    finding_market_ids = {
+        normalize_market_id(getattr(row, "market_id", None))
+        for row in rows
+        if normalize_market_id(getattr(row, "market_id", None))
+    }
+    market_history = await _load_scanner_market_history(session, market_ids=finding_market_ids)
     shared_history = await _load_shared_backfill_market_history(
         rows,
         market_context_overrides=market_context_overrides,
