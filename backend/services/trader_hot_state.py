@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import (
     AsyncSessionLocal,
+    AuditAsyncSessionLocal,
     LiveTradingPosition,
     TradeSignal,
     TraderDecision,
@@ -1326,11 +1327,14 @@ async def flush_audit_buffer() -> int:
     insert_seconds = 0.0
     commit_seconds = 0.0
     try:
-        async with AsyncSessionLocal() as session:
+        # Use the dedicated audit pool. Audit traffic must NEVER starve
+        # operational queries — a slow audit batch lives entirely in its
+        # own 2+2 connection neighborhood now.
+        async with AuditAsyncSessionLocal() as session:
             try:
                 # Tighten statement / lock timeouts for the audit path so
-                # it fails-fast and re-queues instead of tying up a main-
-                # pool connection for ~60s under contention. SET LOCAL is
+                # it fails-fast and re-queues instead of tying up a pool
+                # connection for ~60s under contention. SET LOCAL is
                 # scoped to this transaction; the connection's pool-default
                 # timeouts return on next checkout.
                 await session.execute(

@@ -4001,6 +4001,96 @@ def _fast_on_checkin(dbapi_connection, connection_record):  # noqa: ANN001
 FastAsyncSessionLocal = sessionmaker(fast_async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
 
 
+# =====================================================================
+# AUDIT POOL — isolated from operational traffic.
+# =====================================================================
+#
+# trader_hot_state.flush_audit_buffer is a high-rate background writer
+# (TraderDecision/TraderEvent/TraderDecisionCheck/TraderSignal* etc).
+# Until now it shared the main pool with the orchestrator, reconciler,
+# and intent-runtime projection. A single slow audit commit could
+# occupy a main-pool connection for 60-115s under lock contention,
+# starving everything else and triggering the cascading failure
+# pattern observed in production.
+#
+# The audit path is non-critical — losing a batch is recoverable (re-
+# queued; eventually dropped on buffer overflow). It must NEVER be
+# allowed to block trading. Give it its own small pool with fast-fail
+# timeouts so the worst-case audit pathology stays inside its own
+# neighborhood.
+#
+# Pool size matches the audit task count (it's a single asyncio.Task)
+# plus a tiny overflow for instrumentation reads. statement_timeout
+# matches what trader_hot_state.flush_audit_buffer SET LOCALs anyway,
+# so this is belt-and-suspenders.
+_AUDIT_POOL_SIZE = 2
+_AUDIT_MAX_OVERFLOW = 2
+_AUDIT_STATEMENT_TIMEOUT_MS = 5000
+_AUDIT_LOCK_TIMEOUT_MS = 2000
+_AUDIT_IDLE_IN_TRANSACTION_TIMEOUT_MS = 8000
+
+_audit_engine_kw: dict = {
+    "echo": False,
+    "pool_pre_ping": True,
+    "pool_size": _AUDIT_POOL_SIZE,
+    "max_overflow": _AUDIT_MAX_OVERFLOW,
+    "pool_timeout": 5,
+    "pool_recycle": max(30, int(settings.DATABASE_POOL_RECYCLE_SECONDS)),
+    "pool_use_lifo": True,
+}
+_audit_connect_args: dict = {
+    "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
+    "command_timeout": float((_AUDIT_STATEMENT_TIMEOUT_MS / 1000.0) + 2.0),
+    "server_settings": {
+        "timezone": "UTC",
+        "statement_timeout": str(_AUDIT_STATEMENT_TIMEOUT_MS),
+        "lock_timeout": str(_AUDIT_LOCK_TIMEOUT_MS),
+        "idle_in_transaction_session_timeout": str(_AUDIT_IDLE_IN_TRANSACTION_TIMEOUT_MS),
+        "tcp_keepalives_idle": "30",
+        "tcp_keepalives_interval": "10",
+        "tcp_keepalives_count": "3",
+    },
+}
+_audit_engine_kw["connect_args"] = _audit_connect_args
+
+audit_async_engine = create_async_engine(settings.DATABASE_URL, **_audit_engine_kw)
+_db_logger.info(
+    "Audit-tier connection pool created (pool_size=%d, max_overflow=%d, statement_timeout_ms=%d)",
+    _AUDIT_POOL_SIZE,
+    _AUDIT_MAX_OVERFLOW,
+    _AUDIT_STATEMENT_TIMEOUT_MS,
+)
+
+
+@_sa_event.listens_for(audit_async_engine.sync_engine, "checkout")
+def _audit_on_checkout(dbapi_connection, connection_record, connection_proxy):  # noqa: ANN001
+    task_name, coro_name = _pool_task_context()
+    connection_record.info["checkout_time"] = _time.monotonic()
+    connection_record.info["checkout_task_name"] = task_name
+    connection_record.info["checkout_task_coro"] = coro_name
+
+
+@_sa_event.listens_for(audit_async_engine.sync_engine, "checkin")
+def _audit_on_checkin(dbapi_connection, connection_record):  # noqa: ANN001
+    checkout_time = connection_record.info.pop("checkout_time", None)
+    checkout_task_name = connection_record.info.pop("checkout_task_name", "unknown")
+    checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
+    if checkout_time is not None:
+        elapsed = _time.monotonic() - checkout_time
+        # Audit holds connections for ms-to-low-seconds normally. Anything
+        # over 8s is genuinely pathological — log loudly so we notice.
+        if elapsed > 8.0:
+            _db_logger.warning(
+                "Audit-tier connection held for %.2fs before return to pool (task=%s, coro=%s)",
+                elapsed,
+                checkout_task_name,
+                checkout_task_coro,
+            )
+
+
+AuditAsyncSessionLocal = sessionmaker(audit_async_engine, class_=RetryableAsyncSession, expire_on_commit=False)
+
+
 async def recover_pool() -> None:
     """Drop all pooled connections and force fresh ones on next checkout.
 
