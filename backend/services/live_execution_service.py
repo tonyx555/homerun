@@ -118,12 +118,44 @@ from utils.retry import is_retryable_db_error as _is_retryable_db_error  # noqa:
 from utils.retry import db_retry_delay as _db_retry_delay  # noqa: E402
 
 
-def _normalize_utc_datetime(value: datetime | None) -> datetime | None:
+def _normalize_utc_datetime(value: Any) -> datetime | None:
+    """Coerce ``value`` to a tz-aware UTC datetime, accepting either a
+    real ``datetime`` or an ISO-8601 string.  The previous version
+    declared ``datetime | None`` and then accessed ``value.tzinfo``
+    unguarded — when the caller (or upstream JSON/DB deserialization)
+    handed in a string, it raised ``AttributeError: 'str' object has
+    no attribute 'tzinfo'``, which surfaced as ``Worker freshness
+    check failed plane=all`` and triggered spurious worker restarts.
+    """
     if value is None:
         return None
-    if value.tzinfo is None:
-        return value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc)
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, (int, float)):
+        try:
+            ts = float(value)
+        except Exception:
+            return None
+        if ts > 1_000_000_000_000:
+            ts /= 1000.0
+        try:
+            return datetime.fromtimestamp(ts, tz=timezone.utc)
+        except Exception:
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _is_post_only_cross_reject(error_message: str | None) -> bool:
