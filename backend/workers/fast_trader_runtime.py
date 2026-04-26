@@ -48,6 +48,7 @@ from services.trader_orchestrator_state import (
     list_fast_traders,
     list_unconsumed_trade_signals,
     read_orchestrator_control,
+    reconcile_orphaned_fast_submissions,
 )
 from services.worker_state import _is_retryable_db_error, write_worker_snapshot
 from utils.converters import safe_int
@@ -114,6 +115,9 @@ class _FastTraderTask:
         self._last_cycle_duration_seconds = 0.0
         self._last_cycle_error: str | None = None
         self._cycles_completed = 0
+        # Per-stage timings (ms) populated by _run_once and surfaced via the
+        # cycle-exceeded-budget warning to pinpoint which stage stalled.
+        self._last_stage_timings_ms: dict[str, float] = {}
 
     @property
     def trader_id(self) -> str:
@@ -204,6 +208,11 @@ class _FastTraderTask:
                         trader_id=trader_id,
                         duration_s=round(self._last_cycle_duration_seconds, 3),
                         budget_s=_CYCLE_HARD_BUDGET_SECONDS,
+                        # Per-stage breakdown captured in _run_once. Keys
+                        # vary by code path (runtime-signals vs db-fallback
+                        # vs idle), so log whichever fired this cycle so we
+                        # can pinpoint which stage stalled.
+                        stage_timings_ms=getattr(self, "_last_stage_timings_ms", None) or {},
                     )
         logger.info("Fast trader runtime stopped", trader_id=trader_id)
 
@@ -559,6 +568,14 @@ class _FastTraderTask:
         if not accepted_sources:
             return
 
+        # Per-stage timing so when a cycle blows the 3s hard budget we can
+        # see *which* stage stalled (intent_runtime list, db cursor read,
+        # parallel processing, idle-touch commit). Captured into
+        # self._last_stage_timings_ms; the budget-exceeded warning above
+        # logs them, and they're also reported via worker stats.
+        self._last_stage_timings_ms = {}
+        stage_start = time.monotonic()
+
         strategy_types_by_source = self._accepted_strategy_types_by_source()
         cursor_created_at = None
         cursor_signal_id = None
@@ -573,14 +590,21 @@ class _FastTraderTask:
             cursor_signal_id=None,
             limit=_MAX_SIGNALS_PER_CYCLE,
         )
+        self._last_stage_timings_ms["runtime_list_signals"] = round(
+            (time.monotonic() - stage_start) * 1000.0, 1
+        )
         if runtime_signals:
             mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
             risk_limits = dict(self._trader.get("risk_limits") or {})
             default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
+            stage_start = time.monotonic()
             await self._process_signals_parallel_by_market(
                 runtime_signals,
                 mode=mode,
                 default_size_usd=default_size_usd,
+            )
+            self._last_stage_timings_ms["process_runtime_signals"] = round(
+                (time.monotonic() - stage_start) * 1000.0, 1
             )
             return
         if cursor_runtime_sequence is not None:
@@ -595,7 +619,12 @@ class _FastTraderTask:
             )
             return
 
+        stage_start = time.monotonic()
         async with FastAsyncSessionLocal() as session:
+            self._last_stage_timings_ms["session_checkout"] = round(
+                (time.monotonic() - stage_start) * 1000.0, 1
+            )
+            stage_start = time.monotonic()
             if cursor_runtime_sequence is None:
                 cursor_created_at, cursor_signal_id = await get_trader_signal_cursor(
                     session, trader_id=trader_id
@@ -612,9 +641,13 @@ class _FastTraderTask:
                 cursor_signal_id=cursor_signal_id,
                 limit=_MAX_SIGNALS_PER_CYCLE,
             )
+            self._last_stage_timings_ms["db_list_signals"] = round(
+                (time.monotonic() - stage_start) * 1000.0, 1
+            )
             if not signals:
                 if is_db_pressure_active():
                     return
+                stage_start = time.monotonic()
                 touched = await self._touch_trader_run(session, force=False)
                 emitted = await self._maybe_emit_idle_event(
                     session,
@@ -628,16 +661,23 @@ class _FastTraderTask:
                         await asyncio.shield(session.commit())
                     except Exception as exc:
                         logger.warning("Fast trader idle-cycle commit failed", trader_id=trader_id, exc_info=exc)
+                self._last_stage_timings_ms["idle_touch_commit"] = round(
+                    (time.monotonic() - stage_start) * 1000.0, 1
+                )
                 return
 
         mode = str(self._trader.get("mode", "shadow")).strip().lower() or "shadow"
         risk_limits = dict(self._trader.get("risk_limits") or {})
         default_size_usd = float(max(0.01, float(risk_limits.get("max_trade_notional_usd") or 1.0)))
 
+        stage_start = time.monotonic()
         await self._process_signals_parallel_by_market(
             signals,
             mode=mode,
             default_size_usd=default_size_usd,
+        )
+        self._last_stage_timings_ms["process_signals_parallel"] = round(
+            (time.monotonic() - stage_start) * 1000.0, 1
         )
 
     async def _process_one(
@@ -1192,6 +1232,43 @@ class _FastRuntime:
             await hot_state.seed()
         except Exception as exc:
             logger.warning("Fast-tier runtime hot-state seed failed", exc_info=exc)
+        # One-shot orphan-reconcile sweep at startup. Catches any
+        # ``in_flight`` / ``clob_exception`` / ``post_update_failed``
+        # skeleton rows from a prior crash and matches them against the
+        # venue by their deterministic fast_idempotency_key. The
+        # subsequent periodic reconcile in the orchestrator picks up
+        # ongoing orphans on its own cadence.
+        try:
+            async with AsyncSessionLocal() as session:
+                fast_trader_rows = list(await list_fast_traders(session))
+            for trader_row in fast_trader_rows:
+                trader_id_for_reconcile = str(trader_row.get("id") or "").strip()
+                if not trader_id_for_reconcile:
+                    continue
+                try:
+                    async with AsyncSessionLocal() as session:
+                        result = await reconcile_orphaned_fast_submissions(
+                            session,
+                            trader_id=trader_id_for_reconcile,
+                            commit=True,
+                        )
+                    if result.get("eligible"):
+                        logger.info(
+                            "Fast-tier startup orphan reconcile",
+                            trader_id=trader_id_for_reconcile,
+                            eligible=result.get("eligible"),
+                            matched=result.get("matched"),
+                            marked_orphan=result.get("marked_orphan"),
+                            venue_unreachable=result.get("venue_unreachable"),
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Fast-tier startup orphan reconcile failed",
+                        trader_id=trader_id_for_reconcile,
+                        exc_info=exc,
+                    )
+        except Exception as exc:
+            logger.warning("Fast-tier startup orphan reconcile bootstrap failed", exc_info=exc)
         # Install ourselves as the active runtime BEFORE subscribing so the
         # dispatcher has a target to forward to.  The dedup in EventBus.subscribe
         # plus the module-level _dispatch_wake indirection guarantees the
