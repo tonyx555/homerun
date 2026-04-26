@@ -5215,7 +5215,6 @@ async def _run_trader_once(
                     cycle_timeout_seconds=cycle_timeout_seconds,
                     reserve_seconds=2.0,
                 )
-                _live_context_started = time.monotonic()
                 async with release_conn(session):
                     try:
                         if live_context_timeout_seconds is not None:
@@ -5254,7 +5253,6 @@ async def _run_trader_once(
                                 logger.warning("Live market context refresh failed (%s): %s", exc_name, exc_message)
                             else:
                                 logger.warning("Live market context refresh failed (%s)", exc_name)
-                _accumulate("live_context", _live_context_started)
 
             deferred_signals = 0
             deferred_by_reason: dict[str, int] = {}
@@ -6155,7 +6153,6 @@ async def _run_trader_once(
                                 "copy_inventory_context": copy_inventory_context_for_signal,
                             },
                         )
-                        _eval_started = time.monotonic()
                         async with release_conn(session):
                             try:
                                 decision_obj = await asyncio.wait_for(
@@ -6172,7 +6169,6 @@ async def _run_trader_once(
                                 if not decision_future.done():
                                     decision_future.cancel()
                                 raise
-                        _accumulate("strategy_eval", _eval_started)
                         checks_payload = _checks_to_payload(decision_obj.checks)
 
                     if live_context:
@@ -6752,7 +6748,6 @@ async def _run_trader_once(
                         except Exception:
                             pass
                         submit_started_at = utcnow()
-                        _submit_started_mono = time.monotonic()
                         submit_result = await submit_order(
                             trader_id=trader_id,
                             signal=runtime_signal,
@@ -6766,7 +6761,6 @@ async def _run_trader_once(
                             size_usd=size_usd,
                             reason=final_reason,
                         )
-                        _accumulate("submit_order", _submit_started_mono)
                         submit_completed_at = utcnow()
                         submit_latency_payload = _compute_signal_latency_payload(
                             runtime_signal,
