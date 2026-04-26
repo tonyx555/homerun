@@ -38,7 +38,6 @@ from services.event_bus import event_bus
 from services.intent_runtime import get_intent_runtime
 from services.live_pressure import (
     backpressure_extra_sleep_seconds,
-    current_backpressure_level,
     is_db_pressure_active,
 )
 from services.strategy_loader import strategy_loader
