@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAtomValue } from 'jotai'
 import {
   TrendingUp,
@@ -930,6 +930,7 @@ export default function CryptoMarketsPanel({
   showSettingsButton = true,
 }: Props) {
   const panelRef = useRef<HTMLDivElement>(null)
+  const queryClient = useQueryClient()
   const themeMode = useAtomValue(themeAtom)
   const [timeframeFilter, setTimeframeFilter] = useState<TimeframeFilter>('all')
   const [isDocumentVisible, setIsDocumentVisible] = useState(
@@ -944,8 +945,42 @@ export default function CryptoMarketsPanel({
   // Listen for real-time WebSocket pushes
   useEffect(() => {
     if (lastMessage?.type === 'crypto_markets_update' && Array.isArray(lastMessage.data?.markets)) {
-      setWsMarkets((current) => mergeMarkets(current, dedupeMarkets(lastMessage.data.markets as CryptoMarket[])))
+      const incoming = dedupeMarkets(lastMessage.data.markets as CryptoMarket[])
+      let membershipChanged = false
+      setWsMarkets((current) => {
+        const currentKeys = new Set(current.map(marketIdentity))
+        const incomingKeys = new Set(incoming.map(marketIdentity))
+        // Detect transitions: any incoming key not in current, or any current
+        // key dropped from the new push (e.g. hourly market expired at 12pm).
+        if (incoming.length === 0 && current.length > 0) {
+          membershipChanged = true
+        } else {
+          for (const key of incomingKeys) {
+            if (!currentKeys.has(key)) { membershipChanged = true; break }
+          }
+          if (!membershipChanged && incoming.length > 0) {
+            for (const key of currentKeys) {
+              if (!incomingKeys.has(key)) { membershipChanged = true; break }
+            }
+          }
+        }
+        if (!membershipChanged) {
+          // Steady-state tick: merge so price-only updates don't blow away
+          // fields the lightweight WS payload omits (e.g. oracle_history).
+          return mergeMarkets(current, incoming)
+        }
+        // Membership changed (market opened/closed): keep cached fields for
+        // surviving markets, drop expired ones, append new ones.
+        const survivors = current.filter((market) => incomingKeys.has(marketIdentity(market)))
+        return mergeMarkets(survivors, incoming)
+      })
       setWsMarketsUpdatedAtMs(Date.now())
+      // Force an immediate HTTP refetch on transitions so the snapshot picks
+      // up newly-opened markets (with full oracle_history) without waiting
+      // for the next poll interval.
+      if (membershipChanged) {
+        queryClient.invalidateQueries({ queryKey: ['crypto-live-markets'] })
+      }
       return
     }
 
@@ -956,7 +991,7 @@ export default function CryptoMarketsPanel({
         setWsMarketsUpdatedAtMs(Date.now())
       }
     }
-  }, [lastMessage])
+  }, [lastMessage, queryClient])
 
   // If websocket disconnects, immediately stop trusting any stale ws cache.
   useEffect(() => {
@@ -967,9 +1002,14 @@ export default function CryptoMarketsPanel({
   }, [isConnected])
 
   useEffect(() => {
-    const iv = setInterval(() => setNowMs(Date.now()), 1000)
+    // 250ms keeps the oracle-age readouts visibly sub-second without
+    // forcing the panel to re-render every animation frame. Pause the
+    // tick when the document is hidden so background tabs don't burn
+    // CPU on age math nobody can see.
+    if (!isDocumentVisible) return
+    const iv = setInterval(() => setNowMs(Date.now()), 250)
     return () => clearInterval(iv)
-  }, [])
+  }, [isDocumentVisible])
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -1024,7 +1064,11 @@ export default function CryptoMarketsPanel({
   const allMarkets = useMemo(() => {
     const snapshotMarkets = dedupeMarkets(httpMarkets || [])
     if (snapshotMarkets.length === 0) return wsMarkets
-    return mergeMarkets(snapshotMarkets, wsMarkets, false)
+    // appendUnknown=true so a fresh WS market list (e.g. immediately after an
+    // hourly transition) surfaces new markets even before the next HTTP poll
+    // returns. The prune effect on httpMarkets keeps wsMarkets a subset of
+    // the snapshot at steady state, so this can't accumulate stale entries.
+    return mergeMarkets(snapshotMarkets, wsMarkets, true)
   }, [httpMarkets, wsMarkets])
 
   const timeframeCounts = useMemo(() => {

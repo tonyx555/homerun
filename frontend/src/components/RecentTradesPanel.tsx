@@ -321,6 +321,7 @@ export default function RecentTradesPanel({
         source: 'traders',
         limit: confluenceFetchLimit,
         offset: 0,
+        include_price_history: true,
       })
       return result.opportunities
     },

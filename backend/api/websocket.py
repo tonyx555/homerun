@@ -19,7 +19,11 @@ from services.trader_orchestrator_state import (
     read_orchestrator_snapshot,
 )
 from services.wallet_tracker import wallet_tracker
-from services.worker_state import list_worker_snapshots, summarize_worker_stats
+from services.worker_state import (
+    list_worker_snapshots,
+    read_worker_snapshot,
+    summarize_worker_stats,
+)
 from services.ui_lock import UI_LOCK_SESSION_COOKIE, ui_lock_service
 from services.weather import shared_state as weather_shared_state
 from services.ws_feeds import get_feed_manager
@@ -708,14 +712,19 @@ async def handle_websocket(websocket: WebSocket):
                 world_snapshot.updated_at.isoformat() if world_snapshot and world_snapshot.updated_at else None
             ),
         }
+    # list_worker_snapshots above runs in stats_mode="summary", which strips
+    # the markets list. Fetch the crypto worker's full stats directly so the
+    # init payload seeds the frontend with markets *and* their oracle_history
+    # — without this, livelines stay blank until the first HTTP poll fires.
     crypto_markets: list[dict[str, Any]] = []
-    for worker in worker_statuses:
-        if worker.get("worker_name") != "crypto":
-            continue
-        stats = worker.get("stats") if isinstance(worker.get("stats"), dict) else {}
-        if isinstance(stats.get("markets"), list):
-            crypto_markets = list(stats.get("markets") or [])
-        break
+    async with AsyncSessionLocal() as crypto_session:
+        crypto_full_snapshot = await read_worker_snapshot(crypto_session, "crypto")
+    crypto_full_stats = (
+        crypto_full_snapshot.get("stats")
+        if isinstance(crypto_full_snapshot, dict) else None
+    )
+    if isinstance(crypto_full_stats, dict) and isinstance(crypto_full_stats.get("markets"), list):
+        crypto_markets = list(crypto_full_stats.get("markets") or [])
     if crypto_markets:
         for worker in worker_statuses:
             if worker.get("worker_name") == "crypto":

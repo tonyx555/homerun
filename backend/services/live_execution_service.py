@@ -2227,6 +2227,20 @@ class LiveExecutionService:
             if max_notional >= 0.0 and filled_notional_usd > max_notional:
                 filled_notional_usd = max_notional
 
+        # Polymarket's CLOB returns the EIP712 ``metadata`` field on each
+        # open order. The fast tier stamps a deterministic
+        # ``fast_idempotency_key`` there so the orphan-reconcile sweep can
+        # match a venue order back to a local TraderOrder row that lost
+        # its provider_clob_order_id link (e.g. process killed between
+        # CLOB success and DB write). Carry it through unchanged so the
+        # caller can compare directly against
+        # ``derive_fast_idempotency_key`` outputs.
+        metadata_raw = (
+            server_order.get("metadata")
+            or server_order.get("metaData")
+            or server_order.get("orderMetadata")
+            or ""
+        )
         return {
             "clob_order_id": clob_order_id,
             "normalized_status": normalized_status,
@@ -2237,6 +2251,7 @@ class LiveExecutionService:
             "average_fill_price": float(average_fill_price) if average_fill_price is not None else None,
             "limit_price": float(limit_price) if limit_price is not None else None,
             "filled_notional_usd": float(filled_notional_usd) if filled_notional_usd is not None else None,
+            "metadata": str(metadata_raw or ""),
             "raw": server_order,
         }
 
@@ -2853,6 +2868,7 @@ class LiveExecutionService:
         market_question: Optional[str] = None,
         opportunity_id: Optional[str] = None,
         skip_buy_pre_submit_gate: bool = False,
+        metadata: Optional[str] = None,
     ) -> Order:
         """
         Place an order on Polymarket.
@@ -2962,24 +2978,30 @@ class LiveExecutionService:
                             market_amount = float(normalized_size)
                             if side == OrderSide.BUY:
                                 market_amount = float(max(0.0, submit_price) * max(0.0, normalized_size))
-                            order_args = MarketOrderArgs(
+                            market_order_kwargs = dict(
                                 token_id=token_key,
                                 amount=market_amount,
                                 side=order_side,
                                 price=submit_price,
                                 order_type=provider_order_type,
                             )
+                            if metadata:
+                                market_order_kwargs["metadata"] = str(metadata)
+                            order_args = MarketOrderArgs(**market_order_kwargs)
                             signed_order = await asyncio.wait_for(
                                 asyncio.to_thread(self._client.create_market_order, order_args),
                                 timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS,
                             )
                         else:
-                            order_args = OrderArgs(
+                            limit_order_kwargs = dict(
                                 price=submit_price,
                                 size=normalized_size,
                                 side=order_side,
                                 token_id=token_key,
                             )
+                            if metadata:
+                                limit_order_kwargs["metadata"] = str(metadata)
+                            order_args = OrderArgs(**limit_order_kwargs)
                             signed_order = await asyncio.wait_for(
                                 asyncio.to_thread(self._client.create_order, order_args),
                                 timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS,
@@ -3532,6 +3554,44 @@ class LiveExecutionService:
             if self._orders.get(order.id, order).status
             in {OrderStatus.OPEN, OrderStatus.PARTIALLY_FILLED, OrderStatus.PENDING}
         ]
+
+    async def get_open_order_snapshots_by_metadata(self) -> dict[str, list[dict[str, Any]]]:
+        """Return live open orders indexed by their EIP712 ``metadata`` field.
+
+        Used by the fast-tier orphan reconcile sweep: when a TraderOrder
+        row's ``provider_clob_order_id`` was lost (e.g. CLOB-success →
+        process-killed → DB-write-never-happened), the only durable link
+        back to the venue order is the deterministic metadata key the
+        fast path stamps on every submission. This helper does a single
+        ``get_open_orders`` round-trip and groups parsed snapshots by
+        metadata so the reconciler can do an O(1) lookup per orphan.
+
+        Orders without a metadata field (legacy / non-fast-tier) end up
+        under the empty-string key and are simply ignored by the
+        reconciler. Failures return an empty dict — callers must treat
+        that as "venue is unreachable, retry later".
+        """
+        if not self.is_ready() and not await self.ensure_initialized():
+            return {}
+
+        try:
+            provider_response = await self._run_client_io(
+                self._client.get_open_orders,
+                timeout=_CLOB_READ_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning("get_open_order_snapshots_by_metadata: get_open_orders failed", exc_info=exc)
+            return {}
+
+        provider_orders = self._extract_server_orders(provider_response)
+        out: dict[str, list[dict[str, Any]]] = {}
+        for server_order in provider_orders:
+            snapshot = self._parse_provider_order_snapshot(server_order)
+            if snapshot is None:
+                continue
+            metadata_key = str(snapshot.get("metadata") or "").strip().lower()
+            out.setdefault(metadata_key, []).append(snapshot)
+        return out
 
     async def sync_positions(self) -> list[Position]:
         """Sync positions from Polymarket"""

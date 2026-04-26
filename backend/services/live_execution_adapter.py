@@ -77,6 +77,7 @@ async def execute_live_order(
     allow_taker_limit_buy_above_signal: bool = False,
     aggressive_limit_buy_submit_as_gtc: bool = False,
     skip_buy_pre_submit_gate: bool = False,
+    metadata: str | None = None,
 ) -> LiveOrderExecution:
     normalized_token_id = str(token_id or "").strip()
     normalized_side = _normalize_side(side)
@@ -311,6 +312,7 @@ async def execute_live_order(
             market_question=market_question,
             opportunity_id=opportunity_id,
             skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
+            metadata=metadata,
         )
 
         order_status = _map_trading_status(getattr(order, "status", None))
@@ -340,6 +342,7 @@ async def execute_live_order(
                     market_question=market_question,
                     opportunity_id=opportunity_id,
                     skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
+                    metadata=metadata,
                 )
                 retry_status = _map_trading_status(getattr(retry_order, "status", None))
                 if retry_status != "failed":

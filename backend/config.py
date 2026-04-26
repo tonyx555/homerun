@@ -150,8 +150,15 @@ class Settings(BaseSettings):
     MARKET_REENTRY_COOLDOWN_SECONDS: float = 600.0
     EVENT_HANDLER_TIMEOUT_SECONDS: float = 60.0
 
-    CRYPTO_WS_REACTIVE_DEBOUNCE_SECONDS: float = 0.05
-    CRYPTO_WS_BROADCAST_MIN_INTERVAL_SECONDS: float = 0.20
+    # Reactive crypto pipeline tuning. The reactive debounce coalesces
+    # WS feed ticks that fire within the window into a single market-row
+    # rebuild; the broadcast rate-limit caps how often the lightweight
+    # snapshot is shipped to connected WS clients. Lower = fresher prices
+    # in the UI, higher = less CPU/bandwidth. Defaults aim for ~150ms
+    # worst-case feed-to-frontend latency without saturating the
+    # broadcast loop on bursty assets.
+    CRYPTO_WS_REACTIVE_DEBOUNCE_SECONDS: float = 0.025
+    CRYPTO_WS_BROADCAST_MIN_INTERVAL_SECONDS: float = 0.100
 
     # Production Settings
     LOG_LEVEL: str = "INFO"

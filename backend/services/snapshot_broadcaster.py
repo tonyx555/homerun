@@ -30,7 +30,11 @@ from services.event_bus import event_bus
 from services.news import shared_state as news_shared_state
 from services.signal_bus import read_trade_signal_source_stats
 from services.trader_orchestrator_state import read_orchestrator_snapshot
-from services.worker_state import list_worker_snapshots, summarize_worker_stats
+from services.worker_state import (
+    list_worker_snapshots,
+    read_worker_snapshot,
+    summarize_worker_stats,
+)
 from services.weather import shared_state as weather_shared_state
 from utils.logger import get_logger
 from utils.market_urls import serialize_opportunity_with_links
@@ -573,16 +577,22 @@ class SnapshotBroadcaster:
                     self._last_worker_status_sig = worker_sig
                     await manager.broadcast({"type": "worker_status_update", "data": {"workers": worker_statuses}})
 
-                crypto_markets: list[dict[str, Any]] | None = None
-                for worker in worker_statuses:
-                    if worker.get("worker_name") != "crypto":
-                        continue
-                    stats = worker.get("stats") if isinstance(worker.get("stats"), dict) else {}
-                    if isinstance(stats.get("markets"), list):
-                        crypto_markets = list(stats.get("markets") or [])
-                    break
-                if not isinstance(crypto_markets, list):
-                    crypto_markets = []
+                # `worker_statuses` was loaded with stats_mode="summary",
+                # which strips the markets list. Read the crypto snapshot's
+                # full stats directly so the fallback broadcast actually
+                # carries markets (with oracle_history) — otherwise the
+                # broadcast below short-circuits on every tick and the
+                # frontend has to wait for HTTP polling to populate
+                # livelines.
+                crypto_markets: list[dict[str, Any]] = []
+                async with AsyncSessionLocal() as crypto_session:
+                    crypto_snapshot = await read_worker_snapshot(crypto_session, "crypto")
+                crypto_stats_full = (
+                    crypto_snapshot.get("stats")
+                    if isinstance(crypto_snapshot, dict) else None
+                )
+                if isinstance(crypto_stats_full, dict) and isinstance(crypto_stats_full.get("markets"), list):
+                    crypto_markets = list(crypto_stats_full.get("markets") or [])
 
                 # Fallback always broadcasts crypto (rate limiting only
                 # applies to the high-frequency event-driven path).
