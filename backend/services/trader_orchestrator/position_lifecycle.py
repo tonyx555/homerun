@@ -452,17 +452,41 @@ def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: d
         pending_exit["exhausted_at"] = _iso_utc(now)
         pending_exit["next_retry_at"] = None
         pending_exit["consecutive_timeout_count"] = 0
+        pending_exit["consecutive_blocked_failure_count"] = 0
         return
     is_timeout = isinstance(error, (asyncio.TimeoutError, TimeoutError))
-    if is_timeout:
-        timeout_streak = int(pending_exit.get("consecutive_timeout_count") or 0) + 1
-        pending_exit["consecutive_timeout_count"] = timeout_streak
-        if timeout_streak >= _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD:
-            # Stop pumping reconcile cycles into a stuck CLOB submission.
-            # Each timeout costs ~10s of compute, cancels asyncpg mid-protocol,
-            # and forces a connection invalidation; retrying again will do the
-            # same thing.  An operator (or a successful periodic
-            # ``sync_positions`` reset) can clear this state.
+    # A "blocked-class" failure is one we know retrying with the same
+    # exit_size cannot fix on its own: a CLOB submission timeout, OR
+    # a balance/allowance rejection (V1 returns the format
+    # ``not enough balance / allowance: the balance is not enough ->
+    # balance: X, order amount: Y``; V2 returns a bare
+    # ``not enough balance / allowance`` with no numbers because
+    # pUSD/V2 approvals were never set up).  Both shapes mean the
+    # next retry will fail the same way until something external
+    # (operator, sync_positions reset, V2 migration completion)
+    # changes the wallet state.  Track the streak across both kinds
+    # so alternating timeouts and balance errors don't reset the
+    # counter and let the order spin forever.
+    error_text_lower = (error_text or "").lower()
+    is_balance_failure = "not enough balance" in error_text_lower or "not enough balance / allowance" in error_text_lower
+    is_blocked_class = is_timeout or is_balance_failure
+    if is_blocked_class:
+        blocked_streak = int(pending_exit.get("consecutive_blocked_failure_count") or 0) + 1
+        pending_exit["consecutive_blocked_failure_count"] = blocked_streak
+        # Keep the legacy timeout counter in sync for callers that
+        # still read it.
+        if is_timeout:
+            pending_exit["consecutive_timeout_count"] = (
+                int(pending_exit.get("consecutive_timeout_count") or 0) + 1
+            )
+        if blocked_streak >= _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD:
+            # Stop pumping reconcile cycles into an exit that can't
+            # currently succeed.  Each attempt burns ~10s on the
+            # asyncio.wait_for budget, cancels asyncpg mid-protocol,
+            # and forces a connection invalidation; retrying again
+            # will do the same thing.  An operator (or a successful
+            # periodic ``sync_positions`` reset, or completion of
+            # the V2 wallet migration) can clear this state.
             pending_exit["status"] = "blocked_persistent_timeout"
             pending_exit["retry_count"] = retry_count
             pending_exit["exhausted_at"] = _iso_utc(now)
@@ -470,6 +494,7 @@ def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: d
             return
     else:
         pending_exit["consecutive_timeout_count"] = 0
+        pending_exit["consecutive_blocked_failure_count"] = 0
     pending_exit["status"] = "failed"
     pending_exit["retry_count"] = retry_count
     _bump_allowance_error_counter(pending_exit, error_text)
