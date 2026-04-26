@@ -51,9 +51,32 @@ class UTCDateTime(TypeDecorator):
     def process_result_value(self, value, dialect):
         if value is None:
             return None
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value.astimezone(timezone.utc)
+        # Driver normally returns ``datetime``; defensively handle the
+        # case where a value somehow arrives as a string (e.g. raw SQL
+        # result, JSON column re-typed, asyncpg fallback path).  The
+        # previous unguarded ``value.tzinfo`` access raised
+        # ``AttributeError: 'str' object has no attribute 'tzinfo'``
+        # which surfaced in production as
+        # ``Worker freshness check failed plane=all`` every 30s and
+        # triggered spurious worker restarts.
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(text)
+            except Exception:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        return None
 
 
 DateTime = UTCDateTime
