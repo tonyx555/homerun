@@ -1,4 +1,4 @@
-import { Fragment, lazy, Suspense, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, lazy, Suspense, type ReactNode, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -8082,8 +8082,12 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }, [activePerformanceSection, selectedPerformanceConfig.paramSummaryBySection])
 
+  // useDeferredValue lets typing stay snappy: React keeps the old deferred
+  // value during the high-priority keystroke render and only re-runs the
+  // expensive filter+map memos after typing pauses.
+  const deferredDecisionSearch = useDeferredValue(decisionSearch)
   const filteredDecisions = useMemo(() => {
-    const q = decisionSearch.trim().toLowerCase()
+    const q = deferredDecisionSearch.trim().toLowerCase()
     return selectedDecisions
       .filter((decision) => {
         const outcome = normalizeDecisionOutcome(decision.decision)
@@ -8094,7 +8098,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         return haystack.includes(q)
       })
       .slice(0, 200)
-  }, [selectedDecisions, decisionSearch, decisionOutcomeFilter])
+  }, [selectedDecisions, deferredDecisionSearch, decisionOutcomeFilter])
 
   useEffect(() => {
     if (filteredDecisions.length === 0) {
@@ -8261,15 +8265,16 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [selectedOrders, cryptoMarkets, decisionSignalPayloadByDecisionId, liveMarksByOrderId]
   )
 
+  const deferredTradeSearch = useDeferredValue(tradeSearch)
   const selectedTradeRowsFull = useMemo(() => {
-    const q = tradeSearch.trim().toLowerCase()
+    const q = deferredTradeSearch.trim().toLowerCase()
     return buildTradeDisplayRows(selectedTradeOrderRows).filter((row) => {
       const status = row.kind === 'single' ? row.row.status : row.status
       if (!matchesTradeStatusFilter(status, tradeStatusFilter)) return false
       if (!q) return true
       return tradeDisplayRowSearchText(row).includes(q)
     })
-  }, [selectedTradeOrderRows, tradeSearch, tradeStatusFilter])
+  }, [selectedTradeOrderRows, deferredTradeSearch, tradeStatusFilter])
 
   const selectedTradeRows = useMemo(
     () => selectedTradeRowsFull.slice(0, 250),
@@ -8286,8 +8291,9 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [allOrders, cryptoMarkets, decisionSignalPayloadByDecisionId, liveMarksByOrderId]
   )
 
+  const deferredAllBotsTradeSearch = useDeferredValue(allBotsTradeSearch)
   const filteredAllTradeHistory = useMemo(() => {
-    const q = allBotsTradeSearch.trim().toLowerCase()
+    const q = deferredAllBotsTradeSearch.trim().toLowerCase()
     return buildTradeDisplayRows(allTradeOrderRows).filter((row) => {
       const status = row.kind === 'single' ? row.row.status : row.status
       if (!matchesTradeStatusFilter(status, allBotsTradeStatusFilter)) return false
@@ -8297,13 +8303,14 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         : traderNameById[String(row.primaryRow.order.trader_id || '')] || shortId(row.primaryRow.order.trader_id)
       return tradeDisplayRowSearchText(row, traderLabel).includes(q)
     })
-  }, [allBotsTradeSearch, allBotsTradeStatusFilter, allTradeOrderRows, traderNameById])
+  }, [deferredAllBotsTradeSearch, allBotsTradeStatusFilter, allTradeOrderRows, traderNameById])
 
   const ordersTotalCount = ordersSummaryQuery.data?.total_count ?? allOrders.length
   const ordersTotalPages = Math.max(1, Math.ceil(ordersTotalCount / ordersPageSize))
 
+  const deferredAllBotsPositionSearch = useDeferredValue(allBotsPositionSearch)
   const filteredAllPositionBook = useMemo(() => {
-    const query = allBotsPositionSearch.trim().toLowerCase()
+    const query = deferredAllBotsPositionSearch.trim().toLowerCase()
     const rows = globalPositionBook.filter((row) => {
       if (allBotsPositionDirectionFilter === 'yes' && !isYesDirection(row.directionSide || row.direction)) return false
       if (allBotsPositionDirectionFilter === 'no' && !isNoDirection(row.directionSide || row.direction)) return false
@@ -8314,7 +8321,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     return sortPositionRows(rows, allBotsPositionSortField, allBotsPositionSortDirection)
   }, [
     allBotsPositionDirectionFilter,
-    allBotsPositionSearch,
+    deferredAllBotsPositionSearch,
     allBotsPositionSortDirection,
     allBotsPositionSortField,
     globalPositionBook,
