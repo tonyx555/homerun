@@ -1344,19 +1344,38 @@ async def flush_audit_buffer() -> int:
                     sa_text(f"SET LOCAL lock_timeout = '{_AUDIT_LOCK_TIMEOUT_MS}'")
                 )
                 with session.no_autoflush:
+                    # Group by kind and bulk-insert the high-volume
+                    # append-only kinds (decision / decision_checks /
+                    # trader_event) in single multi-row INSERT
+                    # statements. Net effect on a 250-entry batch:
+                    # ~5-10 SQL roundtrips instead of 250. Dramatic
+                    # reduction in lock-holding time and pool wait.
+                    decisions: list[dict[str, Any]] = []
+                    decision_checks: list[dict[str, Any]] = []
+                    trader_events: list[dict[str, Any]] = []
+                    other: list[_AuditEntry] = []
                     for entry in batch:
                         if entry.kind == "decision":
-                            await _flush_decision(session, entry.payload)
+                            decisions.append(entry.payload)
                         elif entry.kind == "decision_checks":
-                            _flush_decision_checks(session, entry.payload)
-                        elif entry.kind == "consumption":
+                            decision_checks.append(entry.payload)
+                        elif entry.kind == "trader_event":
+                            trader_events.append(entry.payload)
+                        else:
+                            other.append(entry)
+                    # Decisions first (referenced by decision_checks via FK).
+                    await _flush_decisions_bulk(session, decisions)
+                    await _flush_decision_checks_bulk(session, decision_checks)
+                    await _flush_trader_events_bulk(session, trader_events)
+                    # Non-bulk kinds: per-row (read-modify-write upserts
+                    # with conditional logic that doesn't bulk cleanly).
+                    for entry in other:
+                        if entry.kind == "consumption":
                             await _flush_consumption(session, entry.payload)
                         elif entry.kind == "cursor":
                             await _flush_cursor(session, entry.payload)
                         elif entry.kind == "signal_status":
                             await _flush_signal_status(session, entry.payload)
-                        elif entry.kind == "trader_event":
-                            _flush_trader_event(session, entry.payload)
                         elif entry.kind == "experiment_assignment":
                             await _flush_experiment_assignment(session, entry.payload)
                 insert_seconds = _time.monotonic() - insert_started
@@ -1428,6 +1447,49 @@ async def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
     )
 
 
+async def _flush_decisions_bulk(session: AsyncSession, payloads: list[dict[str, Any]]) -> None:
+    """Bulk multi-row INSERT for TraderDecision. ~10× faster than per-row.
+
+    Pre-deduplicates IDs in-memory (same-batch duplicates) to keep the
+    per-row ON CONFLICT path the only conflict-resolution surface.
+    """
+    if not payloads:
+        return
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for p in payloads:
+        pk = str(p.get("id") or "")
+        if not pk or pk in seen:
+            continue
+        seen.add(pk)
+        rows.append({
+            "id": pk,
+            "trader_id": p["trader_id"],
+            "signal_id": p["signal_id"],
+            "source": p["source"],
+            "strategy_key": p["strategy_key"],
+            "strategy_version": p.get("strategy_version"),
+            "decision": p["decision"],
+            "reason": p.get("reason"),
+            "score": p.get("score"),
+            "trace_id": p.get("trace_id"),
+            "checks_summary_json": p.get("checks_summary_json") or {},
+            "risk_snapshot_json": p.get("risk_snapshot_json") or {},
+            "payload_json": p.get("payload_json") or {},
+            "created_at": p.get("created_at") or utcnow(),
+        })
+    if not rows:
+        return
+    # One INSERT statement, one network roundtrip, one parse, one
+    # acquire-locks-and-write. Vs the previous per-row loop which did
+    # N roundtrips and N statement parses. ON CONFLICT DO NOTHING
+    # handles the case where another writer raced us on the same id.
+    await session.execute(
+        pg_insert(TraderDecision).values(rows)
+        .on_conflict_do_nothing(index_elements=[TraderDecision.id])
+    )
+
+
 def _flush_decision_checks(session: AsyncSession, p: dict[str, Any]) -> None:
     decision_id = p["decision_id"]
     for check in p.get("checks") or []:
@@ -1444,6 +1506,36 @@ def _flush_decision_checks(session: AsyncSession, p: dict[str, Any]) -> None:
                 created_at=utcnow(),
             )
         )
+
+
+async def _flush_decision_checks_bulk(session: AsyncSession, payloads: list[dict[str, Any]]) -> None:
+    """Bulk INSERT for TraderDecisionCheck rows.  Each payload contains
+    a decision_id plus a list of checks; we flatten across all payloads
+    into a single multi-row INSERT.
+    """
+    if not payloads:
+        return
+    rows: list[dict[str, Any]] = []
+    now_ts = utcnow()
+    for p in payloads:
+        decision_id = p.get("decision_id")
+        if not decision_id:
+            continue
+        for check in p.get("checks") or []:
+            rows.append({
+                "id": _new_id(),
+                "decision_id": decision_id,
+                "check_key": str(check.get("check_key") or check.get("key") or "check"),
+                "check_label": str(check.get("check_label") or check.get("label") or "Check"),
+                "passed": bool(check.get("passed", False)),
+                "score": check.get("score"),
+                "detail": check.get("detail"),
+                "payload_json": check.get("payload") or {},
+                "created_at": now_ts,
+            })
+    if not rows:
+        return
+    await session.execute(pg_insert(TraderDecisionCheck).values(rows))
 
 
 async def _flush_consumption(session: AsyncSession, p: dict[str, Any]) -> None:
@@ -1521,6 +1613,37 @@ def _flush_trader_event(session: AsyncSession, p: dict[str, Any]) -> None:
             payload_json=p.get("payload_json") or {},
             created_at=p.get("created_at") or utcnow(),
         )
+    )
+
+
+async def _flush_trader_events_bulk(session: AsyncSession, payloads: list[dict[str, Any]]) -> None:
+    """Bulk multi-row INSERT for TraderEvent. Pre-deduplicates id collisions."""
+    if not payloads:
+        return
+    seen: set[str] = set()
+    rows: list[dict[str, Any]] = []
+    for p in payloads:
+        pk = str(p.get("id") or "")
+        if not pk or pk in seen:
+            continue
+        seen.add(pk)
+        rows.append({
+            "id": pk,
+            "trader_id": p.get("trader_id"),
+            "event_type": str(p.get("event_type") or ""),
+            "severity": str(p.get("severity") or "info"),
+            "source": p.get("source"),
+            "operator": p.get("operator"),
+            "message": p.get("message"),
+            "trace_id": p.get("trace_id"),
+            "payload_json": p.get("payload_json") or {},
+            "created_at": p.get("created_at") or utcnow(),
+        })
+    if not rows:
+        return
+    await session.execute(
+        pg_insert(TraderEvent).values(rows)
+        .on_conflict_do_nothing(index_elements=[TraderEvent.id])
     )
 
 
