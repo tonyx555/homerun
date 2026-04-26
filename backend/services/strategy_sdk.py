@@ -256,9 +256,9 @@ class StrategySDK:
         "max_open_orders": 20,
         "max_open_positions": 12,
         "position_cap_scope": "market_direction",
-        "max_position_notional_usd": 350.0,
+        "max_position_notional_usd": 5.0,
         "max_gross_exposure_usd": 2000.0,
-        "max_trade_notional_usd": 350.0,
+        "max_trade_notional_usd": 5.0,
         "max_daily_loss_usd": 300.0,
         "max_daily_spend_usd": 2000.0,
         "cooldown_seconds": 0,
@@ -1611,13 +1611,13 @@ class StrategySDK:
             position_cap_scope = "market_direction"
         cfg["position_cap_scope"] = position_cap_scope
         cfg["max_position_notional_usd"] = StrategySDK._coerce_float(
-            cfg.get("max_position_notional_usd"), 350.0, 1.0, 10_000_000.0
+            cfg.get("max_position_notional_usd"), 5.0, 1.0, 10_000_000.0
         )
         cfg["max_gross_exposure_usd"] = StrategySDK._coerce_float(
             cfg.get("max_gross_exposure_usd"), 2000.0, 1.0, 100_000_000.0
         )
         cfg["max_trade_notional_usd"] = StrategySDK._coerce_float(
-            cfg.get("max_trade_notional_usd"), 350.0, 1.0, 10_000_000.0
+            cfg.get("max_trade_notional_usd"), 5.0, 1.0, 10_000_000.0
         )
         cfg["max_daily_loss_usd"] = StrategySDK._coerce_float(cfg.get("max_daily_loss_usd"), 300.0, 1.0, 100_000_000.0)
         cfg["max_daily_spend_usd"] = StrategySDK._coerce_float(

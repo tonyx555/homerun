@@ -17,7 +17,17 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
-from services.strategies.crypto_strategy_utils import build_binary_crypto_market, parse_datetime_utc
+from services.strategies.crypto_strategy_utils import (
+    build_binary_crypto_market,
+    default_max_market_data_age_ms,
+    default_max_oracle_age_ms,
+    default_min_seconds_left_for_entry,
+    fee_aware_min_edge_pct,
+    parse_datetime_utc,
+    pick_oracle_source,
+    polymarket_taker_fee_pct,
+    timeframe_seconds,
+)
 from services.strategies.reversion_helpers import direction_opposes_impulse, market_move_pct, reversion_shape_ok
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
@@ -60,6 +70,18 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         "min_liquidity_usd": 2000.0,
         "max_entry_price": 0.92,
         "max_markets_per_event": 24,
+        # Safety gates — leave at None to use the timeframe-aware defaults in
+        # crypto_strategy_utils. Override per-strategy in the UI to tighten or
+        # loosen for specific markets.
+        "max_oracle_age_ms": None,
+        "max_market_data_age_ms": None,
+        "min_seconds_left_for_entry": None,
+        "min_fee_clearance_x": 2.0,
+        "prefer_oracle_source": "binance_direct",
+        # Force exit when this close to resolution. Spike uses IOC so the
+        # entry path won't rest, but a held position can still ride into
+        # the heartbeat window — close it with a market sell first.
+        "force_exit_seconds_before_resolution": 20.0,
     }
 
     def __init__(self) -> None:
@@ -124,7 +146,76 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         if selected_price <= 0.0 or selected_price >= 1.0 or selected_price > max_entry_price:
             return None
 
-        oracle_price = safe_float(row.get("oracle_price"), None)
+        # ---- Resolution-boundary safety: refuse to enter when there's not
+        # enough runway after the fill to react before the Chainlink heartbeat
+        # crosses the resolution timestamp.
+        timeframe_value = row.get("timeframe")
+        tf_seconds = timeframe_seconds(timeframe_value)
+        end_date = parse_datetime_utc(row.get("end_time"))
+        seconds_left = float("inf")
+        elapsed_ratio = 0.5  # default mid-window
+        if end_date is not None:
+            seconds_left = max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
+            elapsed_ratio = clamp(1.0 - (seconds_left / max(1, tf_seconds)), 0.0, 1.0)
+
+        configured_min_secs = cfg.get("min_seconds_left_for_entry")
+        min_seconds_left = (
+            float(configured_min_secs)
+            if configured_min_secs is not None
+            else default_min_seconds_left_for_entry(timeframe_value)
+        )
+        if seconds_left < min_seconds_left:
+            return None
+
+        # ---- Worker-snapshot freshness: avoid trading on a stale row.
+        configured_max_md_age = cfg.get("max_market_data_age_ms")
+        max_market_data_age_ms = (
+            float(configured_max_md_age)
+            if configured_max_md_age is not None
+            else default_max_market_data_age_ms(timeframe_value)
+        )
+        market_data_age_ms = safe_float(row.get("market_data_age_ms"), None)
+        if market_data_age_ms is not None and market_data_age_ms > max_market_data_age_ms:
+            return None
+
+        # ---- Oracle: prefer the freshest source (typically binance_direct
+        # sub-second WS) and refuse if every source is past the per-timeframe
+        # staleness cap. The Chainlink-dominated row.get("oracle_price") is
+        # left as a fallback only.
+        configured_max_oracle = cfg.get("max_oracle_age_ms")
+        max_oracle_age_ms = (
+            float(configured_max_oracle)
+            if configured_max_oracle is not None
+            else default_max_oracle_age_ms(timeframe_value)
+        )
+        prefer_source = str(cfg.get("prefer_oracle_source") or "binance_direct").strip() or None
+        oracle_pick = pick_oracle_source(
+            row,
+            prefer=prefer_source,
+            max_age_ms=max_oracle_age_ms,
+        )
+        if oracle_pick is not None:
+            oracle_price = float(oracle_pick["price"])
+            oracle_age_ms = float(oracle_pick["age_ms"])
+            oracle_source_used = str(oracle_pick["source"])
+        else:
+            # Fall back to the row's primary price only when its own age is
+            # within the cap; otherwise treat oracle as unavailable.
+            fallback_price = safe_float(row.get("oracle_price"), None)
+            fallback_age_seconds = safe_float(row.get("oracle_age_seconds"), None)
+            if (
+                fallback_price is not None
+                and fallback_age_seconds is not None
+                and fallback_age_seconds * 1000.0 <= max_oracle_age_ms
+            ):
+                oracle_price = float(fallback_price)
+                oracle_age_ms = float(fallback_age_seconds) * 1000.0
+                oracle_source_used = str(row.get("oracle_source") or "primary")
+            else:
+                oracle_price = None
+                oracle_age_ms = None
+                oracle_source_used = None
+
         price_to_beat = safe_float(row.get("price_to_beat"), None)
 
         # Edge: base on spike magnitude; add oracle component if available
@@ -134,14 +225,6 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
         else:
             diff_pct = 0.0
             edge = abs(move_5m) * 0.6
-
-        # Elapsed ratio from end_time
-        end_date = parse_datetime_utc(row.get("end_time"))
-        elapsed_ratio = 0.5  # default mid-window
-        if end_date is not None:
-            seconds_left = max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
-            # Assume 5m (300s) timeframe for elapsed ratio
-            elapsed_ratio = clamp(1.0 - (seconds_left / 300.0), 0.0, 1.0)
 
         confidence = clamp(
             0.50
@@ -177,7 +260,20 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             + (min(1.0, liquidity / 20000.0) * 4.0)
         )
 
-        net_edge_percent = max(0.0, edge - 0.25)  # rough fee/slippage deduction
+        # ---- Fee-aware net edge: use the docs-accurate Polymarket taker
+        # curve (`p * 0.25 * (p*(1-p))^2`) rather than a flat 0.25% guess.
+        # At p=0.30 the real fee is ~1.10%, at p=0.50 it's ~1.56%, so the old
+        # constant was 4-6× too low at typical entry prices and would let
+        # marginal trades through with negative true edge.
+        taker_fee_pct_value = polymarket_taker_fee_pct(selected_price) * 100.0
+        net_edge_percent = max(0.0, edge - taker_fee_pct_value)
+
+        # Hard fee-clearance gate: refuse trades whose raw edge can't clear
+        # the taker fee by ``min_fee_clearance_x``×.
+        min_fee_clearance_x = max(1.0, to_float(cfg.get("min_fee_clearance_x", 2.0), 2.0))
+        if edge < fee_aware_min_edge_pct(selected_price, min_fee_clearance_x):
+            return None
+
         target_exit_price = clamp(selected_price + (net_edge_percent / 100.0), selected_price + 0.0001, 0.999)
 
         return {
@@ -188,14 +284,19 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             "move_30m": float(move_30m) if move_30m is not None else None,
             "move_2h": float(move_2h) if move_2h is not None else None,
             "oracle_price": float(oracle_price) if oracle_price is not None else None,
+            "oracle_source_used": oracle_source_used,
+            "oracle_age_ms": float(oracle_age_ms) if oracle_age_ms is not None else None,
             "price_to_beat": float(price_to_beat) if price_to_beat is not None else None,
             "oracle_diff_pct": float(diff_pct),
             "edge": float(edge),
+            "taker_fee_pct": float(taker_fee_pct_value),
             "net_edge_percent": float(net_edge_percent),
             "confidence": float(confidence),
             "risk_score": float(risk_score),
             "shape_ok": shape_ok,
             "elapsed_ratio": float(elapsed_ratio),
+            "seconds_left": float(seconds_left) if seconds_left != float("inf") else None,
+            "timeframe": str(timeframe_value or "") or None,
             "liquidity_usd": float(liquidity),
             "target_exit_price": float(target_exit_price),
             "score": float(score),
@@ -225,14 +326,19 @@ class CryptoSpikeReversionStrategy(BaseStrategy):
             "move_30m": signal["move_30m"],
             "move_2h": signal["move_2h"],
             "oracle_price": signal["oracle_price"],
+            "oracle_source_used": signal.get("oracle_source_used"),
+            "oracle_age_ms": signal.get("oracle_age_ms"),
             "price_to_beat": signal["price_to_beat"],
             "oracle_diff_pct": signal["oracle_diff_pct"],
             "edge": signal["edge"],
+            "taker_fee_pct": signal.get("taker_fee_pct"),
             "net_edge_percent": signal["net_edge_percent"],
             "confidence": signal["confidence"],
             "risk_score": signal["risk_score"],
             "shape_ok": signal["shape_ok"],
             "elapsed_ratio": signal["elapsed_ratio"],
+            "seconds_left": signal.get("seconds_left"),
+            "timeframe": signal.get("timeframe"),
             "liquidity_usd": signal["liquidity_usd"],
             "target_exit_price": signal["target_exit_price"],
             "market_data_age_ms": safe_float(row.get("market_data_age_ms"), None),

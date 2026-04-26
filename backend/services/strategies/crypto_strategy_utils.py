@@ -187,3 +187,225 @@ def market_ml_probability_yes(row: dict[str, Any]) -> float | None:
     if probability_yes is not None:
         return clamp(float(probability_yes), 0.03, 0.97)
     return None
+
+
+# Source preference order when ages tie or no per-source data is available.
+# binance_direct first (sub-second receive-time stamp), then chainlink
+# (canonical resolution price), then RTDS-relayed binance, then anything
+# else. Mirrors the ranking already implemented in
+# btc_eth_highfreq._extract_oracle_status so behavior stays consistent.
+_ORACLE_SOURCE_RANK: dict[str, int] = {
+    "binance_direct": 0,
+    "chainlink": 1,
+    "binance": 2,
+}
+
+
+def _coerce_age_ms(point: dict[str, Any], now_ms: float) -> float | None:
+    age_ms = safe_float(point.get("age_ms"), None)
+    if age_ms is not None and age_ms >= 0.0:
+        return float(age_ms)
+    age_seconds = safe_float(point.get("age_seconds"), None)
+    if age_seconds is not None and age_seconds >= 0.0:
+        return float(age_seconds) * 1000.0
+    updated_at_ms = safe_float(point.get("updated_at_ms"), None)
+    if updated_at_ms is not None and updated_at_ms > 0.0:
+        return max(0.0, now_ms - float(updated_at_ms))
+    return None
+
+
+def pick_oracle_source(
+    market: dict[str, Any],
+    *,
+    prefer: str | None = None,
+    max_age_ms: float | None = None,
+    now_ms: float | None = None,
+) -> dict[str, Any] | None:
+    """Pick a fresh oracle price source from a crypto market dict.
+
+    Strategies that want a sub-second price (e.g. ``binance_direct`` from
+    the Binance WS feed) should call this instead of reading the
+    Chainlink-dominated ``oracle_price`` field, which moves on Chainlink's
+    on-chain heartbeat and can lag several seconds.
+
+    Resolution order:
+
+    1. If ``prefer`` is supplied and that source has a fresh price (price > 0
+       and ``age_ms`` ≤ ``max_age_ms`` when set), return it.
+    2. Otherwise pick the freshest source by ``age_ms``, breaking ties with
+       ``_ORACLE_SOURCE_RANK`` (binance_direct → chainlink → binance → other).
+    3. If ``max_age_ms`` is set, only return a source whose age is within
+       that bound. Returns ``None`` when no source qualifies.
+
+    Returns a dict shaped ``{"source", "price", "updated_at_ms", "age_ms"}``
+    or ``None`` when no usable source exists.
+    """
+    by_source = market.get("oracle_prices_by_source")
+    if not isinstance(by_source, dict) or not by_source:
+        return None
+
+    resolved_now = float(now_ms) if now_ms is not None else _wall_now_ms()
+
+    candidates: list[tuple[str, dict[str, Any], float]] = []
+    for raw_source, raw_point in by_source.items():
+        if not isinstance(raw_point, dict):
+            continue
+        price = safe_float(raw_point.get("price"), None)
+        if price is None or price <= 0.0:
+            continue
+        source_key = str(raw_source).strip().lower() or str(raw_point.get("source") or "").strip().lower()
+        if not source_key:
+            continue
+        age_ms = _coerce_age_ms(raw_point, resolved_now)
+        if age_ms is None:
+            continue
+        if max_age_ms is not None and age_ms > float(max_age_ms):
+            continue
+        candidates.append((source_key, raw_point, age_ms))
+
+    if not candidates:
+        return None
+
+    if prefer:
+        preferred_key = str(prefer).strip().lower()
+        for source_key, point, age_ms in candidates:
+            if source_key == preferred_key:
+                return _shape_oracle_pick(source_key, point, age_ms)
+
+    candidates.sort(key=lambda row: (row[2], _ORACLE_SOURCE_RANK.get(row[0], 99)))
+    source_key, point, age_ms = candidates[0]
+    return _shape_oracle_pick(source_key, point, age_ms)
+
+
+def _shape_oracle_pick(source: str, point: dict[str, Any], age_ms: float) -> dict[str, Any]:
+    return {
+        "source": source,
+        "price": float(safe_float(point.get("price"), 0.0) or 0.0),
+        "updated_at_ms": safe_float(point.get("updated_at_ms"), None),
+        "age_ms": float(age_ms),
+    }
+
+
+def _wall_now_ms() -> float:
+    import time as _time
+    return _time.time() * 1000.0
+
+
+# ---------------------------------------------------------------------------
+# Timeframe + fee helpers (shared between crypto strategies)
+# ---------------------------------------------------------------------------
+
+# Seconds-per-window for Polymarket crypto binary timeframes. Falls back to
+# 15m / 900s for unknown values so a missing/garbled field doesn't crash
+# downstream math; callers should still treat unknown timeframes as a soft
+# error and refuse to enter (see ``min_seconds_left_for_entry``).
+_TIMEFRAME_SECONDS: dict[str, int] = {
+    "5m": 300,
+    "5min": 300,
+    "15m": 900,
+    "15min": 900,
+    "1h": 3600,
+    "1hr": 3600,
+    "60m": 3600,
+    "60min": 3600,
+    "4h": 14400,
+    "4hr": 14400,
+    "240m": 14400,
+    "240min": 14400,
+}
+
+
+def normalize_timeframe(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"5m", "5min", "5"}:
+        return "5m"
+    if raw in {"15m", "15min", "15"}:
+        return "15m"
+    if raw in {"1h", "1hr", "60m", "60min"}:
+        return "1h"
+    if raw in {"4h", "4hr", "240m", "240min"}:
+        return "4h"
+    return raw
+
+
+def timeframe_seconds(value: Any, default: int = 900) -> int:
+    """Return the window length in seconds for a Polymarket crypto timeframe.
+
+    Mirrors ``btc_eth_highfreq._timeframe_seconds`` so all crypto strategies
+    agree on what "5m"/"15m"/"1h"/"4h" mean. Returns ``default`` (15 min) for
+    unknown values; callers should also gate on a min-seconds-left check so
+    an unrecognised timeframe doesn't silently allow trades through with the
+    wrong assumption.
+    """
+    normalized = normalize_timeframe(value)
+    return _TIMEFRAME_SECONDS.get(normalized, int(default))
+
+
+# Single source of truth for the Polymarket taker-fee schedule lives in
+# ``utils.kelly``; re-export here for convenient strategy-side access. The
+# helpers below were originally written when ``utils.kelly`` carried the
+# wrong (linear) formula — that's been fixed, so we delegate instead of
+# maintaining a parallel implementation.
+from utils.kelly import (
+    polymarket_taker_fee as polymarket_taker_fee_per_share,
+    polymarket_taker_fee_pct,
+)
+
+
+def fee_aware_min_edge_pct(price: float, multiplier: float = 2.0) -> float:
+    """Minimum edge (in %, NOT fraction) the strategy should require to clear
+    fees by ``multiplier``× at the given entry price. Returns a percentage so
+    callers can compare directly against existing edge fields that are also
+    expressed in percent."""
+    return polymarket_taker_fee_pct(price) * 100.0 * float(multiplier)
+
+
+# ---------------------------------------------------------------------------
+# Resolution-boundary safety
+# ---------------------------------------------------------------------------
+
+# Per-timeframe minimum seconds-left required to open a new position. Mirrors
+# the values that ``btc_eth_highfreq`` enforces via its
+# ``min_seconds_left_for_entry_*`` config knobs. Goal: don't enter so close
+# to resolution that fills race the Chainlink heartbeat.
+_DEFAULT_MIN_SECONDS_LEFT_FOR_ENTRY: dict[str, float] = {
+    "5m": 35.0,
+    "15m": 60.0,
+    "1h": 180.0,
+    "4h": 600.0,
+}
+
+
+def default_min_seconds_left_for_entry(timeframe: Any) -> float:
+    return _DEFAULT_MIN_SECONDS_LEFT_FOR_ENTRY.get(normalize_timeframe(timeframe), 60.0)
+
+
+# Per-timeframe maximum age for the cached worker market-data snapshot. If
+# the row is older than this, the maker/taker decision is built on phantom
+# liquidity; refuse to trade and let the next refresh catch up.
+_DEFAULT_MAX_MARKET_DATA_AGE_MS: dict[str, float] = {
+    "5m": 2500.0,
+    "15m": 4000.0,
+    "1h": 8000.0,
+    "4h": 15000.0,
+}
+
+
+def default_max_market_data_age_ms(timeframe: Any) -> float:
+    return _DEFAULT_MAX_MARKET_DATA_AGE_MS.get(normalize_timeframe(timeframe), 4000.0)
+
+
+# Per-timeframe maximum oracle age. Chainlink heartbeats can run several
+# seconds even on liquid feeds; binance_direct is sub-second. ``pick_oracle_source``
+# returns whichever source is freshest, so this cap rejects only when *every*
+# source is stale.
+_DEFAULT_MAX_ORACLE_AGE_MS: dict[str, float] = {
+    "5m": 5000.0,
+    "15m": 7500.0,
+    "1h": 15000.0,
+    "4h": 30000.0,
+}
+
+
+def default_max_oracle_age_ms(timeframe: Any) -> float:
+    return _DEFAULT_MAX_ORACLE_AGE_MS.get(normalize_timeframe(timeframe), 7500.0)

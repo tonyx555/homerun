@@ -18,9 +18,17 @@ from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
 from services.strategies.crypto_strategy_utils import (
     build_binary_crypto_market,
+    default_max_market_data_age_ms,
+    default_max_oracle_age_ms,
+    default_min_seconds_left_for_entry,
+    fee_aware_min_edge_pct,
     history_cancel_peak,
     normalize_ratio,
     normalize_signed_ratio,
+    parse_datetime_utc,
+    pick_oracle_source,
+    polymarket_taker_fee_pct,
+    timeframe_seconds,
 )
 from services.trader_orchestrator.strategies.sizing import compute_position_size
 from utils.converters import clamp, safe_float, to_confidence, to_float
@@ -72,6 +80,25 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         "take_profit_pct": 6.5,
         "stop_loss_pct": 4.0,
         "max_hold_minutes": 16.0,
+        # Safety gates — leave at None to use the timeframe-aware defaults in
+        # crypto_strategy_utils. The maker path doesn't pay a taker fee on
+        # rest, but if a maker order ages past the resolution boundary it
+        # ends up filling as a stale taker, so we still apply the same gates.
+        "max_oracle_age_ms": None,
+        "max_market_data_age_ms": None,
+        "min_seconds_left_for_entry": None,
+        "min_fee_clearance_x": 1.5,
+        "prefer_oracle_source": "binance_direct",
+        # Exit any open position when this close to the resolution boundary
+        # so we don't ride the Chainlink heartbeat window with a held leg.
+        # 30s is comfortably past the longest open-order timeout below
+        # while still leaving a meaningful runway after entry.
+        "force_exit_seconds_before_resolution": 30.0,
+        # Add the maker's open-order timeout to the entry gate so a fresh
+        # rest order can't be placed close enough to resolution that it
+        # ages out *into* the resolution window. Effective gate becomes
+        # ``default_min_seconds_left_for_entry(tf) + open_order_timeout``.
+        "maker_rest_includes_timeout": True,
     }
 
     def __init__(self) -> None:
@@ -88,6 +115,38 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         if up_price is None or down_price is None:
             return None
         if not (0.0 < up_price < 1.0 and 0.0 < down_price < 1.0):
+            return None
+
+        # ---- Resolution-boundary + freshness gates (mirrors spike strategy)
+        timeframe_value = row.get("timeframe")
+        end_date = parse_datetime_utc(row.get("end_time"))
+        seconds_left = float("inf")
+        if end_date is not None:
+            seconds_left = max(0.0, (end_date - datetime.now(timezone.utc)).total_seconds())
+        configured_min_secs = cfg.get("min_seconds_left_for_entry")
+        min_seconds_left = (
+            float(configured_min_secs)
+            if configured_min_secs is not None
+            else default_min_seconds_left_for_entry(timeframe_value)
+        )
+        # Maker orders may rest unfilled for up to ``open_order_timeout``
+        # before the orchestrator cancels them. Inflate the entry gate by
+        # that window so a rest order that times out doesn't age out into
+        # the resolution boundary.
+        if bool(cfg.get("maker_rest_includes_timeout", True)):
+            timeout_seconds = float(self.default_open_order_timeout_seconds or 0.0)
+            min_seconds_left += max(0.0, timeout_seconds)
+        if seconds_left < min_seconds_left:
+            return None
+
+        configured_max_md_age = cfg.get("max_market_data_age_ms")
+        max_market_data_age_ms = (
+            float(configured_max_md_age)
+            if configured_max_md_age is not None
+            else default_max_market_data_age_ms(timeframe_value)
+        )
+        market_data_age_ms = safe_float(row.get("market_data_age_ms"), None)
+        if market_data_age_ms is not None and market_data_age_ms > max_market_data_age_ms:
             return None
 
         # Binary entropy
@@ -152,8 +211,41 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         if liquidity < min_liquidity_usd:
             return None
 
-        # Direction from oracle or price skew
-        oracle_price = safe_float(row.get("oracle_price"), None)
+        # ---- Oracle: prefer the freshest source (binance_direct sub-second
+        # WS by default) and refuse if every source is past the staleness
+        # cap. Falls through to price-skew direction if oracle is unavailable.
+        configured_max_oracle = cfg.get("max_oracle_age_ms")
+        max_oracle_age_ms = (
+            float(configured_max_oracle)
+            if configured_max_oracle is not None
+            else default_max_oracle_age_ms(timeframe_value)
+        )
+        prefer_source = str(cfg.get("prefer_oracle_source") or "binance_direct").strip() or None
+        oracle_pick = pick_oracle_source(
+            row,
+            prefer=prefer_source,
+            max_age_ms=max_oracle_age_ms,
+        )
+        if oracle_pick is not None:
+            oracle_price = float(oracle_pick["price"])
+            oracle_age_ms = float(oracle_pick["age_ms"])
+            oracle_source_used = str(oracle_pick["source"])
+        else:
+            fallback_price = safe_float(row.get("oracle_price"), None)
+            fallback_age_seconds = safe_float(row.get("oracle_age_seconds"), None)
+            if (
+                fallback_price is not None
+                and fallback_age_seconds is not None
+                and fallback_age_seconds * 1000.0 <= max_oracle_age_ms
+            ):
+                oracle_price = float(fallback_price)
+                oracle_age_ms = float(fallback_age_seconds) * 1000.0
+                oracle_source_used = str(row.get("oracle_source") or "primary")
+            else:
+                oracle_price = None
+                oracle_age_ms = None
+                oracle_source_used = None
+
         price_to_beat = safe_float(row.get("price_to_beat"), None)
 
         if oracle_price is not None and price_to_beat is not None and price_to_beat > 0:
@@ -198,6 +290,15 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
         if edge < min_edge_percent:
             return None
 
+        # ---- Fee-aware gate: maker rests pay zero, but if the maker order
+        # ages out and fills as taker (or the price moves and we cross the
+        # spread on a follow-up), the realised cost is the taker curve. A
+        # 1.5× clearance (vs spike's 2×) reflects the maker's discount.
+        min_fee_clearance_x = max(1.0, to_float(cfg.get("min_fee_clearance_x", 1.5), 1.5))
+        if edge < fee_aware_min_edge_pct(entry_price, min_fee_clearance_x):
+            return None
+        taker_fee_pct_value = polymarket_taker_fee_pct(entry_price) * 100.0
+
         # Confidence
         confidence = clamp(
             0.50
@@ -237,11 +338,14 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             "up_price": float(up_price),
             "down_price": float(down_price),
             "oracle_price": float(oracle_price) if oracle_price is not None else None,
+            "oracle_source_used": oracle_source_used,
+            "oracle_age_ms": float(oracle_age_ms) if oracle_age_ms is not None else None,
             "price_to_beat": float(price_to_beat) if price_to_beat is not None else None,
             "diff_pct": float(diff_pct),
             "entropy": float(entropy),
             "entropy_multiplier": float(entropy_multiplier),
             "edge": float(edge),
+            "taker_fee_pct": float(taker_fee_pct_value),
             "confidence": float(confidence),
             "spread": float(spread),
             "spread_widening_bps": float(spread_widening_bps) if spread_widening_bps is not None else None,
@@ -253,6 +357,8 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             "flow_imbalance": float(flow_imbalance) if flow_imbalance is not None else None,
             "recent_move_zscore": float(recent_move_zscore) if recent_move_zscore is not None else None,
             "liquidity": float(liquidity),
+            "seconds_left": float(seconds_left) if seconds_left != float("inf") else None,
+            "timeframe": str(timeframe_value or "") or None,
             "score": float(score),
         }
 
@@ -276,15 +382,20 @@ class CryptoEntropyMakerStrategy(BaseStrategy):
             "up_price": signal["up_price"],
             "down_price": signal["down_price"],
             "oracle_price": signal["oracle_price"],
+            "oracle_source_used": signal.get("oracle_source_used"),
+            "oracle_age_ms": signal.get("oracle_age_ms"),
             "price_to_beat": signal["price_to_beat"],
             "diff_pct": signal["diff_pct"],
             "entropy": signal["entropy"],
             "entropy_multiplier": signal["entropy_multiplier"],
             "edge": signal["edge"],
+            "taker_fee_pct": signal.get("taker_fee_pct"),
             "confidence": signal["confidence"],
             "spread": signal["spread"],
             "cancel_rate_30s": signal["cancel_rate_30s"],
             "liquidity": signal["liquidity"],
+            "seconds_left": signal.get("seconds_left"),
+            "timeframe": signal.get("timeframe"),
             "market_data_age_ms": safe_float(row.get("market_data_age_ms"), None),
             "fetched_at": row.get("fetched_at"),
             "end_time": row.get("end_time"),

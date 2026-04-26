@@ -1110,6 +1110,27 @@ class BaseStrategy(ABC):
                 "close", f"Max hold exceeded ({age_minutes:.0f} >= {max_hold} min)", close_price=current_price
             )
 
+        # Resolution-boundary exit. Short-duration markets (crypto hourly /
+        # 15-min binaries especially) shouldn't ride open positions into the
+        # Chainlink heartbeat window — the resolution price can move after
+        # our last quote and before the snapshot, with no chance to react.
+        # Strategies opt in by setting ``force_exit_seconds_before_resolution``
+        # in their default_config; left unset, behavior is unchanged.
+        force_exit_secs = config.get("force_exit_seconds_before_resolution")
+        if force_exit_secs is not None:
+            try:
+                force_exit_threshold = float(force_exit_secs)
+            except (TypeError, ValueError):
+                force_exit_threshold = None
+            if force_exit_threshold is not None and force_exit_threshold > 0:
+                seconds_left_for_close = self._seconds_left_for_position(position, market_state)
+                if seconds_left_for_close is not None and seconds_left_for_close <= force_exit_threshold:
+                    return ExitDecision(
+                        "close",
+                        f"Approaching resolution ({seconds_left_for_close:.0f}s <= {force_exit_threshold:.0f}s)",
+                        close_price=current_price,
+                    )
+
         # Market inactive
         if not market_state.get("market_tradable", True) and config.get("close_on_inactive_market", False):
             return ExitDecision("close", "Market inactive", close_price=current_price)
