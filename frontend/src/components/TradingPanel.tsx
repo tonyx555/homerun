@@ -779,6 +779,7 @@ const STRATEGY_LABELS: Record<string, string> = {
   weather_distribution: 'Weather Distribution',
   traders_confluence: 'Traders Confluence',
   flash_crash_reversion: 'Opportunity Flash Reversion',
+  news_momentum_breakout: 'Opportunity News Momentum',
   tail_end_carry: 'Opportunity Tail Carry',
 }
 
@@ -8611,6 +8612,15 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     })
   }, [orchestratorRunning, sourceLabelByKey, traderPerformanceById, traders])
 
+  // "All Bots" header sums only the bots in the roster, so it always matches
+  // the rows below. globalSummary.resolvedPnl can include orders whose
+  // trader_id isn't in the visible traders list (e.g. mode-changed or
+  // archived bots), which would otherwise produce a silent mismatch.
+  const botRosterResolvedPnl = useMemo(
+    () => botRosterRows.reduce((sum, row) => sum + row.pnl, 0),
+    [botRosterRows]
+  )
+
   // filteredBotRosterRows + groupedBotRosterRows now live inside
   // BotRosterPanel; it owns the search/sort/group atoms and computes the
   // derived rows there so typing the search box doesn't bubble up.
@@ -9851,7 +9861,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         <BotRosterPanel
           rows={botRosterRows}
           totalTraderCount={traders.length}
-          globalResolvedPnl={globalSummary.resolvedPnl}
+          globalResolvedPnl={botRosterResolvedPnl}
           selectedTraderId={selectedTraderId}
           setSelectedTraderId={setSelectedTraderId}
           traderTogglePendingById={traderTogglePendingById}

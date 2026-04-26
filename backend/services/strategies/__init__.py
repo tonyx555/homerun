@@ -8,6 +8,7 @@ from .cross_platform import CrossPlatformStrategy
 from .market_making import MarketMakingStrategy
 from .stat_arb import StatArbStrategy
 from .flash_crash_reversion import FlashCrashReversionStrategy
+from .news_momentum_breakout import NewsMomentumBreakoutStrategy
 from .tail_end_carry import TailEndCarryStrategy
 from .vpin_toxicity import VPINToxicityStrategy
 from .prob_surface_arb import ProbSurfaceArbStrategy
@@ -24,6 +25,7 @@ __all__ = [
     "MarketMakingStrategy",
     "StatArbStrategy",
     "FlashCrashReversionStrategy",
+    "NewsMomentumBreakoutStrategy",
     "TailEndCarryStrategy",
     "VPINToxicityStrategy",
     "ProbSurfaceArbStrategy",
