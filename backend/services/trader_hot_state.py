@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -220,8 +220,22 @@ _audit_buffer: list[_AuditEntry] = []
 _audit_lock = asyncio.Lock()
 _audit_task: asyncio.Task | None = None
 _AUDIT_FLUSH_INTERVAL = 0.5
-_AUDIT_FLUSH_BATCH_SIZE = 1000
+# Smaller per-transaction batch (was 1000). Big batches mean a single audit
+# transaction holds row locks across many tables for a long time, which
+# under contention with concurrent writers (live trader cycles, etc.)
+# causes the commit to wait on locks for the full statement_timeout (30s).
+# That ties up a main-pool connection for 60-100s and starves everything
+# else (orchestrator runtimes, intent_runtime projections, scanner state
+# projection, fast traders). 250 keeps each tx short while the 0.5s flush
+# interval still drains 500/sec of audit throughput.
+_AUDIT_FLUSH_BATCH_SIZE = 250
 _AUDIT_BUFFER_MAX_SIZE = 50_000
+# Hard timeouts the audit transaction sets on its own connection. The
+# pool default is 30s statement_timeout / 60s idle_in_transaction; that
+# is too generous for the audit path, which should fail-fast and re-queue
+# rather than tie up a main-pool connection for ~60s under contention.
+_AUDIT_STATEMENT_TIMEOUT_MS = 5000
+_AUDIT_LOCK_TIMEOUT_MS = 2000
 _AUDIT_KIND_PRIORITY = {
     "decision": 0,
     "decision_checks": 1,
@@ -1300,6 +1314,7 @@ async def _audit_flush_loop() -> None:
 
 async def flush_audit_buffer() -> int:
     """Drain buffered audit entries to Postgres.  Returns count flushed."""
+    import time as _time
     async with _audit_lock:
         if not _audit_buffer:
             return 0
@@ -1307,9 +1322,23 @@ async def flush_audit_buffer() -> int:
         del _audit_buffer[:len(batch)]
     batch.sort(key=lambda entry: (_AUDIT_KIND_PRIORITY.get(entry.kind, 99), entry.created_at))
 
+    insert_started = _time.monotonic()
+    insert_seconds = 0.0
+    commit_seconds = 0.0
     try:
         async with AsyncSessionLocal() as session:
             try:
+                # Tighten statement / lock timeouts for the audit path so
+                # it fails-fast and re-queues instead of tying up a main-
+                # pool connection for ~60s under contention. SET LOCAL is
+                # scoped to this transaction; the connection's pool-default
+                # timeouts return on next checkout.
+                await session.execute(
+                    sa_text(f"SET LOCAL statement_timeout = '{_AUDIT_STATEMENT_TIMEOUT_MS}'")
+                )
+                await session.execute(
+                    sa_text(f"SET LOCAL lock_timeout = '{_AUDIT_LOCK_TIMEOUT_MS}'")
+                )
                 with session.no_autoflush:
                     for entry in batch:
                         if entry.kind == "decision":
@@ -1326,7 +1355,10 @@ async def flush_audit_buffer() -> int:
                             _flush_trader_event(session, entry.payload)
                         elif entry.kind == "experiment_assignment":
                             await _flush_experiment_assignment(session, entry.payload)
+                insert_seconds = _time.monotonic() - insert_started
+                commit_started = _time.monotonic()
                 await session.commit()
+                commit_seconds = _time.monotonic() - commit_started
             except Exception:
                 await session.rollback()
                 raise
@@ -1339,16 +1371,32 @@ async def flush_audit_buffer() -> int:
                 dropped = len(batch) - len(preserved_batch)
             else:
                 dropped = len(batch)
+        # Breakdown by kind so we can see *which* table the failing batch
+        # was writing to (decision/checks/event/etc) — useful for finding
+        # which writer is contending with audit.
+        kind_counts: dict[str, int] = {}
+        for entry in batch:
+            kind_counts[entry.kind] = kind_counts.get(entry.kind, 0) + 1
         if dropped > 0:
             logger.warning(
                 "Audit batch commit failed; buffer at cap, dropped entries",
                 count=len(batch),
                 dropped=dropped,
                 buffer_size=len(_audit_buffer),
+                kind_counts=kind_counts,
+                insert_seconds=round(insert_seconds, 3),
+                commit_seconds=round(commit_seconds, 3),
                 exc_info=exc,
             )
         else:
-            logger.warning("Audit batch commit failed, re-queuing", count=len(batch), exc_info=exc)
+            logger.warning(
+                "Audit batch commit failed, re-queuing",
+                count=len(batch),
+                kind_counts=kind_counts,
+                insert_seconds=round(insert_seconds, 3),
+                commit_seconds=round(commit_seconds, 3),
+                exc_info=exc,
+            )
         return 0
     return len(batch)
 
