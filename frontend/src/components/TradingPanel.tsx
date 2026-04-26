@@ -82,7 +82,7 @@ import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getTraderOrderPlatformLinks } from '../lib/marketUrls'
-import { accountModeAtom, draftDescriptionAtom, draftIntervalAtom, draftNameAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
+import { accountModeAtom, draftDescriptionAtom, draftIntervalAtom, draftNameAtom, draftTradingScheduleAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -103,13 +103,13 @@ import AutoresearchView from './AutoresearchView'
 import { TraderConfigFlyout } from './TraderConfigFlyout'
 import {
   DEFAULT_STRATEGY_KEY,
-  TRADING_SCHEDULE_DAYS,
+  DEFAULT_TRADING_SCHEDULE_DRAFT,
   type StrategyCatalogOption,
   type StrategyOptionDetail,
-  type TradingScheduleDay,
-  type TradingScheduleDraft,
+  buildTradingScheduleMetadata,
   normalizeStrategyKey,
   normalizeStrategyVersion,
+  normalizeTradingScheduleDraft,
   normalizeVersionList,
 } from './tradingPanelFlyoutShared'
 
@@ -3451,63 +3451,6 @@ function normalizeStrategyKeyForSource(sourceKey: string, value: unknown): strin
   return key || DEFAULT_STRATEGY_BY_SOURCE[normalizedSource] || DEFAULT_STRATEGY_KEY
 }
 
-function normalizeTradingScheduleDay(value: unknown): TradingScheduleDay | null {
-  const token = String(value || '').trim().toLowerCase()
-  if (token.startsWith('mon')) return 'mon'
-  if (token.startsWith('tue')) return 'tue'
-  if (token.startsWith('wed')) return 'wed'
-  if (token.startsWith('thu')) return 'thu'
-  if (token.startsWith('fri')) return 'fri'
-  if (token.startsWith('sat')) return 'sat'
-  if (token.startsWith('sun')) return 'sun'
-  return null
-}
-
-function normalizeTradingScheduleDays(value: unknown): TradingScheduleDay[] {
-  const raw = Array.isArray(value) ? value : []
-  const next: TradingScheduleDay[] = []
-  const seen = new Set<TradingScheduleDay>()
-  for (const item of raw) {
-    const normalized = normalizeTradingScheduleDay(item)
-    if (!normalized || seen.has(normalized)) continue
-    seen.add(normalized)
-    next.push(normalized)
-  }
-  return next.length > 0 ? next : [...TRADING_SCHEDULE_DAYS]
-}
-
-function normalizeTradingScheduleDraft(value: unknown): TradingScheduleDraft {
-  const raw = isRecord(value) ? value : {}
-  const normalizeDate = (input: unknown): string => {
-    const text = String(input || '').trim()
-    if (!text) return ''
-    const datePart = text.includes('T') ? text.slice(0, 10) : text
-    const parsed = new Date(`${datePart}T00:00:00Z`)
-    if (Number.isNaN(parsed.getTime())) return ''
-    return parsed.toISOString().slice(0, 10)
-  }
-  return {
-    enabled: toBoolean(raw.enabled, false),
-    days: normalizeTradingScheduleDays(raw.days),
-    startTimeUtc: String(raw.start_time || '00:00'),
-    endTimeUtc: String(raw.end_time || '23:59'),
-    startDateUtc: normalizeDate(raw.start_date),
-    endDateUtc: normalizeDate(raw.end_date),
-    endAtUtc: String(raw.end_at || '').trim(),
-  }
-}
-
-function buildTradingScheduleMetadata(schedule: TradingScheduleDraft): Record<string, unknown> {
-  return {
-    enabled: Boolean(schedule.enabled),
-    days: normalizeTradingScheduleDays(schedule.days),
-    start_time: String(schedule.startTimeUtc || '00:00'),
-    end_time: String(schedule.endTimeUtc || '23:59'),
-    start_date: schedule.startDateUtc || null,
-    end_date: schedule.endDateUtc || null,
-    end_at: schedule.endAtUtc || null,
-  }
-}
 
 function strategyLabelForKey(key: string, sourceCatalog: TraderSource[] = []): string {
   const normalized = String(key || '').trim().toLowerCase()
@@ -6032,7 +5975,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     [tradersScopeGroups]
   )
   const parsedDraftRisk = useMemo(() => parseJsonObject(draftRisk || '{}'), [draftRisk])
-  const parsedDraftMetadata = useMemo(() => parseJsonObject(draftMetadata || '{}'), [draftMetadata])
   const dynamicStrategyParamSections = useMemo(() => {
     const sections: DynamicStrategyParamSection[] = []
 
@@ -6125,10 +6067,10 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     if (dynamicStrategyParamSections.some((section) => section.sectionKey === tuneParamSectionTab)) return
     setTuneParamSectionTab(dynamicStrategyParamSections[0].sectionKey)
   }, [dynamicStrategyParamSections, tuneParamSectionTab])
-  const tradingScheduleDraft = useMemo(
-    () => normalizeTradingScheduleDraft(parsedDraftMetadata.value?.trading_schedule_utc),
-    [parsedDraftMetadata.value]
-  )
+  // Schedule lives in draftTradingScheduleAtom; only the flyout subscribes.
+  // TradingPanel reads it at save time via atomStore.get and writes at load
+  // time via setDraftTradingScheduleAtom.
+  const setDraftTradingScheduleAtom = useSetAtom(draftTradingScheduleAtom)
   const riskFormValues = useMemo(
     () => (isRecord(parsedDraftRisk.value) ? parsedDraftRisk.value : {}),
     [parsedDraftRisk.value]
@@ -6244,6 +6186,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     const metadata = trader.metadata || {}
     setDraftRisk(JSON.stringify(risk, null, 2))
     setDraftMetadata(JSON.stringify(metadata, null, 2))
+    setDraftTradingScheduleAtom(
+      normalizeTradingScheduleDraft(
+        isRecord(metadata) ? (metadata as Record<string, unknown>).trading_schedule_utc : null,
+      ),
+    )
     if (!options.preserveCopyFrom) {
       setDraftCopyFromTraderId('')
     }
@@ -6311,6 +6258,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     setDraftInterval('5')
     setDraftRisk(JSON.stringify(isRecord(traderConfigSchema?.shared_risk_defaults) ? traderConfigSchema.shared_risk_defaults : {}, null, 2))
     setDraftMetadata('{}')
+    setDraftTradingScheduleAtom({ ...DEFAULT_TRADING_SCHEDULE_DRAFT })
     setDraftMode(selectedAccountMode)
     setDraftLatencyClass('normal')
     setDraftCopyFromTraderId('')
@@ -6390,40 +6338,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const setDraftRiskFromForm = (values: Record<string, unknown>) => {
     setDraftRisk(JSON.stringify(values, null, 2))
     if (!traderFlyoutOpen) setRiskDraftDirty(true)
-  }
-
-  const setDraftTradingSchedule = (
-    patch:
-      | Partial<TradingScheduleDraft>
-      | ((current: TradingScheduleDraft) => Partial<TradingScheduleDraft>)
-  ) => {
-    const metadataBase: Record<string, unknown> = parsedDraftMetadata.value || {}
-    const current = normalizeTradingScheduleDraft(metadataBase.trading_schedule_utc)
-    const resolvedPatch = typeof patch === 'function' ? patch(current) : patch
-    const next = normalizeTradingScheduleDraft({
-      enabled: resolvedPatch.enabled ?? current.enabled,
-      days: resolvedPatch.days ?? current.days,
-      start_time: resolvedPatch.startTimeUtc ?? current.startTimeUtc,
-      end_time: resolvedPatch.endTimeUtc ?? current.endTimeUtc,
-      start_date: resolvedPatch.startDateUtc ?? current.startDateUtc,
-      end_date: resolvedPatch.endDateUtc ?? current.endDateUtc,
-      end_at: resolvedPatch.endAtUtc ?? current.endAtUtc,
-    })
-    const nextMetadata = {
-      ...metadataBase,
-      trading_schedule_utc: buildTradingScheduleMetadata(next),
-    }
-    setDraftMetadata(JSON.stringify(nextMetadata, null, 2))
-  }
-
-  const toggleTradingScheduleDay = (day: TradingScheduleDay) => {
-    setDraftTradingSchedule((current) => {
-      const exists = current.days.includes(day)
-      const nextDays = exists
-        ? current.days.filter((item) => item !== day)
-        : [...current.days, day]
-      return { days: normalizeTradingScheduleDays(nextDays) }
-    })
   }
 
   const buildDraftSourceConfigs = (
@@ -7160,6 +7074,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const sourceConfigs = buildDraftSourceConfigs()
       validateDraftSourceConfigs(sourceConfigs)
 
+      const metadataWithSchedule = {
+        ...(isRecord(parsedMetadata.value) ? parsedMetadata.value : {}),
+        trading_schedule_utc: buildTradingScheduleMetadata(atomStore.get(draftTradingScheduleAtom)),
+      }
+
       const payload: Record<string, unknown> = {
         name: atomStore.get(draftNameAtom).trim(),
         description: atomStore.get(draftDescriptionAtom).trim() || null,
@@ -7168,7 +7087,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
-        metadata: parsedMetadata.value,
+        metadata: metadataWithSchedule,
         is_enabled: true,
         is_paused: false,
       }
@@ -7218,6 +7137,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       const sourceConfigs = buildDraftSourceConfigs()
       validateDraftSourceConfigs(sourceConfigs)
 
+      const metadataWithSchedule = {
+        ...(isRecord(parsedMetadata.value) ? parsedMetadata.value : {}),
+        trading_schedule_utc: buildTradingScheduleMetadata(atomStore.get(draftTradingScheduleAtom)),
+      }
+
       return updateTrader(traderId, {
         name: atomStore.get(draftNameAtom).trim(),
         description: atomStore.get(draftDescriptionAtom).trim() || null,
@@ -7226,7 +7150,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
-        metadata: parsedMetadata.value,
+        metadata: metadataWithSchedule,
       })
     },
     onSuccess: () => {
@@ -12654,9 +12578,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         effectiveDraftSourceKey={effectiveDraftSourceKey}
         effectiveDraftStrategyDetail={effectiveDraftStrategyDetail}
         effectiveDraftStrategyVersion={effectiveDraftStrategyVersion}
-        tradingScheduleDraft={tradingScheduleDraft}
-        setDraftTradingSchedule={setDraftTradingSchedule}
-        toggleTradingScheduleDay={toggleTradingScheduleDay}
         selectedTrader={selectedTrader}
         selectedTraderDeleteExposureSummary={selectedTraderDeleteExposureSummary}
         selectedTraderHasLiveDeleteExposure={selectedTraderHasLiveDeleteExposure}

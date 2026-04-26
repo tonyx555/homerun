@@ -1,5 +1,9 @@
 import { atom } from 'jotai'
 import { atomWithStorage } from 'jotai/utils'
+import {
+  DEFAULT_TRADING_SCHEDULE_DRAFT,
+  type TradingScheduleDraft,
+} from '../components/tradingPanelFlyoutShared'
 
 // Theme
 export type Theme = 'dark' | 'light'
@@ -70,3 +74,10 @@ export const aiTabSubtabAtom = atomWithStorage<'chat' | 'agents' | 'tools' | 'pr
 export const draftNameAtom = atom<string>('')
 export const draftDescriptionAtom = atom<string>('')
 export const draftIntervalAtom = atom<string>('60')
+
+// Trading-schedule editor in the bot config flyout. Owned by the schedule
+// fields themselves (time pickers, date pickers, day toggles, mode buttons)
+// so a click/tap on any of them re-renders only the flyout — not the whole
+// TradingPanel and its query memos. TradingPanel reads at save time via
+// useStore().get() and writes at load time via useSetAtom.
+export const draftTradingScheduleAtom = atom<TradingScheduleDraft>({ ...DEFAULT_TRADING_SCHEDULE_DRAFT })

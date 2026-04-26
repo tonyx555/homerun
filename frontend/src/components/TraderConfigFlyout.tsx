@@ -1,8 +1,8 @@
 import { memo } from 'react'
-import { useAtomValue } from 'jotai'
+import { useAtom, useAtomValue } from 'jotai'
 import { AlertTriangle, Clock3, Sparkles, Zap } from 'lucide-react'
 import type { Trader, TraderLatencyClass } from '../services/apiTraders'
-import { draftDescriptionAtom, draftNameAtom } from '../store/atoms'
+import { draftDescriptionAtom, draftNameAtom, draftTradingScheduleAtom } from '../store/atoms'
 import { AtomInput } from './AtomInput'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
@@ -23,6 +23,8 @@ import {
   type TradingScheduleDay,
   type TradingScheduleDraft,
   normalizeStrategyKey,
+  normalizeTradingScheduleDays,
+  normalizeTradingScheduleDraft,
   normalizeVersionList,
 } from './tradingPanelFlyoutShared'
 
@@ -65,14 +67,7 @@ export type TraderConfigFlyoutProps = {
   effectiveDraftStrategyDetail: StrategyOptionDetail | null
   effectiveDraftStrategyVersion: number | null
 
-  // Trading Schedule
-  tradingScheduleDraft: TradingScheduleDraft
-  setDraftTradingSchedule: (
-    patch:
-      | Partial<TradingScheduleDraft>
-      | ((current: TradingScheduleDraft) => Partial<TradingScheduleDraft>)
-  ) => void
-  toggleTradingScheduleDay: (day: TradingScheduleDay) => void
+  // Trading Schedule lives in draftTradingScheduleAtom — no props needed.
 
   // Delete (edit mode only)
   selectedTrader: Trader | null
@@ -124,9 +119,6 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
     effectiveDraftSourceKey,
     effectiveDraftStrategyDetail,
     effectiveDraftStrategyVersion,
-    tradingScheduleDraft,
-    setDraftTradingSchedule,
-    toggleTradingScheduleDay,
     selectedTrader,
     selectedTraderDeleteExposureSummary,
     selectedTraderHasLiveDeleteExposure,
@@ -162,6 +154,37 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
   // Subscribe here (only the flyout re-renders on draftName changes) so the
   // Save button's "name is required" check stays reactive.
   const draftNameValue = useAtomValue(draftNameAtom)
+
+  // Schedule editing is fully owned by the flyout via the schedule atom;
+  // typing in time/date pickers, toggling days, etc. only re-renders the
+  // flyout — never bubbles into TradingPanel.
+  const [tradingScheduleDraft, setTradingSchedule] = useAtom(draftTradingScheduleAtom)
+  const setDraftTradingSchedule = (
+    patch:
+      | Partial<TradingScheduleDraft>
+      | ((current: TradingScheduleDraft) => Partial<TradingScheduleDraft>)
+  ) => {
+    const current = tradingScheduleDraft
+    const resolvedPatch = typeof patch === 'function' ? patch(current) : patch
+    setTradingSchedule(normalizeTradingScheduleDraft({
+      enabled: resolvedPatch.enabled ?? current.enabled,
+      days: resolvedPatch.days ?? current.days,
+      start_time: resolvedPatch.startTimeUtc ?? current.startTimeUtc,
+      end_time: resolvedPatch.endTimeUtc ?? current.endTimeUtc,
+      start_date: resolvedPatch.startDateUtc ?? current.startDateUtc,
+      end_date: resolvedPatch.endDateUtc ?? current.endDateUtc,
+      end_at: resolvedPatch.endAtUtc ?? current.endAtUtc,
+    }))
+  }
+  const toggleTradingScheduleDay = (day: TradingScheduleDay) => {
+    setDraftTradingSchedule((current) => {
+      const exists = current.days.includes(day)
+      const nextDays = exists
+        ? current.days.filter((item) => item !== day)
+        : [...current.days, day]
+      return { days: normalizeTradingScheduleDays(nextDays) }
+    })
+  }
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>

@@ -30,6 +30,89 @@ export const TRADING_SCHEDULE_DAY_LABEL: Record<TradingScheduleDay, string> = {
   sun: 'Sun',
 }
 
+export const DEFAULT_TRADING_SCHEDULE_DRAFT: TradingScheduleDraft = {
+  enabled: false,
+  days: [...TRADING_SCHEDULE_DAYS],
+  startTimeUtc: '00:00',
+  endTimeUtc: '23:59',
+  startDateUtc: '',
+  endDateUtc: '',
+  endAtUtc: '',
+}
+
+function _isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function _toBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const lowered = value.trim().toLowerCase()
+    if (lowered === 'true' || lowered === '1' || lowered === 'yes') return true
+    if (lowered === 'false' || lowered === '0' || lowered === 'no') return false
+  }
+  return fallback
+}
+
+export function normalizeTradingScheduleDay(value: unknown): TradingScheduleDay | null {
+  const token = String(value || '').trim().toLowerCase()
+  if (token.startsWith('mon')) return 'mon'
+  if (token.startsWith('tue')) return 'tue'
+  if (token.startsWith('wed')) return 'wed'
+  if (token.startsWith('thu')) return 'thu'
+  if (token.startsWith('fri')) return 'fri'
+  if (token.startsWith('sat')) return 'sat'
+  if (token.startsWith('sun')) return 'sun'
+  return null
+}
+
+export function normalizeTradingScheduleDays(value: unknown): TradingScheduleDay[] {
+  const raw = Array.isArray(value) ? value : []
+  const next: TradingScheduleDay[] = []
+  const seen = new Set<TradingScheduleDay>()
+  for (const item of raw) {
+    const normalized = normalizeTradingScheduleDay(item)
+    if (!normalized || seen.has(normalized)) continue
+    seen.add(normalized)
+    next.push(normalized)
+  }
+  return next.length > 0 ? next : [...TRADING_SCHEDULE_DAYS]
+}
+
+export function normalizeTradingScheduleDraft(value: unknown): TradingScheduleDraft {
+  const raw = _isRecord(value) ? value : {}
+  const normalizeDate = (input: unknown): string => {
+    const text = String(input || '').trim()
+    if (!text) return ''
+    const datePart = text.includes('T') ? text.slice(0, 10) : text
+    const parsed = new Date(`${datePart}T00:00:00Z`)
+    if (Number.isNaN(parsed.getTime())) return ''
+    return parsed.toISOString().slice(0, 10)
+  }
+  return {
+    enabled: _toBoolean(raw.enabled, false),
+    days: normalizeTradingScheduleDays(raw.days),
+    startTimeUtc: String(raw.start_time || '00:00'),
+    endTimeUtc: String(raw.end_time || '23:59'),
+    startDateUtc: normalizeDate(raw.start_date),
+    endDateUtc: normalizeDate(raw.end_date),
+    endAtUtc: String(raw.end_at || '').trim(),
+  }
+}
+
+export function buildTradingScheduleMetadata(schedule: TradingScheduleDraft): Record<string, unknown> {
+  return {
+    enabled: Boolean(schedule.enabled),
+    days: normalizeTradingScheduleDays(schedule.days),
+    start_time: String(schedule.startTimeUtc || '00:00'),
+    end_time: String(schedule.endTimeUtc || '23:59'),
+    start_date: schedule.startDateUtc || null,
+    end_date: schedule.endDateUtc || null,
+    end_at: schedule.endAtUtc || null,
+  }
+}
+
 export type StrategyOptionDetail = {
   key: string
   label: string
