@@ -1437,9 +1437,9 @@ async def flush_audit_buffer() -> int:
     # contention point with the orchestrator (both writers touching the
     # same trader_signal_consumption rows for the same signal_ids).
     if consumptions:
+        consumption_payloads = [entry.payload for entry in consumptions]
         async def _consumption_body(session: Any) -> None:
-            for entry in consumptions:
-                await _flush_consumption(session, entry.payload)
+            await _flush_consumptions_bulk(session, consumption_payloads)
         ok, _ins, _com, exc = await _audit_run_group("consumption", _consumption_body)
         (succeeded_entries if ok else failed_entries).extend(consumptions)
         if not ok:
@@ -1447,9 +1447,9 @@ async def flush_audit_buffer() -> int:
 
     # Group 3: cursor upserts. Own short tx — same rationale.
     if cursors:
+        cursor_payloads = [entry.payload for entry in cursors]
         async def _cursor_body(session: Any) -> None:
-            for entry in cursors:
-                await _flush_cursor(session, entry.payload)
+            await _flush_cursors_bulk(session, cursor_payloads)
         ok, _ins, _com, exc = await _audit_run_group("cursor", _cursor_body)
         (succeeded_entries if ok else failed_entries).extend(cursors)
         if not ok:
@@ -1632,55 +1632,105 @@ async def _flush_decision_checks_bulk(session: AsyncSession, payloads: list[dict
 
 
 async def _flush_consumption(session: AsyncSession, p: dict[str, Any]) -> None:
-    trader_id = p["trader_id"]
-    signal_id = p["signal_id"]
-    existing = (
-        await session.execute(
-            select(TraderSignalConsumption).where(
-                TraderSignalConsumption.trader_id == trader_id,
-                TraderSignalConsumption.signal_id == signal_id,
-            )
-        )
-    ).scalars().first()
-    if existing is not None:
-        existing.decision_id = p.get("decision_id")
-        existing.outcome = p["outcome"]
-        existing.reason = p.get("reason")
-        existing.payload_json = p.get("payload_json") or {}
-        existing.consumed_at = p.get("consumed_at") or utcnow()
-    else:
-        session.add(
-            TraderSignalConsumption(
-                id=_new_id(),
-                trader_id=trader_id,
-                signal_id=signal_id,
-                decision_id=p.get("decision_id"),
-                outcome=p["outcome"],
-                reason=p.get("reason"),
-                payload_json=p.get("payload_json") or {},
-                consumed_at=p.get("consumed_at") or utcnow(),
-            )
-        )
+    """Single-row upsert. Kept for callers outside the bulk path."""
+    await _flush_consumptions_bulk(session, [p])
+
+
+async def _flush_consumptions_bulk(
+    session: AsyncSession, payloads: list[dict[str, Any]]
+) -> None:
+    """One INSERT ... ON CONFLICT DO UPDATE for the whole batch.
+
+    Replaces the previous per-row SELECT+UPDATE/INSERT loop, which did
+    ~500 round-trips per 250-entry group and routinely held the audit
+    connection for 30-55s under contention. The unique key is
+    (trader_id, signal_id); same-batch dupes are pre-deduped so the
+    statement only needs to handle cross-batch conflicts. Last-write-
+    wins on the UPDATE side, matching the previous semantics.
+    """
+    if not payloads:
+        return
+    seen: set[tuple[str, str]] = set()
+    rows: list[dict[str, Any]] = []
+    for p in payloads:
+        trader_id = p.get("trader_id")
+        signal_id = p.get("signal_id")
+        if not trader_id or not signal_id:
+            continue
+        key = (str(trader_id), str(signal_id))
+        if key in seen:
+            # Later entries for the same key win — drop the older one.
+            for i in range(len(rows) - 1, -1, -1):
+                if (rows[i]["trader_id"], rows[i]["signal_id"]) == key:
+                    rows.pop(i)
+                    break
+        seen.add(key)
+        rows.append({
+            "id": _new_id(),
+            "trader_id": trader_id,
+            "signal_id": signal_id,
+            "decision_id": p.get("decision_id"),
+            "outcome": p["outcome"],
+            "reason": p.get("reason"),
+            "payload_json": p.get("payload_json") or {},
+            "consumed_at": p.get("consumed_at") or utcnow(),
+        })
+    if not rows:
+        return
+    stmt = pg_insert(TraderSignalConsumption).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        constraint="uq_trader_signal_consumption",
+        set_={
+            "decision_id": stmt.excluded.decision_id,
+            "outcome": stmt.excluded.outcome,
+            "reason": stmt.excluded.reason,
+            "payload_json": stmt.excluded.payload_json,
+            "consumed_at": stmt.excluded.consumed_at,
+        },
+    )
+    await session.execute(stmt)
 
 
 async def _flush_cursor(session: AsyncSession, p: dict[str, Any]) -> None:
-    trader_id = p["trader_id"]
-    row = await session.get(TraderSignalCursor, trader_id)
-    if row is None:
-        session.add(
-            TraderSignalCursor(
-                trader_id=trader_id,
-                last_signal_created_at=p.get("last_signal_created_at"),
-                last_signal_id=p.get("last_signal_id"),
-                last_runtime_sequence=p.get("last_runtime_sequence"),
-                updated_at=utcnow(),
-            )
-        )
-    else:
-        row.last_signal_created_at = p.get("last_signal_created_at")
-        row.last_signal_id = str(p.get("last_signal_id") or "") or None
-        row.last_runtime_sequence = p.get("last_runtime_sequence")
-        row.updated_at = utcnow()
+    """Single-row upsert. Kept for callers outside the bulk path."""
+    await _flush_cursors_bulk(session, [p])
+
+
+async def _flush_cursors_bulk(
+    session: AsyncSession, payloads: list[dict[str, Any]]
+) -> None:
+    """One INSERT ... ON CONFLICT DO UPDATE keyed on trader_id."""
+    if not payloads:
+        return
+    by_trader: dict[str, dict[str, Any]] = {}
+    for p in payloads:
+        trader_id = p.get("trader_id")
+        if not trader_id:
+            continue
+        last_signal_id = p.get("last_signal_id")
+        if last_signal_id is not None:
+            last_signal_id = str(last_signal_id) or None
+        by_trader[str(trader_id)] = {
+            "trader_id": str(trader_id),
+            "last_signal_created_at": p.get("last_signal_created_at"),
+            "last_signal_id": last_signal_id,
+            "last_runtime_sequence": p.get("last_runtime_sequence"),
+            "updated_at": utcnow(),
+        }
+    rows = list(by_trader.values())
+    if not rows:
+        return
+    stmt = pg_insert(TraderSignalCursor).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[TraderSignalCursor.trader_id],
+        set_={
+            "last_signal_created_at": stmt.excluded.last_signal_created_at,
+            "last_signal_id": stmt.excluded.last_signal_id,
+            "last_runtime_sequence": stmt.excluded.last_runtime_sequence,
+            "updated_at": stmt.excluded.updated_at,
+        },
+    )
+    await session.execute(stmt)
 
 
 async def _flush_signal_status(session: AsyncSession, p: dict[str, Any]) -> None:
