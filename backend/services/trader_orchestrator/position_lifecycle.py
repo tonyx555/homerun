@@ -6,7 +6,7 @@ import time as _time_mod
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import bindparam, func, inspect, or_, select, update
+from sqlalchemy import bindparam, func, inspect, or_, select, text as _sa_text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from config import settings
@@ -8954,6 +8954,16 @@ async def reconcile_live_positions(
         publish_rows = list(touched_rows)
         if touched_rows:
             _lc_t3a = _time.monotonic()
+            # Roadmap #3 — bound the bulk UPDATE's worst case under
+            # contention with concurrent TraderOrder writers (orchestrator
+            # submission path, audit flush). Without this, the executemany
+            # below could wait the full statement_timeout (30s) on row
+            # locks held by another writer; production logs showed
+            # "executemany=17.8s(n=7)" repeatedly. lock_timeout=2s makes
+            # the UPDATE fail-fast on contention; the next reconcile
+            # cycle will retry. SET LOCAL is scoped to this transaction
+            # and reverts on commit/rollback.
+            await session.execute(_sa_text("SET LOCAL lock_timeout = '2000'"))
             stmt = (
                 update(TraderOrder)
                 .where(TraderOrder.id == bindparam("_id"))
