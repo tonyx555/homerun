@@ -78,6 +78,9 @@ async def test_flush_audit_buffer_requeues_failed_batch_at_front(monkeypatch):
         def __init__(self):
             self.no_autoflush = _NoAutoflush()
 
+        async def execute(self, *args, **kwargs):
+            return None
+
         async def commit(self):
             raise TimeoutError()
 
@@ -93,14 +96,14 @@ async def test_flush_audit_buffer_requeues_failed_batch_at_front(monkeypatch):
 
     original_batch_size = trader_hot_state._AUDIT_FLUSH_BATCH_SIZE
     monkeypatch.setattr(trader_hot_state, "_AUDIT_FLUSH_BATCH_SIZE", 2)
-    monkeypatch.setattr(trader_hot_state, "AsyncSessionLocal", lambda: _SessionContext())
+    monkeypatch.setattr(trader_hot_state, "AuditAsyncSessionLocal", lambda: _SessionContext())
 
     try:
         trader_hot_state._audit_buffer.extend(
             [
-                trader_hot_state._AuditEntry(kind="first", payload={"id": "first"}, created_at=1.0),
-                trader_hot_state._AuditEntry(kind="second", payload={"id": "second"}, created_at=2.0),
-                trader_hot_state._AuditEntry(kind="third", payload={"id": "third"}, created_at=3.0),
+                trader_hot_state._AuditEntry(kind="consumption", payload={"id": "first"}, created_at=1.0),
+                trader_hot_state._AuditEntry(kind="consumption", payload={"id": "second"}, created_at=2.0),
+                trader_hot_state._AuditEntry(kind="consumption", payload={"id": "third"}, created_at=3.0),
             ]
         )
 

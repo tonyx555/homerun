@@ -108,6 +108,7 @@ async def _seed_trader_and_signal(session, signal_id: str = "signal-1") -> None:
 async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_skipped_decision")
     monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(hot_state, "AuditAsyncSessionLocal", session_factory)
 
     class SkippingStrategy:
         def evaluate(self, signal, context):
@@ -165,6 +166,7 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
 async def test_fast_trader_consumes_signal_from_unconfigured_strategy_without_decision(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_strategy_filter")
     monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(hot_state, "AuditAsyncSessionLocal", session_factory)
 
     def _unexpected_strategy_lookup(key):
         raise AssertionError(f"unexpected strategy lookup for {key}")
@@ -205,6 +207,7 @@ async def test_fast_trader_consumes_signal_from_unconfigured_strategy_without_de
 async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_no_order_decision")
     monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(hot_state, "AuditAsyncSessionLocal", session_factory)
 
     class SelectingStrategy:
         def evaluate(self, signal, context):
@@ -265,6 +268,7 @@ async def test_fast_trader_selected_signal_records_no_order_failure(monkeypatch)
 async def test_fast_trader_idle_cycle_updates_last_run_and_emits_heartbeat(monkeypatch):
     engine, session_factory = await build_postgres_session_factory(Base, "fast_runtime_idle_heartbeat")
     monkeypatch.setattr(hot_state, "AsyncSessionLocal", session_factory)
+    monkeypatch.setattr(hot_state, "AuditAsyncSessionLocal", session_factory)
     runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), asyncio.Event())
     runner._last_idle_event_at = -1_000_000.0
 

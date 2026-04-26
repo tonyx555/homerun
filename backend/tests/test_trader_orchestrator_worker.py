@@ -981,7 +981,7 @@ def test_merged_strategy_params_for_traders_copy_trade_uses_copy_validator(monke
     assert merged["min_confidence"] == 0.73
     assert merged["copy_buys"] is False
     assert merged["copy_sells"] is True
-    assert merged["max_signal_age_seconds"] == 5
+    assert merged["max_signal_age_seconds"] == 45
     assert "firehose_require_active_signal" not in merged
 
 
