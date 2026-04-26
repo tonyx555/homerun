@@ -209,9 +209,33 @@ class RetryableAsyncSession(AsyncSession):
                 raise
 
     async def execute(self, statement, params=None, **kwargs):
+        """Cancellation-safe execute.
+
+        execute() is the workhorse: every SELECT/INSERT/UPDATE/DELETE on
+        the session goes through here (including the ones that
+        ``scalars()``, ``scalar()``, ``get()`` etc. call internally).
+
+        It has the same tear-in-the-middle hazard as commit/flush: a
+        CancelledError between Parse/Bind and Execute/Sync leaves the
+        asyncpg backend in state=active wait_event=Client/ClientRead
+        holding any row locks the statement acquired. The 4-min zombie
+        sweeper eventually clears those, but in the meantime any other
+        writer touching the same rows blocks indefinitely. Production
+        symptom: 60-100s connection holds on the audit-flush task,
+        20-60s reconcile times, projection-queue cascade.
+
+        Shield the execute so the extended-protocol sequence completes
+        atomically; CancelledError still propagates to the caller. We
+        schedule a fire-and-forget rollback on cancel so the now-
+        completed statement doesn't leave the transaction half-built.
+        """
         try:
-            return await super().execute(statement, params=params, **kwargs)
+            return await asyncio.shield(super().execute(statement, params=params, **kwargs))
         except asyncio.CancelledError:
+            # The shielded execute completed; caller still wanted to bail.
+            # Roll back so we don't leak an open transaction. Fire-and-
+            # forget because the rollback itself may need to survive
+            # further cancellation pressure.
             self._fire_and_forget(self._do_rollback_or_invalidate())
             raise
         except DBAPIError:
