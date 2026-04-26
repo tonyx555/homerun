@@ -278,9 +278,16 @@ class TradersCopyTradeStrategy(BaseStrategy):
             return None
 
         token_id = str(copy_event.get("token_id") or market.get("token_id") or "").strip()
-        outcome = str(market.get("outcome") or copy_event.get("outcome") or "").strip().upper()
-        if outcome not in {"YES", "NO"}:
+        if not token_id:
             return None
+        # Outcome label flows through whatever the market reports —
+        # "Yes"/"No" for binary markets, candidate / team / range
+        # labels for multi-outcome markets, etc. Earlier code rejected
+        # everything that wasn't YES/NO, which silently dropped every
+        # multi-outcome copy event. Copy trading needs only token_id +
+        # side; the outcome label is informational metadata.
+        outcome_raw = str(market.get("outcome") or copy_event.get("outcome") or "").strip()
+        outcome = outcome_raw.upper()  # canonical-case for the binary check below
 
         entry_price = safe_float(copy_event.get("price"), safe_float(source_trade.get("price"), 0.0))
         size = max(0.0, safe_float(copy_event.get("size"), safe_float(source_trade.get("size"), 0.0)))
@@ -383,10 +390,10 @@ class TradersCopyTradeStrategy(BaseStrategy):
         return Opportunity(
             stable_id=stable_id,
             strategy=self.strategy_type,
-            title=f"Copy Trade {side} {outcome}: {market_question[:88]}",
+            title=f"Copy Trade {side} {outcome_raw or outcome}: {market_question[:88]}",
             description=(
-                f"Mirror {side} flow from {source_wallet or 'tracked wallet'} on {outcome} at "
-                f"${entry_price:.4f} ({size:.4f} shares)."
+                f"Mirror {side} flow from {source_wallet or 'tracked wallet'} "
+                f"on {outcome_raw or outcome} at ${entry_price:.4f} ({size:.4f} shares)."
             ),
             total_cost=total_cost,
             expected_payout=expected_payout,
@@ -405,6 +412,10 @@ class TradersCopyTradeStrategy(BaseStrategy):
                     "question": market_question,
                     "slug": market_slug,
                     "liquidity": liquidity,
+                    # yes_price/no_price are populated only for binary
+                    # YES/NO markets; for multi-outcome markets they
+                    # remain None (downstream consumers should rely on
+                    # token_id + entry_price for non-binary).
                     "yes_price": (entry_price if outcome == "YES" else safe_float(market.get("yes_price"), None)),
                     "no_price": (entry_price if outcome == "NO" else safe_float(market.get("no_price"), None)),
                     "clob_token_ids": ([token_id] if token_id else []),
@@ -423,11 +434,25 @@ class TradersCopyTradeStrategy(BaseStrategy):
             positions_to_take=[
                 {
                     "action": execution_side,
-                    "outcome": outcome,
+                    # Pass through the original-case outcome label
+                    # ("Yes"/"No" / candidate / team / etc) so multi-
+                    # outcome markets retain their actual label
+                    # downstream rather than being uppercased to a
+                    # name that doesn't exist in the catalog.
+                    "outcome": outcome_raw or outcome,
                     "price": entry_price,
                     "token_id": token_id,
                     "market_id": market_id,
-                    "direction": ("buy_yes" if outcome == "YES" else "buy_no"),
+                    # direction: keep buy_yes/buy_no for binary so
+                    # downstream code paths that match on those exact
+                    # strings continue to work; for multi-outcome
+                    # markets the token_id is the actual identity of
+                    # the position being copied.
+                    "direction": (
+                        "buy_yes" if outcome == "YES"
+                        else "buy_no" if outcome == "NO"
+                        else "buy"
+                    ),
                 }
             ],
             strategy_context=strategy_context,

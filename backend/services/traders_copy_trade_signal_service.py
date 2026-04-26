@@ -397,18 +397,21 @@ class TradersCopyTradeSignalService:
             return 0
 
         market = await self._resolve_market_snapshot(token_id)
-        if market.outcome not in {"YES", "NO"}:
-            # Demoted from warning → info: the skip is correct behavior
-            # for tokens that aren't in our outcome catalog. WARNING
-            # should be reserved for genuinely actionable issues; this
-            # event was previously firing many times per second for
-            # routine catalog gaps and drowned the signal channel.
+        # No outcome-label filter here — copy trading needs only the
+        # token_id and side, regardless of how the market labels its
+        # outcomes (YES/NO for binary markets, candidate names for
+        # politics, team names for sports, range buckets for numeric
+        # markets, etc). The previous YES/NO gate was a binary-market-
+        # only assumption that silently dropped every multi-outcome
+        # event; Copy Trader appeared to "do nothing" because of it.
+        # If the market lookup outright failed (no market_id), still
+        # skip — we can't copy a trade we can't identify.
+        if not market.market_id or market.market_id.startswith("token:"):
             logger.info(
-                "Skipping copy-trade signal; unresolved token outcome",
+                "Skipping copy-trade signal; market lookup failed",
                 wallet=source_wallet,
                 token_id=token_id,
                 tx_hash=str(event.tx_hash or ""),
-                block_number=int(event.block_number or 0),
             )
             return 0
 
@@ -645,17 +648,36 @@ class TradersCopyTradeSignalService:
             market_slug = slug
             liquidity = safe_float(info.get("liquidity"), None)
 
-            tokens = info.get("tokens") if isinstance(info.get("tokens"), list) else []
-            for raw_token in tokens:
-                if not isinstance(raw_token, dict):
+            # PolymarketClient.get_market_by_token_id returns parallel
+            # ``token_ids`` / ``outcomes`` lists. Find the outcome label
+            # for OUR token — could be "Yes" / "No" on a binary market,
+            # or any other label on a multi-outcome market (candidate
+            # name, team name, range bucket, etc.). DO NOT filter on
+            # YES/NO here — that was a binary-market-only assumption
+            # and the cause of Copy Trader silently dropping every
+            # event with a non-YES/NO outcome label. Copy trading just
+            # needs the token_id and side; the outcome label is
+            # informational and gets passed through whatever it is.
+            token_ids_list = info.get("token_ids") if isinstance(info.get("token_ids"), list) else []
+            outcomes_list = info.get("outcomes") if isinstance(info.get("outcomes"), list) else []
+            for idx, tid in enumerate(token_ids_list):
+                if str(tid or "").strip() != token_id:
                     continue
-                raw_token_id = str(raw_token.get("token_id") or raw_token.get("id") or "").strip()
-                if raw_token_id != token_id:
-                    continue
-                raw_outcome = str(raw_token.get("outcome") or "").strip().upper()
-                if raw_outcome in {"YES", "NO"}:
-                    outcome = raw_outcome
+                if idx < len(outcomes_list):
+                    outcome = str(outcomes_list[idx] or "").strip()
                 break
+            # Legacy fallback: if a ``tokens`` array of dicts is ever
+            # introduced (or returned by a different API path), use it.
+            if not outcome:
+                tokens = info.get("tokens") if isinstance(info.get("tokens"), list) else []
+                for raw_token in tokens:
+                    if not isinstance(raw_token, dict):
+                        continue
+                    raw_token_id = str(raw_token.get("token_id") or raw_token.get("id") or "").strip()
+                    if raw_token_id != token_id:
+                        continue
+                    outcome = str(raw_token.get("outcome") or "").strip()
+                    break
 
         snapshot = _TokenMarketSnapshot(
             market_id=market_id,
@@ -664,7 +686,10 @@ class TradersCopyTradeSignalService:
             outcome=outcome,
             liquidity=liquidity,
         )
-        if outcome in {"YES", "NO"}:
+        # Cache the resolution if we got a real market (any non-empty
+        # market_id implies the gamma lookup hit). Outcome label can be
+        # anything — multi-outcome markets are valid copy targets.
+        if market_id and not market_id.startswith("token:"):
             self._token_cache[token_id] = (now, snapshot)
         return snapshot
 
