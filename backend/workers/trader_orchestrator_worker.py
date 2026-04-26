@@ -6145,6 +6145,7 @@ async def _run_trader_once(
                                 "copy_inventory_context": copy_inventory_context_for_signal,
                             },
                         )
+                        _eval_started = time.monotonic()
                         async with release_conn(session):
                             try:
                                 decision_obj = await asyncio.wait_for(
@@ -6161,6 +6162,7 @@ async def _run_trader_once(
                                 if not decision_future.done():
                                     decision_future.cancel()
                                 raise
+                        _accumulate("strategy_eval", _eval_started)
                         checks_payload = _checks_to_payload(decision_obj.checks)
 
                     if live_context:
@@ -6740,6 +6742,7 @@ async def _run_trader_once(
                         except Exception:
                             pass
                         submit_started_at = utcnow()
+                        _submit_started_mono = time.monotonic()
                         submit_result = await submit_order(
                             trader_id=trader_id,
                             signal=runtime_signal,
@@ -6753,6 +6756,7 @@ async def _run_trader_once(
                             size_usd=size_usd,
                             reason=final_reason,
                         )
+                        _accumulate("submit_order", _submit_started_mono)
                         submit_completed_at = utcnow()
                         submit_latency_payload = _compute_signal_latency_payload(
                             runtime_signal,
