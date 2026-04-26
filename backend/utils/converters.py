@@ -57,18 +57,51 @@ def to_confidence(value: Any, default: float = 0.0) -> float:
     return clamp(parsed, 0.0, 1.0)
 
 
-def to_iso(value: datetime | None) -> str | None:
+def to_iso(value: Any) -> str | None:
     """Serialize a datetime to an ISO 8601 UTC string ending in ``Z``.
 
-    Naive datetimes are assumed to be UTC.
+    Naive datetimes are assumed to be UTC. String inputs that already
+    look like ISO timestamps are normalized through datetime.fromisoformat
+    rather than crashing on ``.tzinfo`` access — this defensive parsing
+    catches paths like worker_state.read_worker_snapshot reading values
+    out of a dict that may have been serialized at some upstream layer
+    (the tzinfo crash chased in 5676b0e turned out to originate here).
+    Anything unparseable returns None.
     """
     if value is None:
         return None
-    if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    else:
-        value = value.astimezone(timezone.utc)
-    return value.replace(tzinfo=None).isoformat() + "Z"
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.replace(tzinfo=None).isoformat() + "Z"
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        # Already in our canonical form — pass through unchanged so we
+        # don't lose precision or alter formatting.
+        if text.endswith("Z") and "T" in text:
+            try:
+                # Validate by round-tripping; if it doesn't parse as ISO
+                # we still pass it through (caller's contract is "string
+                # in, string out" if the value isn't recognized).
+                datetime.fromisoformat(text[:-1] + "+00:00")
+                return text
+            except Exception:
+                pass
+        candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+        try:
+            parsed = datetime.fromisoformat(candidate)
+        except Exception:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        else:
+            parsed = parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=None).isoformat() + "Z"
+    return None
 
 
 def to_float(value: Any, default: float = 0.0) -> float:
