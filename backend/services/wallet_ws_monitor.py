@@ -69,7 +69,17 @@ RPC_ATTEMPTS_PER_ENDPOINT = 2
 
 @dataclass
 class WalletTradeEvent:
-    """Represents a trade detected on-chain for a tracked wallet."""
+    """Represents a trade detected for a tracked wallet.
+
+    Two detection paths can produce this event:
+
+    - **on-chain** (WalletWebSocketMonitor): canonical. Polygon RPC
+      ``OrdersFilled`` event. Sets ``confirmed=True``.
+    - **RTDS** (services.wallet_rtds_feed): preliminary fast-path. Reads
+      the Polymarket activity firehose ~1-3s ahead of block confirmation.
+      Sets ``confirmed=False``. Does not persist to the DB — the on-chain
+      path is the system of record.
+    """
 
     wallet_address: str
     token_id: str
@@ -83,6 +93,13 @@ class WalletTradeEvent:
     timestamp: datetime
     detected_at: datetime  # When we detected it
     latency_ms: float  # Detection latency
+    # ``True`` when the event came from on-chain RPC (system of record).
+    # ``False`` for preliminary RTDS detections — frontends should render
+    # these as "pending" and rely on the on-chain follow-up to confirm.
+    confirmed: bool = True
+    # ``"onchain"`` or ``"rtds"``. Lets downstream consumers branch on
+    # source without re-deriving from ``confirmed``.
+    source: str = "onchain"
 
 
 # ==================== SQLALCHEMY MODEL ====================
@@ -556,6 +573,12 @@ class WalletWebSocketMonitor:
 
         Launches the WebSocket loop as a background task. If the monitor
         is already running, this is a no-op.
+
+        Also starts the RTDS fast-path subscription so the frontend sees
+        preliminary trade events ahead of block confirmation. RTDS-sourced
+        events are emitted via the same callback list as on-chain events
+        but carry ``confirmed=False`` so consumers can dedupe by
+        ``tx_hash``.
         """
         if self._running:
             logger.debug("WS monitor start skipped; already running")
@@ -567,11 +590,42 @@ class WalletWebSocketMonitor:
 
         self._running = True
         self._ws_task = asyncio.create_task(self._ws_loop())
+        await self._start_rtds_fast_path()
         logger.info(
             "Started wallet WS monitor",
             ws_url=self._ws_url,
             tracked_wallets=len(self._tracked_sources),
         )
+
+    async def _start_rtds_fast_path(self) -> None:
+        """Start the Polymarket RTDS activity fast-path feed."""
+        try:
+            from services.wallet_rtds_feed import get_wallet_rtds_feed
+
+            rtds = get_wallet_rtds_feed(
+                get_tracked_wallets=self._tracked_addresses
+            )
+            rtds.add_callback(self._emit_rtds_event)
+            await rtds.start()
+            self._rtds_feed = rtds
+        except Exception as exc:
+            # RTDS is optional fast-path; never fail start() because of it.
+            self._rtds_feed = None
+            logger.warning(
+                "Failed to start RTDS wallet fast path; on-chain monitoring "
+                "continues unaffected.",
+                error=str(exc),
+            )
+
+    async def _emit_rtds_event(self, event: WalletTradeEvent) -> None:
+        """Emit a preliminary RTDS-sourced trade event.
+
+        Routed through the same callback list as on-chain events, but does
+        NOT persist to the DB — the on-chain path is the system of record.
+        Subscribers should dedupe by ``tx_hash`` and treat ``confirmed=False``
+        as "pending."
+        """
+        await self._emit_callbacks(event)
 
     def stop(self):
         """Stop the WebSocket monitor and all background tasks."""
@@ -581,6 +635,14 @@ class WalletWebSocketMonitor:
             self._ws_task.cancel()
         if self._poll_fallback_task and not self._poll_fallback_task.done():
             self._poll_fallback_task.cancel()
+
+        rtds = getattr(self, "_rtds_feed", None)
+        if rtds is not None:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(rtds.stop())
+            except RuntimeError:
+                pass
 
         try:
             loop = asyncio.get_running_loop()
