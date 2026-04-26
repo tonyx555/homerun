@@ -183,6 +183,41 @@ class ChainlinkFeed:
             return price
         return None
 
+    def update_from_chainlink_direct(
+        self,
+        asset: str,
+        price: float,
+        bid: Optional[float],
+        ask: Optional[float],
+        timestamp_ms: int,
+    ) -> None:
+        """Ingest a direct Chainlink Data Streams price into ``_prices_by_source``.
+
+        Called from the :class:`~services.chainlink_direct_feed.ChainlinkDirectFeed`
+        on_update callback. Writes to source ``"chainlink_direct"`` alongside
+        the existing ``"chainlink"`` (RTDS-relayed) and ``"binance"`` entries
+        so the source-comparison panel can render the relay-vs-direct delta.
+
+        Does NOT overwrite ``_prices[asset]`` — the RTDS-relayed Chainlink
+        remains the primary price for backwards compatibility with all
+        existing strategy code that reads ``feed.get_price(asset)``.
+        """
+        asset = asset.upper()
+        oracle = OraclePrice(asset=asset, price=price, updated_at_ms=timestamp_ms)
+        oracle.source = "chainlink_direct"
+        if asset not in self._prices_by_source:
+            self._prices_by_source[asset] = {}
+        self._prices_by_source[asset]["chainlink_direct"] = oracle
+
+        # History append so price-to-beat lookups have direct data when the
+        # RTDS relay is delayed. Same pruning rules as other sources.
+        if asset not in self._history:
+            self._history[asset] = deque(maxlen=HISTORY_MAX_ENTRIES)
+        self._history[asset].append((int(timestamp_ms), float(price)))
+        cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
+        while self._history[asset] and self._history[asset][0][0] < cutoff:
+            self._history[asset].popleft()
+
     def update_from_binance_direct(
         self,
         asset: str,

@@ -84,6 +84,11 @@ export default function AccountSettingsFlyout({ isOpen, onClose }: { isOpen: boo
     api_key: ''
   })
 
+  const [oracleForm, setOracleForm] = useState({
+    chainlink_direct_api_key: '',
+    chainlink_direct_user_secret: '',
+  })
+
   const queryClient = useQueryClient()
 
   const { data: settings } = useQuery({
@@ -137,6 +142,17 @@ export default function AccountSettingsFlyout({ isOpen, onClose }: { isOpen: boo
     if (kalshiForm.email) updates.kalshi.email = kalshiForm.email
     if (kalshiForm.password) updates.kalshi.password = kalshiForm.password
     if (kalshiForm.api_key) updates.kalshi.api_key = kalshiForm.api_key
+    saveMutation.mutate(updates)
+  }
+
+  const handleSaveOracle = () => {
+    const updates: any = { oracle: {} }
+    if (oracleForm.chainlink_direct_api_key) {
+      updates.oracle.chainlink_direct_api_key = oracleForm.chainlink_direct_api_key
+    }
+    if (oracleForm.chainlink_direct_user_secret) {
+      updates.oracle.chainlink_direct_user_secret = oracleForm.chainlink_direct_user_secret
+    }
     saveMutation.mutate(updates)
   }
 
@@ -354,6 +370,67 @@ export default function AccountSettingsFlyout({ isOpen, onClose }: { isOpen: boo
                     {testKalshiMutation.data.message}
                   </Badge>
                 )}
+              </div>
+            </div>
+          </Card>
+
+          {/* Oracle (Chainlink Data Streams) Account */}
+          <Card className="bg-card/40 border-border/40 rounded-xl shadow-none p-3 md:col-span-2">
+            <h4 className="text-[10px] uppercase tracking-widest font-semibold flex items-center gap-1.5 mb-3">
+              <Activity className="w-3.5 h-3.5 text-amber-500" />
+              Oracle &mdash; Chainlink Data Streams
+              <Badge variant="outline" className={cn(
+                "ml-auto text-[10px] px-2 py-0.5 border-0 shrink-0",
+                (settings?.oracle?.chainlink_direct_api_key && settings?.oracle?.chainlink_direct_user_secret)
+                  ? 'text-emerald-400 bg-emerald-500/10'
+                  : (settings?.oracle?.chainlink_direct_api_key || settings?.oracle?.chainlink_direct_user_secret)
+                  ? 'text-yellow-400 bg-yellow-500/10'
+                  : 'text-muted-foreground bg-muted'
+              )}>
+                {(settings?.oracle?.chainlink_direct_api_key && settings?.oracle?.chainlink_direct_user_secret)
+                  ? 'Configured'
+                  : (settings?.oracle?.chainlink_direct_api_key || settings?.oracle?.chainlink_direct_user_secret)
+                  ? 'Partial'
+                  : 'Not configured'}
+              </Badge>
+            </h4>
+            <div className="space-y-3">
+              <SecretInput
+                label="Chainlink API Key"
+                value={oracleForm.chainlink_direct_api_key}
+                placeholder={settings?.oracle?.chainlink_direct_api_key || 'Enter Chainlink Data Streams API key'}
+                onChange={(v) => setOracleForm(p => ({ ...p, chainlink_direct_api_key: v }))}
+                showSecret={showSecrets['cl_key']}
+                onToggle={() => toggleSecret('cl_key')}
+                description="Free-tier credentials at chain.link/data-streams"
+              />
+              <SecretInput
+                label="Chainlink User Secret"
+                value={oracleForm.chainlink_direct_user_secret}
+                placeholder={settings?.oracle?.chainlink_direct_user_secret || 'Enter paired user secret'}
+                onChange={(v) => setOracleForm(p => ({ ...p, chainlink_direct_user_secret: v }))}
+                showSecret={showSecrets['cl_secret']}
+                onToggle={() => toggleSecret('cl_secret')}
+                description="Used to HMAC-sign requests against the Data Streams REST API"
+              />
+
+              <div className="flex items-start gap-2 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+                <Activity className="w-4 h-4 text-amber-400 mt-0.5 shrink-0" />
+                <p className="text-xs text-muted-foreground">
+                  Optional second oracle source. When configured, prices are polled directly from Chainlink&apos;s
+                  REST endpoint alongside Polymarket&apos;s RTDS-relayed Chainlink feed &mdash; the source-comparison
+                  panel surfaces the relay-vs-direct delta so you can see when the relay lags. Without
+                  credentials the feed stays disabled and never connects.
+                </p>
+              </div>
+
+              <Separator className="opacity-30" />
+
+              <div className="flex items-center gap-2">
+                <Button size="sm" onClick={handleSaveOracle} disabled={saveMutation.isPending}>
+                  <Save className="w-3.5 h-3.5 mr-1.5" />
+                  Save
+                </Button>
               </div>
             </div>
           </Card>

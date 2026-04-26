@@ -151,7 +151,19 @@ class RetryableAsyncSession(AsyncSession):
         nothing else can reap until the worker restarts.  Shielding
         the commit lets the whole sequence finish atomically while
         still re-raising CancelledError to the caller afterwards.
+
+        Connection-broken errors (e.g. asyncpg
+        ``cannot switch to state X; another operation in progress``)
+        are NOT retried at the session level — the transaction's
+        writes are already lost and retrying ``commit()`` on a
+        rolled-back session would silently report success without
+        persisting anything.  The session is invalidated so the pool
+        drops the poisoned connection, and the error propagates so
+        the caller can either re-issue the writes or abandon the
+        cycle.
         """
+        from utils.retry import is_db_connection_broken
+
         for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
             try:
                 await asyncio.shield(super().commit())
@@ -159,6 +171,9 @@ class RetryableAsyncSession(AsyncSession):
             except asyncio.CancelledError:
                 raise
             except DBAPIError as exc:
+                if is_db_connection_broken(exc):
+                    self._fire_and_forget(self._do_invalidate())
+                    raise
                 message = str(getattr(exc, "orig", exc)).lower()
                 retryable = any(marker in message for marker in self._COMMIT_RETRYABLE_MESSAGES)
                 if not retryable or attempt >= self._COMMIT_RETRY_ATTEMPTS:
@@ -969,6 +984,12 @@ class AppSettings(Base):
     kalshi_email = Column(String, nullable=True)
     kalshi_password = Column(String, nullable=True)
     kalshi_api_key = Column(String, nullable=True)
+
+    # Chainlink Data Streams (direct REST polling). Optional second source
+    # alongside the RTDS-relayed Chainlink prices — when both are present,
+    # the source-comparison panel surfaces the relay-vs-direct delta.
+    chainlink_direct_api_key = Column(String, nullable=True)
+    chainlink_direct_user_secret = Column(String, nullable=True)
 
     # LLM/AI Service Settings
     openai_api_key = Column(String, nullable=True)
@@ -3916,9 +3937,12 @@ def _fast_on_checkin(dbapi_connection, connection_record):  # noqa: ANN001
     checkout_task_coro = connection_record.info.pop("checkout_task_coro", "unknown")
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
-        # The fast pool is expected to release connections in <100ms.  A held
-        # connection even for a second indicates something is wrong; warn loud.
-        if elapsed > 1.0:
+        # The fast pool releases connections in <100ms when the cycle is
+        # purely DB-bound, but a real cycle includes a CLOB submission
+        # (~300-500ms) plus DB writes; expect ~700ms-1.5s in the warm
+        # path.  Warn only on genuine outliers — something on the cycle
+        # is starving the loop or stalling mid-protocol.
+        if elapsed > 2.0:
             _db_logger.warning(
                 "Fast-tier connection held for %.2fs before return to pool (task=%s, coro=%s)",
                 elapsed,

@@ -15,6 +15,15 @@ export interface KalshiSettings {
   api_key: string | null
 }
 
+export interface OracleSettings {
+  // Chainlink Data Streams direct REST polling. Used as a parallel oracle
+  // source alongside the RTDS-relayed Chainlink prices — when both sides
+  // are configured the source-comparison panel surfaces relay-vs-direct
+  // delta. Free-tier creds available at https://chain.link/data-streams.
+  chainlink_direct_api_key: string | null
+  chainlink_direct_user_secret: string | null
+}
+
 export interface LLMSettings {
   provider: string
   openai_api_key: string | null
@@ -212,6 +221,7 @@ export interface NetworkSettings {
 export interface AllSettings {
   polymarket: PolymarketSettings
   kalshi: KalshiSettings
+  oracle: OracleSettings
   llm: LLMSettings
   notifications: NotificationSettings
   scanner: ScannerSettings
@@ -229,6 +239,7 @@ export interface AllSettings {
 export interface UpdateSettingsRequest {
   polymarket?: Partial<PolymarketSettings>
   kalshi?: Partial<KalshiSettings>
+  oracle?: Partial<OracleSettings>
   llm?: Partial<LLMSettings>
   notifications?: Partial<NotificationSettings>
   scanner?: Partial<ScannerSettings>

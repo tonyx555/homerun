@@ -267,6 +267,23 @@ def kalshi_payload(settings: AppSettings) -> dict[str, Any]:
     }
 
 
+def oracle_payload(settings: AppSettings) -> dict[str, Any]:
+    """Oracle data source credentials (currently Chainlink Data Streams).
+
+    Uses ``getattr`` with a default so older AppSettings rows that haven't
+    been migrated yet don't blow up the GET /settings response — column
+    is added in alembic 202604250002.
+    """
+    return {
+        "chainlink_direct_api_key": mask_stored_secret(
+            getattr(settings, "chainlink_direct_api_key", None)
+        ),
+        "chainlink_direct_user_secret": mask_stored_secret(
+            getattr(settings, "chainlink_direct_user_secret", None)
+        ),
+    }
+
+
 def llm_payload(settings: AppSettings) -> dict[str, Any]:
     return {
         "provider": settings.llm_provider or "none",
@@ -637,9 +654,16 @@ def events_payload(settings: AppSettings) -> dict[str, Any]:
 
 
 def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]:
-    """Apply a partial UpdateSettingsRequest onto an AppSettings row."""
+    """Apply a partial UpdateSettingsRequest onto an AppSettings row.
+
+    Returned flags include ``needs_chainlink_direct_rearm`` — set when
+    Chainlink Data Streams credentials change so the route handler can
+    call ``ReferenceRuntime.rearm_chainlink_direct()`` to pick up the new
+    credentials without an app restart.
+    """
     polymarket = getattr(request, "polymarket", None)
     kalshi = getattr(request, "kalshi", None)
+    oracle = getattr(request, "oracle", None)
     llm = getattr(request, "llm", None)
     notifications = getattr(request, "notifications", None)
     scanner = getattr(request, "scanner", None)
@@ -673,6 +697,23 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
             set_encrypted_secret(settings, "kalshi_password", kal.password)
         if kal.api_key is not None:
             set_encrypted_secret(settings, "kalshi_api_key", kal.api_key)
+
+    needs_chainlink_direct_rearm = False
+    if oracle:
+        # Detect whether either credential field is being changed so the
+        # route handler can decide whether to rearm the direct feed.
+        if oracle.chainlink_direct_api_key is not None:
+            set_encrypted_secret(
+                settings, "chainlink_direct_api_key", oracle.chainlink_direct_api_key
+            )
+            needs_chainlink_direct_rearm = True
+        if oracle.chainlink_direct_user_secret is not None:
+            set_encrypted_secret(
+                settings,
+                "chainlink_direct_user_secret",
+                oracle.chainlink_direct_user_secret,
+            )
+            needs_chainlink_direct_rearm = True
 
     if llm:
         if llm.provider is not None:
@@ -989,4 +1030,5 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         "needs_events_reload": events is not None,
         "needs_ui_lock_reload": ui_lock is not None,
         "reset_ui_lock_sessions": ui_lock_password_changed or ui_lock_enabled_changed,
+        "needs_chainlink_direct_rearm": needs_chainlink_direct_rearm,
     }

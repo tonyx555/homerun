@@ -40,6 +40,7 @@ from api.settings_helpers import (
     maintenance_payload,
     network_payload,
     notifications_payload,
+    oracle_payload,
     polymarket_payload,
     scanner_payload,
     search_filters_payload,
@@ -72,6 +73,25 @@ class KalshiSettings(BaseModel):
     email: Optional[str] = Field(default=None, description="Kalshi account email")
     password: Optional[str] = Field(default=None, description="Kalshi account password")
     api_key: Optional[str] = Field(default=None, description="Kalshi API key")
+
+
+class OracleSettings(BaseModel):
+    """Oracle data source credentials.
+
+    Currently Chainlink Data Streams only — read directly from
+    api.dataengine.chain.link as a parallel source to the RTDS-relayed
+    Chainlink prices. When both sides are configured the source-comparison
+    panel surfaces relay-vs-direct delta.
+    """
+
+    chainlink_direct_api_key: Optional[str] = Field(
+        default=None,
+        description="Chainlink Data Streams API key (https://chain.link/data-streams)",
+    )
+    chainlink_direct_user_secret: Optional[str] = Field(
+        default=None,
+        description="Chainlink Data Streams user secret (paired with API key for HMAC signing)",
+    )
 
 
 class LLMSettings(BaseModel):
@@ -736,6 +756,7 @@ class AllSettings(BaseModel):
 
     polymarket: PolymarketSettings
     kalshi: KalshiSettings
+    oracle: OracleSettings
     llm: LLMSettings
     notifications: NotificationSettings
     scanner: ScannerSettingsModel
@@ -755,6 +776,7 @@ class UpdateSettingsRequest(BaseModel):
 
     polymarket: Optional[PolymarketSettings] = None
     kalshi: Optional[KalshiSettings] = None
+    oracle: Optional[OracleSettings] = None
     llm: Optional[LLMSettings] = None
     notifications: Optional[NotificationSettings] = None
     scanner: Optional[ScannerSettingsModel] = None
@@ -2317,6 +2339,7 @@ async def get_settings():
         return AllSettings(
             polymarket=PolymarketSettings(**polymarket_payload(settings)),
             kalshi=KalshiSettings(**kalshi_payload(settings)),
+            oracle=OracleSettings(**oracle_payload(settings)),
             llm=LLMSettings(**llm_payload(settings)),
             notifications=NotificationSettings(**notifications_payload(settings)),
             scanner=ScannerSettingsModel(**scanner_payload(settings)),
@@ -2366,6 +2389,9 @@ async def update_settings(request: UpdateSettingsRequest):
             needs_events_reload = update_flags["needs_events_reload"]
             needs_ui_lock_reload = bool(update_flags.get("needs_ui_lock_reload"))
             reset_ui_lock_sessions = bool(update_flags.get("reset_ui_lock_sessions"))
+            needs_chainlink_direct_rearm = bool(
+                update_flags.get("needs_chainlink_direct_rearm")
+            )
 
         # Re-initialize LLM manager OUTSIDE the DB session so initialize()
         # reads newly committed settings from a fresh transaction.
@@ -2420,6 +2446,29 @@ async def update_settings(request: UpdateSettingsRequest):
             except Exception as reinit_err:
                 logger.error(
                     f"Failed to refresh UI lock settings after update: {reinit_err}",
+                )
+
+        # Pick up new Chainlink Data Streams credentials without an app
+        # restart. Calling rearm_chainlink_direct() clears any disabled
+        # latch (e.g. from a prior 401 storm) and refreshes the cached
+        # credentials inside ChainlinkDirectFeed. Safe to call when the
+        # feed isn't running yet — the runtime starts it lazily.
+        if needs_chainlink_direct_rearm:
+            try:
+                from services.reference_runtime import get_reference_runtime
+
+                runtime = get_reference_runtime()
+                await runtime.rearm_chainlink_direct()
+                logger.info(
+                    "Chainlink Data Streams direct feed rearmed after credentials update"
+                )
+            except RuntimeError:
+                # Reference runtime not yet started — credentials will be
+                # picked up the first time it does start.
+                pass
+            except Exception as reinit_err:
+                logger.error(
+                    f"Failed to rearm Chainlink direct feed: {reinit_err}",
                 )
 
         logger.info("Settings updated successfully")

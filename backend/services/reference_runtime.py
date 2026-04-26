@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from services.binance_feed import get_binance_feed
 from services.chainlink_feed import get_chainlink_feed
+from services.chainlink_direct_feed import (
+    ChainlinkDirectFeed,
+    ChainlinkDirectPrice,
+)
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 class ReferenceRuntime:
@@ -17,6 +24,10 @@ class ReferenceRuntime:
         self._callbacks: list[Callable[[str], None]] = []
         self._binance_feed.on_update(self._on_binance_update)
         self._chainlink_feed.on_update(self._on_chainlink_update)
+        # Direct Chainlink Data Streams feed. Initialized lazily in start()
+        # so we can read API credentials from AppSettings — without them
+        # the feed latches DISABLED and never connects.
+        self._chainlink_direct_feed: Optional[ChainlinkDirectFeed] = None
 
     @property
     def started(self) -> bool:
@@ -30,6 +41,7 @@ class ReferenceRuntime:
                 return
             await self._chainlink_feed.start()
             await self._binance_feed.start()
+            await self._start_chainlink_direct()
             self._started = True
 
     async def stop(self) -> None:
@@ -37,7 +49,83 @@ class ReferenceRuntime:
             return
         await self._binance_feed.stop()
         await self._chainlink_feed.stop()
+        if self._chainlink_direct_feed is not None:
+            await self._chainlink_direct_feed.stop()
         self._started = False
+
+    async def _start_chainlink_direct(self) -> None:
+        """Boot the direct Chainlink Data Streams feed if credentials exist.
+
+        Reads ``chainlink_direct_api_key`` / ``chainlink_direct_user_secret``
+        from AppSettings on each call — when missing the feed latches
+        DISABLED and the connect loop never runs (avoids 401 storms).
+        """
+        try:
+            from sqlalchemy import select
+            from models.database import AppSettings, AsyncSessionLocal
+            from utils.secrets import decrypt_secret
+        except Exception:
+            return
+
+        # Snapshot creds once at start. The feed reads them via getters
+        # each request so a settings-update + rearm() will pick up new
+        # values without restarting the runtime.
+        cached_api_key = ""
+        cached_user_secret = ""
+
+        async def _refresh_credentials() -> None:
+            nonlocal cached_api_key, cached_user_secret
+            try:
+                async with AsyncSessionLocal() as session:
+                    result = await session.execute(select(AppSettings).limit(1))
+                    row = result.scalar_one_or_none()
+                if row is None:
+                    return
+                cached_api_key = decrypt_secret(getattr(row, "chainlink_direct_api_key", None)) or ""
+                cached_user_secret = decrypt_secret(getattr(row, "chainlink_direct_user_secret", None)) or ""
+            except Exception as exc:
+                logger.debug("ChainlinkDirectFeed credential refresh failed", error=str(exc))
+
+        await _refresh_credentials()
+        self._refresh_chainlink_direct_credentials = _refresh_credentials  # exposed for settings-update path
+
+        feed = ChainlinkDirectFeed(
+            get_api_key=lambda: cached_api_key,
+            get_user_secret=lambda: cached_user_secret,
+        )
+        feed.on_update(self._on_chainlink_direct_update)
+        self._chainlink_direct_feed = feed
+        await feed.start()
+
+    async def rearm_chainlink_direct(self) -> None:
+        """Re-evaluate Chainlink Data Streams credentials and restart the feed.
+
+        Call from the settings-update handler after a user saves new
+        Chainlink API credentials. Safe to call when the feed isn't
+        running — it will be created if needed.
+        """
+        if self._chainlink_direct_feed is None:
+            await self._start_chainlink_direct()
+            return
+        if hasattr(self, "_refresh_chainlink_direct_credentials"):
+            await self._refresh_chainlink_direct_credentials()
+        self._chainlink_direct_feed.rearm()
+        if not self._chainlink_direct_feed.started:
+            await self._chainlink_direct_feed.start()
+
+    def _on_chainlink_direct_update(self, price: ChainlinkDirectPrice) -> None:
+        """Forward a direct Chainlink price into the shared OraclePrice map."""
+        try:
+            self._chainlink_feed.update_from_chainlink_direct(
+                price.asset,
+                price.price,
+                price.bid,
+                price.ask,
+                price.observations_timestamp_ms,
+            )
+        except Exception:
+            logger.exception("update_from_chainlink_direct failed")
+        self._notify_update(price.asset)
 
     def on_update(self, callback: Callable[[str], None]) -> None:
         if callback not in self._callbacks:
