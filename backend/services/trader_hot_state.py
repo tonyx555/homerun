@@ -15,7 +15,7 @@ import asyncio
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from sqlalchemy import and_, func, or_, select, text as sa_text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -1313,30 +1313,35 @@ async def _audit_flush_loop() -> None:
             logger.warning("Audit flush failed", exc_info=exc)
 
 
-async def flush_audit_buffer() -> int:
-    """Drain buffered audit entries to Postgres.  Returns count flushed."""
-    import time as _time
-    async with _audit_lock:
-        if not _audit_buffer:
-            return 0
-        batch = _audit_buffer[:_AUDIT_FLUSH_BATCH_SIZE]
-        del _audit_buffer[:len(batch)]
-    batch.sort(key=lambda entry: (_AUDIT_KIND_PRIORITY.get(entry.kind, 99), entry.created_at))
+async def _audit_run_group(
+    label: str,
+    body: Callable[[Any], Awaitable[None]],
+) -> tuple[bool, float, float, BaseException | None]:
+    """Run an audit-write *body* in its own short transaction.
 
+    Returns (success, insert_seconds, commit_seconds, exception). Body
+    receives the open AsyncSession and is expected to perform writes
+    only — no commit. Each call:
+
+      * checks out a fresh connection from the audit pool
+      * sets SET LOCAL statement_timeout/lock_timeout for the tx
+      * runs body
+      * commits
+      * on exception, rolls back; success=False
+
+    Splitting flush_audit_buffer into per-kind groups means a lock-
+    contention failure on consumption/cursor (the read-modify-write
+    upsert paths that compete with the orchestrator's writes to the
+    same trader_id rows) does NOT roll back the decision/event INSERTs
+    in the same buffer drain — those land cleanly in their own tx.
+    """
+    import time as _time
     insert_started = _time.monotonic()
-    insert_seconds = 0.0
-    commit_seconds = 0.0
+    insert_s = 0.0
+    commit_s = 0.0
     try:
-        # Use the dedicated audit pool. Audit traffic must NEVER starve
-        # operational queries — a slow audit batch lives entirely in its
-        # own 2+2 connection neighborhood now.
         async with AuditAsyncSessionLocal() as session:
             try:
-                # Tighten statement / lock timeouts for the audit path so
-                # it fails-fast and re-queues instead of tying up a pool
-                # connection for ~60s under contention. SET LOCAL is
-                # scoped to this transaction; the connection's pool-default
-                # timeouts return on next checkout.
                 await session.execute(
                     sa_text(f"SET LOCAL statement_timeout = '{_AUDIT_STATEMENT_TIMEOUT_MS}'")
                 )
@@ -1344,84 +1349,172 @@ async def flush_audit_buffer() -> int:
                     sa_text(f"SET LOCAL lock_timeout = '{_AUDIT_LOCK_TIMEOUT_MS}'")
                 )
                 with session.no_autoflush:
-                    # Group by kind and bulk-insert the high-volume
-                    # append-only kinds (decision / decision_checks /
-                    # trader_event) in single multi-row INSERT
-                    # statements. Net effect on a 250-entry batch:
-                    # ~5-10 SQL roundtrips instead of 250. Dramatic
-                    # reduction in lock-holding time and pool wait.
-                    decisions: list[dict[str, Any]] = []
-                    decision_checks: list[dict[str, Any]] = []
-                    trader_events: list[dict[str, Any]] = []
-                    other: list[_AuditEntry] = []
-                    for entry in batch:
-                        if entry.kind == "decision":
-                            decisions.append(entry.payload)
-                        elif entry.kind == "decision_checks":
-                            decision_checks.append(entry.payload)
-                        elif entry.kind == "trader_event":
-                            trader_events.append(entry.payload)
-                        else:
-                            other.append(entry)
-                    # Decisions first (referenced by decision_checks via FK).
-                    await _flush_decisions_bulk(session, decisions)
-                    await _flush_decision_checks_bulk(session, decision_checks)
-                    await _flush_trader_events_bulk(session, trader_events)
-                    # Non-bulk kinds: per-row (read-modify-write upserts
-                    # with conditional logic that doesn't bulk cleanly).
-                    for entry in other:
-                        if entry.kind == "consumption":
-                            await _flush_consumption(session, entry.payload)
-                        elif entry.kind == "cursor":
-                            await _flush_cursor(session, entry.payload)
-                        elif entry.kind == "signal_status":
-                            await _flush_signal_status(session, entry.payload)
-                        elif entry.kind == "experiment_assignment":
-                            await _flush_experiment_assignment(session, entry.payload)
-                insert_seconds = _time.monotonic() - insert_started
+                    await body(session)
+                insert_s = _time.monotonic() - insert_started
                 commit_started = _time.monotonic()
                 await session.commit()
-                commit_seconds = _time.monotonic() - commit_started
-            except Exception:
-                await session.rollback()
+                commit_s = _time.monotonic() - commit_started
+            except BaseException:
+                try:
+                    await session.rollback()
+                except Exception:
+                    pass
                 raise
-    except Exception as exc:
+        return True, insert_s, commit_s, None
+    except BaseException as exc:
+        return False, insert_s, commit_s, exc
+
+
+async def flush_audit_buffer() -> int:
+    """Drain buffered audit entries to Postgres.
+
+    Splits the drained batch into per-kind groups and runs each group
+    in its OWN short transaction. The append-only group (decisions /
+    checks / events) commits cleanly because it has no read-before-
+    write contention with operational writers. The upsert groups
+    (consumption / cursor / signal_status) each get their own tx so a
+    lock-conflict on one does not poison the others.
+
+    Returns total entries successfully committed across all groups.
+    Failed entries are re-queued (subject to the buffer-cap drop).
+    """
+    async with _audit_lock:
+        if not _audit_buffer:
+            return 0
+        batch = _audit_buffer[:_AUDIT_FLUSH_BATCH_SIZE]
+        del _audit_buffer[:len(batch)]
+    batch.sort(key=lambda entry: (_AUDIT_KIND_PRIORITY.get(entry.kind, 99), entry.created_at))
+
+    # Group by kind once.
+    decisions: list[dict[str, Any]] = []
+    decision_checks: list[dict[str, Any]] = []
+    trader_events: list[dict[str, Any]] = []
+    consumptions: list[_AuditEntry] = []
+    cursors: list[_AuditEntry] = []
+    signal_statuses: list[_AuditEntry] = []
+    experiment_assignments: list[_AuditEntry] = []
+    for entry in batch:
+        if entry.kind == "decision":
+            decisions.append(entry.payload)
+        elif entry.kind == "decision_checks":
+            decision_checks.append(entry.payload)
+        elif entry.kind == "trader_event":
+            trader_events.append(entry.payload)
+        elif entry.kind == "consumption":
+            consumptions.append(entry)
+        elif entry.kind == "cursor":
+            cursors.append(entry)
+        elif entry.kind == "signal_status":
+            signal_statuses.append(entry)
+        elif entry.kind == "experiment_assignment":
+            experiment_assignments.append(entry)
+
+    succeeded_entries: list[_AuditEntry] = []
+    failed_entries: list[_AuditEntry] = []
+    group_failures: list[tuple[str, BaseException]] = []
+
+    # Group 1: append-only (decision / checks / event). One transaction.
+    # No read-before-write so no contention with operational writers.
+    append_only_count = len(decisions) + len(decision_checks) + len(trader_events)
+    if append_only_count > 0:
+        async def _append_only_body(session: Any) -> None:
+            await _flush_decisions_bulk(session, decisions)
+            await _flush_decision_checks_bulk(session, decision_checks)
+            await _flush_trader_events_bulk(session, trader_events)
+        ok, _ins, _com, exc = await _audit_run_group("append_only", _append_only_body)
+        if ok:
+            for entry in batch:
+                if entry.kind in ("decision", "decision_checks", "trader_event"):
+                    succeeded_entries.append(entry)
+        else:
+            for entry in batch:
+                if entry.kind in ("decision", "decision_checks", "trader_event"):
+                    failed_entries.append(entry)
+            group_failures.append(("append_only", exc))
+
+    # Group 2: consumption upserts. Own short tx — failure here will not
+    # roll back the append-only group above. This is the primary
+    # contention point with the orchestrator (both writers touching the
+    # same trader_signal_consumption rows for the same signal_ids).
+    if consumptions:
+        async def _consumption_body(session: Any) -> None:
+            for entry in consumptions:
+                await _flush_consumption(session, entry.payload)
+        ok, _ins, _com, exc = await _audit_run_group("consumption", _consumption_body)
+        (succeeded_entries if ok else failed_entries).extend(consumptions)
+        if not ok:
+            group_failures.append(("consumption", exc))
+
+    # Group 3: cursor upserts. Own short tx — same rationale.
+    if cursors:
+        async def _cursor_body(session: Any) -> None:
+            for entry in cursors:
+                await _flush_cursor(session, entry.payload)
+        ok, _ins, _com, exc = await _audit_run_group("cursor", _cursor_body)
+        (succeeded_entries if ok else failed_entries).extend(cursors)
+        if not ok:
+            group_failures.append(("cursor", exc))
+
+    # Group 4: signal_status updates. Own short tx.
+    if signal_statuses:
+        async def _signal_status_body(session: Any) -> None:
+            for entry in signal_statuses:
+                await _flush_signal_status(session, entry.payload)
+        ok, _ins, _com, exc = await _audit_run_group("signal_status", _signal_status_body)
+        (succeeded_entries if ok else failed_entries).extend(signal_statuses)
+        if not ok:
+            group_failures.append(("signal_status", exc))
+
+    # Group 5: experiment_assignment. Own short tx.
+    if experiment_assignments:
+        async def _experiment_body(session: Any) -> None:
+            for entry in experiment_assignments:
+                await _flush_experiment_assignment(session, entry.payload)
+        ok, _ins, _com, exc = await _audit_run_group("experiment_assignment", _experiment_body)
+        (succeeded_entries if ok else failed_entries).extend(experiment_assignments)
+        if not ok:
+            group_failures.append(("experiment_assignment", exc))
+
+    # Re-queue only the failed entries; the rest persisted successfully.
+    if failed_entries:
         async with _audit_lock:
             headroom = _AUDIT_BUFFER_MAX_SIZE - len(_audit_buffer)
             if headroom > 0:
-                preserved_batch = batch[:headroom]
-                _audit_buffer[:0] = preserved_batch
-                dropped = len(batch) - len(preserved_batch)
+                preserved = failed_entries[:headroom]
+                _audit_buffer[:0] = preserved
+                dropped = len(failed_entries) - len(preserved)
             else:
-                dropped = len(batch)
-        # Breakdown by kind so we can see *which* table the failing batch
-        # was writing to (decision/checks/event/etc) — useful for finding
-        # which writer is contending with audit.
+                dropped = len(failed_entries)
         kind_counts: dict[str, int] = {}
-        for entry in batch:
+        for entry in failed_entries:
             kind_counts[entry.kind] = kind_counts.get(entry.kind, 0) + 1
+        # Surface which group(s) failed so we can target the contention
+        # source on the next failure (e.g. consumption persistently
+        # failing => orchestrator owns trader_signal_consumption locks
+        # and audit needs a different write strategy).
+        failure_groups = [name for name, _ in group_failures]
+        first_exc = group_failures[0][1] if group_failures else None
         if dropped > 0:
             logger.warning(
-                "Audit batch commit failed; buffer at cap, dropped entries",
-                count=len(batch),
+                "Audit groups failed; buffer at cap, dropped entries",
+                failed_count=len(failed_entries),
+                succeeded_count=len(succeeded_entries),
                 dropped=dropped,
                 buffer_size=len(_audit_buffer),
                 kind_counts=kind_counts,
-                insert_seconds=round(insert_seconds, 3),
-                commit_seconds=round(commit_seconds, 3),
-                exc_info=exc,
+                failed_groups=failure_groups,
+                exc_info=first_exc,
             )
         else:
             logger.warning(
-                "Audit batch commit failed, re-queuing",
-                count=len(batch),
+                "Audit groups failed, re-queuing",
+                failed_count=len(failed_entries),
+                succeeded_count=len(succeeded_entries),
                 kind_counts=kind_counts,
-                insert_seconds=round(insert_seconds, 3),
-                commit_seconds=round(commit_seconds, 3),
-                exc_info=exc,
+                failed_groups=failure_groups,
+                exc_info=first_exc,
             )
-        return 0
-    return len(batch)
+    return len(succeeded_entries)
 
 
 async def _flush_decision(session: AsyncSession, p: dict[str, Any]) -> None:
