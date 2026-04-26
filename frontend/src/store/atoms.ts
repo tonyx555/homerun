@@ -61,3 +61,12 @@ export const selectedLivePlatformAtom = atom((get) => {
 // AI Chat shared session state
 export const activeChatSessionIdAtom = atomWithStorage<string | null>('activeChatSessionId', null)
 export const aiTabSubtabAtom = atomWithStorage<'chat' | 'agents' | 'tools' | 'providers' | 'models' | 'activity'>('aiTabSubtab', 'chat')
+
+// Bot config flyout draft text inputs.
+// Owned by the flyout inputs themselves so typing doesn't re-render the
+// full TradingPanel — only the (memoized) flyout subscribes via useAtomValue.
+// TradingPanel writes via useSetAtom (no subscription) and reads inside
+// mutation closures via useStore().get() (also non-reactive).
+export const draftNameAtom = atom<string>('')
+export const draftDescriptionAtom = atom<string>('')
+export const draftIntervalAtom = atom<string>('60')

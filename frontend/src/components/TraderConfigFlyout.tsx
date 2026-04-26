@@ -1,6 +1,9 @@
 import { memo } from 'react'
+import { useAtomValue } from 'jotai'
 import { AlertTriangle, Clock3, Sparkles, Zap } from 'lucide-react'
 import type { Trader, TraderLatencyClass } from '../services/apiTraders'
+import { draftDescriptionAtom, draftNameAtom } from '../store/atoms'
+import { AtomInput } from './AtomInput'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Input } from './ui/input'
@@ -38,11 +41,10 @@ export type TraderConfigFlyoutProps = {
   saveError: string | null
 
   // Bot Profile
+  // draftName / draftDescription are NOT props — the inputs subscribe to
+  // jotai atoms (draftNameAtom / draftDescriptionAtom) directly so typing
+  // doesn't cascade into a parent re-render.
   draftMode: 'shadow' | 'live'
-  draftName: string
-  setDraftName: (value: string) => void
-  draftDescription: string
-  setDraftDescription: (value: string) => void
   draftLatencyClass: TraderLatencyClass
   setDraftLatencyClass: (value: TraderLatencyClass) => void
 
@@ -107,10 +109,6 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
     busy,
     saveError,
     draftMode,
-    draftName,
-    setDraftName,
-    draftDescription,
-    setDraftDescription,
     draftLatencyClass,
     setDraftLatencyClass,
     draftCopyFromMode,
@@ -161,6 +159,9 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
     if (selectedVersion != null && !rows.includes(selectedVersion)) rows.unshift(selectedVersion)
     return rows
   })()
+  // Subscribe here (only the flyout re-renders on draftName changes) so the
+  // Save button's "name is required" check stays reactive.
+  const draftNameValue = useAtomValue(draftNameAtom)
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -200,12 +201,12 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
 
                 <div>
                   <Label>Name</Label>
-                  <Input value={draftName} onChange={(event) => setDraftName(event.target.value)} className="mt-1" />
+                  <AtomInput atom={draftNameAtom} className="mt-1" />
                 </div>
 
                 <div>
                   <Label>Description</Label>
-                  <Input value={draftDescription} onChange={(event) => setDraftDescription(event.target.value)} className="mt-1" />
+                  <AtomInput atom={draftDescriptionAtom} className="mt-1" />
                 </div>
 
                 <div>
@@ -681,7 +682,7 @@ function TraderConfigFlyoutImpl(props: TraderConfigFlyoutProps) {
               }}
               disabled={
                 busy ||
-                !draftName.trim() ||
+                !draftNameValue.trim() ||
                 (mode === 'create' && !draftCopyFromTraderId && !effectiveDraftSourceKey)
               }
             >

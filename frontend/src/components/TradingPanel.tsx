@@ -2,7 +2,7 @@ import { Fragment, lazy, Suspense, type ReactNode, useEffect, useMemo, useRef, u
 import { createPortal } from 'react-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useAtom, useAtomValue } from 'jotai'
+import { useAtom, useAtomValue, useSetAtom, useStore } from 'jotai'
 import { Liveline } from 'liveline'
 import type { LivelinePoint, LivelineSeries } from 'liveline'
 import {
@@ -82,7 +82,7 @@ import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
 import { cn } from '../lib/utils'
 import { getTraderOrderPlatformLinks } from '../lib/marketUrls'
-import { accountModeAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
+import { accountModeAtom, draftDescriptionAtom, draftIntervalAtom, draftNameAtom, selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { Card } from './ui/card'
@@ -5372,12 +5372,17 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
 
   const [traderFlyoutOpen, setTraderFlyoutOpen] = useState(false)
   const [traderFlyoutMode, setTraderFlyoutMode] = useState<'create' | 'edit'>('create')
-  const [draftName, setDraftName] = useState('')
-  const [draftDescription, setDraftDescription] = useState('')
+  // draftName / draftDescription / draftInterval live in jotai atoms so typing
+  // into their inputs only re-renders the (memoized) flyout, not TradingPanel.
+  // We touch them here only via useSetAtom (writes; no subscription) and
+  // useStore().get() inside mutation closures (reads; non-reactive).
+  const atomStore = useStore()
+  const setDraftName = useSetAtom(draftNameAtom)
+  const setDraftDescription = useSetAtom(draftDescriptionAtom)
+  const setDraftInterval = useSetAtom(draftIntervalAtom)
   const [draftStrategyKey, setDraftStrategyKey] = useState<string>(DEFAULT_STRATEGY_KEY)
   const [draftStrategyVersion, setDraftStrategyVersion] = useState<number | null>(null)
   const [draftStrategyParams, setDraftStrategyParams] = useState<Record<string, unknown>>({})
-  const [draftInterval, setDraftInterval] = useState('60')
   const [draftRisk, setDraftRisk] = useState('{}')
   const [draftMetadata, setDraftMetadata] = useState('{}')
   const [draftMode, setDraftMode] = useState<'shadow' | 'live'>('shadow')
@@ -7156,11 +7161,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       validateDraftSourceConfigs(sourceConfigs)
 
       const payload: Record<string, unknown> = {
-        name: draftName.trim(),
-        description: draftDescription.trim() || null,
+        name: atomStore.get(draftNameAtom).trim(),
+        description: atomStore.get(draftDescriptionAtom).trim() || null,
         mode: draftMode,
         latency_class: draftLatencyClass,
-        interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
+        interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
@@ -7175,7 +7180,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       return createTrader(payload)
     },
     onMutate: () => {
-      const previewName = draftName.trim() || 'Creating bot...'
+      const previewName = atomStore.get(draftNameAtom).trim() || 'Creating bot...'
       setCreatingTraderPreview({
         name: previewName,
         mode: draftMode,
@@ -7214,11 +7219,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       validateDraftSourceConfigs(sourceConfigs)
 
       return updateTrader(traderId, {
-        name: draftName.trim(),
-        description: draftDescription.trim() || null,
+        name: atomStore.get(draftNameAtom).trim(),
+        description: atomStore.get(draftDescriptionAtom).trim() || null,
         mode: draftMode,
         latency_class: draftLatencyClass,
-        interval_seconds: Math.max(1, Math.trunc(toNumber(draftInterval || 60))),
+        interval_seconds: Math.max(1, Math.trunc(toNumber(atomStore.get(draftIntervalAtom) || 60))),
         source_configs: sourceConfigs,
         risk_limits: parsedRisk.value,
         metadata: parsedMetadata.value,
@@ -12634,10 +12639,6 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         busy={traderFlyoutBusy}
         saveError={saveError}
         draftMode={draftMode}
-        draftName={draftName}
-        setDraftName={setDraftName}
-        draftDescription={draftDescription}
-        setDraftDescription={setDraftDescription}
         draftLatencyClass={draftLatencyClass}
         setDraftLatencyClass={setDraftLatencyClass}
         draftCopyFromMode={draftCopyFromMode}
