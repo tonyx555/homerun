@@ -9839,6 +9839,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     )
   }
 
+  // Cache the rendered <TableRow> trees so typing in the flyout (or any
+  // unrelated parent re-render) doesn't re-build the entire trade table JSX.
+  // Visible row content comes from each displayRow; outer-scope handlers
+  // (openTradeMarketModal etc.) only fire on click, so closure freshness
+  // isn't a concern. The dep arrays are intentionally narrow.
+  const allTradeRowsRendered = useMemo(
+    () => filteredAllTradeHistory.map((row) => renderTradeDisplayRow(row, true)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filteredAllTradeHistory],
+  )
+  const selectedTradeRowsRendered = useMemo(
+    () => selectedTradeRows.map((row) => renderTradeDisplayRow(row, false)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [selectedTradeRows],
+  )
+
   const shellLoading = overviewQuery.isLoading || tradersQuery.isLoading
 
   if (shellLoading) {
@@ -10645,7 +10661,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                             <div className="flex-1 min-h-0 overflow-auto" ref={tradesTableParentRef}>
                               <Table className="w-full table-fixed">
                                 <TableBody>
-                                {filteredAllTradeHistory.map((row) => renderTradeDisplayRow(row, true))}
+                                {allTradeRowsRendered}
                                 </TableBody>
                             </Table>
                             </div>
@@ -11246,7 +11262,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                               </TableRow>
                             </TableHeader>
                             <TableBody>
-                              {selectedTradeRows.map((row) => renderTradeDisplayRow(row, false))}
+                              {selectedTradeRowsRendered}
                             </TableBody>
                           </Table>
                         </div>
