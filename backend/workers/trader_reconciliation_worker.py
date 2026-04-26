@@ -14,6 +14,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm.exc import StaleDataError
 
 from models.database import AsyncSessionLocal, init_database, recover_pool
+from services.session_gate import session_gate
 from services.event_bus import event_bus
 from services.opportunity_strategy_catalog import ensure_all_strategies_seeded
 from services.strategy_runtime import refresh_strategy_runtime_if_needed
@@ -278,6 +279,29 @@ async def _sync_live_wallet_monitor_source(current_wallet: str) -> str:
 
 
 async def _reconcile_live_state_for_trader(
+    trader: dict[str, Any],
+    *,
+    provider_pass: bool,
+    control_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    # Per-task connection budget. The reconcile path opens up to 4
+    # sessions per trader (provider, open-order count, lifecycle,
+    # inventory). With N concurrent reconciliations across the bot
+    # fleet this could in principle hold 4N pool slots. A limit of 8
+    # gives generous headroom for the current 6-bot workload while
+    # bounding the worst case under future scale or accidental
+    # over-parallelism (e.g. a future change adds an extra concurrent
+    # session per trader). Tasks beyond the limit queue at the gate
+    # rather than starving the main pool.
+    async with session_gate("trader_reconciliation", limit=8):
+        return await _reconcile_live_state_for_trader_inner(
+            trader,
+            provider_pass=provider_pass,
+            control_settings=control_settings,
+        )
+
+
+async def _reconcile_live_state_for_trader_inner(
     trader: dict[str, Any],
     *,
     provider_pass: bool,
