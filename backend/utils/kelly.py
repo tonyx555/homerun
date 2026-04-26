@@ -49,21 +49,41 @@ def kelly_size(
     return min(size, max_size)
 
 
-def polymarket_taker_fee(p: float, fee_rate: float = 0.0625) -> float:
-    """Polymarket taker fee for a contract at price p.
+def polymarket_taker_fee(p: float, fee_rate: float | None = None) -> float:
+    """Polymarket taker fee for one contract at price ``p`` (USD per share).
 
-    Fee = p * (1-p) * fee_rate
-    Maximum at p=0.50 (~1.56%), minimum at extremes.
-    Makers pay zero fees.
+    Polymarket's published taker schedule is a *quadratic* curve, not the
+    linear ``p*(1-p)*rate`` shape this function used to return. The two
+    happen to coincide at ``p=0.50`` (~1.56% of price) but diverge at the
+    tails — the old shape over-charged at p=0.30 by ~4× and at p=0.10 by
+    >20×, which made fee-aware strategies refuse profitable trades.
+
+    Per Polymarket docs:
+        fee_per_share = p * 0.25 * (p * (1 - p))**2
+
+    The maximum fee as a fraction of price is ~1.56% at p=0.50; at p=0.10
+    or p=0.90 it falls to ~0.20%. Makers pay zero.
 
     Args:
-        p: Contract price (0 to 1)
-        fee_rate: Fee rate (default 0.0625 = 6.25 bps quadratic)
+        p: Contract price in [0, 1].
+        fee_rate: Accepted for backward compat and ignored. The Polymarket
+            schedule is fixed; callers that want a different platform's fee
+            should use the relevant helper (e.g. ``kalshi_taker_fee``).
 
     Returns:
-        Fee per contract in USD
+        Fee per share in USD.
     """
-    return p * (1.0 - p) * fee_rate
+    del fee_rate  # legacy parameter, no longer used
+    p_clamped = max(0.0, min(1.0, float(p or 0.0)))
+    return p_clamped * 0.25 * (p_clamped * (1.0 - p_clamped)) ** 2
+
+
+def polymarket_taker_fee_pct(p: float) -> float:
+    """Polymarket taker fee as a fraction of contract price (0.0 – 0.0156)."""
+    p_value = float(p or 0.0)
+    if p_value <= 0.0:
+        return 0.0
+    return polymarket_taker_fee(p_value) / p_value
 
 
 def kalshi_taker_fee(p: float, contracts: int = 1, fee_rate: float = 0.07) -> float:
