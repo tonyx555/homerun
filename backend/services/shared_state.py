@@ -14,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from threading import Lock
 from typing import Any, Optional
 
-from sqlalchemy import func, or_, select, text, update
+from sqlalchemy import Text, cast, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -559,18 +559,30 @@ async def _fetch_market_catalog_metadata(session: AsyncSession) -> dict[str, Any
 
 async def _fetch_market_catalog_full(
     session: AsyncSession,
-) -> tuple[list[Any], list[Any], dict[str, Any]]:
-    """Fetch the full row (both events_json and markets_json + metadata)."""
+) -> tuple[str, str, dict[str, Any]]:
+    """Fetch the catalog row with the heavy JSON columns as raw text.
+
+    asyncpg decodes ``json`` columns by calling ``json.loads`` on the
+    event loop the moment the row is received.  For the ``markets_json``
+    blob (tens of MB) that is hundreds of ms of pure-Python parse on
+    the hot path — long enough to starve WS heartbeats and tear
+    asyncpg cursors mid-flight (``cannot switch to state X``).  Casting
+    to ``text`` keeps the bytes opaque on transfer; the actual
+    ``json.loads`` then runs in ``_deserialize_payload`` (already
+    wrapped in ``asyncio.to_thread``).
+    """
     from models.database import MarketCatalog
 
+    events_text_col = cast(MarketCatalog.events_json, Text).label("events_json_text")
+    markets_text_col = cast(MarketCatalog.markets_json, Text).label("markets_json_text")
     stmt = select(
         MarketCatalog.updated_at,
         MarketCatalog.event_count,
         MarketCatalog.market_count,
         MarketCatalog.fetch_duration_seconds,
         MarketCatalog.error,
-        MarketCatalog.events_json,
-        MarketCatalog.markets_json,
+        events_text_col,
+        markets_text_col,
     ).where(MarketCatalog.id == CATALOG_ID)
     # The JSON columns can be tens of megabytes; extend the timeout
     # so this query isn't killed by the default global 60s.
@@ -582,12 +594,10 @@ async def _fetch_market_catalog_full(
     except Exception:
         pass
     if row is None:
-        return [], [], {"updated_at": None, "error": None}
+        return "", "", {"updated_at": None, "error": None}
     rm = row._mapping
-    events_raw = rm.get("events_json")
-    markets_raw = rm.get("markets_json")
-    events_payload = list(events_raw) if isinstance(events_raw, list) else []
-    markets_payload = list(markets_raw) if isinstance(markets_raw, list) else []
+    events_text_value = rm.get("events_json_text") or ""
+    markets_text_value = rm.get("markets_json_text") or ""
     metadata = {
         "updated_at": rm.get("updated_at"),
         "event_count": rm.get("event_count"),
@@ -595,7 +605,7 @@ async def _fetch_market_catalog_full(
         "fetch_duration_seconds": rm.get("fetch_duration_seconds"),
         "error": rm.get("error"),
     }
-    return events_payload, markets_payload, metadata
+    return events_text_value, markets_text_value, metadata
 
 
 async def read_market_catalog(
@@ -636,30 +646,46 @@ async def read_market_catalog(
                 and (time.monotonic() - loaded_at) < _MARKET_CATALOG_CACHE_TTL_SECONDS
             )
             if not fresh:
-                events_payload, markets_payload, metadata = await _fetch_market_catalog_full(session)
-                cache["events_payload"] = events_payload
-                cache["markets_payload"] = markets_payload
+                events_text, markets_text, metadata = await _fetch_market_catalog_full(session)
+                cache["events_text"] = events_text
+                cache["markets_text"] = markets_text
                 cache["metadata"] = metadata
                 cache["loaded_at_mono"] = time.monotonic()
 
-    cached_events_payload: list[Any] = list(cache.get("events_payload") or []) if include_events else []
-    cached_markets_payload: list[Any] = list(cache.get("markets_payload") or []) if include_markets else []
+    cached_events_text: str = cache.get("events_text") or "" if include_events else ""
+    cached_markets_text: str = cache.get("markets_text") or "" if include_markets else ""
     metadata = dict(cache.get("metadata") or {"updated_at": None, "error": None})
 
+    import json as _json
+
+    def _decode_text(text_value: str) -> list[Any]:
+        if not text_value:
+            return []
+        try:
+            decoded = _json.loads(text_value)
+        except Exception:
+            return []
+        return decoded if isinstance(decoded, list) else []
+
     if not validate:
-        return cached_events_payload, cached_markets_payload, metadata
+        def _decode_only() -> tuple[list, list]:
+            return _decode_text(cached_events_text), _decode_text(cached_markets_text)
+
+        async with release_conn(session):
+            events_only, markets_only = await asyncio.to_thread(_decode_only)
+        return events_only, markets_only, metadata
 
     def _deserialize_payload() -> tuple[list, list]:
         events: list[Any] = []
         if include_events:
-            for d in cached_events_payload:
+            for d in _decode_text(cached_events_text):
                 try:
                     events.append(Event.model_validate(d))
                 except Exception:
                     pass
         markets: list[Any] = []
         if include_markets:
-            for d in cached_markets_payload:
+            for d in _decode_text(cached_markets_text):
                 try:
                     markets.append(Market.model_validate(d))
                 except Exception:
