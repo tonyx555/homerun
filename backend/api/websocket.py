@@ -860,6 +860,55 @@ async def broadcast_wallet_trade(trade):
     await manager.broadcast({"type": "wallet_trade", "data": trade})
 
 
+async def broadcast_wallet_ws_event(event) -> None:
+    """Push a wallet_ws_monitor trade event to subscribed clients.
+
+    Fires for both on-chain confirmations (``confirmed=True``,
+    ``source="onchain"``) and the RTDS fast-path preliminary detections
+    (``confirmed=False``, ``source="rtds"``). Frontend consumers should
+    dedupe by ``tx_hash``: render preliminary events optimistically,
+    then upgrade to confirmed when the on-chain version arrives.
+
+    Topic ``wallet_trades`` so subscribers can opt in via
+    ``{action: "subscribe_topics", topics: ["wallet_trades"]}``.
+    """
+    try:
+        token_id = getattr(event, "token_id", None) or ""
+        detected_at = getattr(event, "detected_at", None)
+        block_dt = getattr(event, "timestamp", None)
+        payload = {
+            "wallet_address": getattr(event, "wallet_address", "") or "",
+            "token_id": token_id,
+            "side": getattr(event, "side", "") or "",
+            "size": float(getattr(event, "size", 0.0) or 0.0),
+            "price": float(getattr(event, "price", 0.0) or 0.0),
+            "tx_hash": getattr(event, "tx_hash", "") or "",
+            "order_hash": getattr(event, "order_hash", "") or "",
+            "log_index": int(getattr(event, "log_index", 0) or 0),
+            "block_number": int(getattr(event, "block_number", 0) or 0),
+            "latency_ms": float(getattr(event, "latency_ms", 0.0) or 0.0),
+            "detected_at_ms": (
+                int(detected_at.timestamp() * 1000)
+                if detected_at is not None
+                else None
+            ),
+            "trade_at_ms": (
+                int(block_dt.timestamp() * 1000)
+                if block_dt is not None
+                else None
+            ),
+            "confirmed": bool(getattr(event, "confirmed", True)),
+            "source": str(getattr(event, "source", "onchain") or "onchain"),
+        }
+    except Exception:
+        # Never let a serialization edge case break the on-chain emit
+        # path — that would silently lose trades.
+        return
+    await manager.broadcast(
+        {"type": "wallet_trade_event", "topic": "wallet_trades", "data": payload}
+    )
+
+
 async def broadcast_scanner_status(status):
     """Callback to broadcast scanner status changes"""
     await manager.broadcast({"type": "scanner_status", "topic": "opportunities.summary", "data": status})
@@ -923,3 +972,19 @@ async def broadcast_events_status(status: dict):
 # Register callbacks (scanner runs in worker process; no scanner callbacks here)
 # Frontend gets opportunities/status via polling or init; or add API polling->broadcast later
 wallet_tracker.add_callback(broadcast_wallet_trade)
+
+
+# Subscribe the wallet_ws_monitor (Polygon on-chain + Polymarket RTDS fast-
+# path) to push WalletTradeEvent instances to the frontend in real time.
+# Done in a try/except so a missing module doesn't take down the whole WS
+# layer at import time.
+try:
+    from services.wallet_ws_monitor import wallet_ws_monitor as _wallet_ws_monitor
+
+    _wallet_ws_monitor.add_callback(broadcast_wallet_ws_event)
+except Exception as _wallet_ws_register_err:  # pragma: no cover
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "Failed to register broadcast_wallet_ws_event callback: %s",
+        _wallet_ws_register_err,
+    )

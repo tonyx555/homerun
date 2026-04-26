@@ -24,6 +24,7 @@ import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import OpportunityEmptyState from './OpportunityEmptyState'
 import { themeAtom } from '../store/atoms'
+import { CryptoCycleChart } from './CryptoCycleChart'
 
 // ─── Constants ────────────────────────────────────────────
 
@@ -421,6 +422,10 @@ export function CryptoMarketCard({
   const lastLivelineDataRef = useRef<LivelinePoint[]>([])
   const [modalOpen, setModalOpen] = useState(false)
   const [chartMode, setChartMode] = useState<'line' | 'candle'>('line')
+  // Per-cycle synchronized view (oracle + UP/DOWN + tracked-wallet trade
+  // markers on one canvas). Off by default; enable via the toggle in the
+  // modal header. Frontend-only — backing data already exists.
+  const [cycleChartEnabled, setCycleChartEnabled] = useState(false)
   const closeModal = () => setModalOpen(false)
 
   useEffect(() => {
@@ -651,8 +656,36 @@ export function CryptoMarketCard({
           nowMs={nowMs}
         />
 
+        {/* Modal-only: per-cycle synchronized view toggle */}
+        {isModalView && (
+          <div className="flex items-center justify-end gap-2 -mb-1">
+            <button
+              type="button"
+              onClick={() => setCycleChartEnabled((v) => !v)}
+              className={cn(
+                'text-[10px] font-mono uppercase tracking-wider px-2 py-1 rounded border transition-colors',
+                cycleChartEnabled
+                  ? 'border-blue-500/40 bg-blue-500/10 text-blue-400'
+                  : 'border-border/40 bg-background/40 text-muted-foreground hover:text-foreground',
+              )}
+              title="Overlay UP/DOWN mids and tracked-wallet trade markers on the oracle line"
+            >
+              {cycleChartEnabled ? '✓ ' : ''}cycle view
+            </button>
+          </div>
+        )}
+
         {/* Oracle price sparkline chart */}
-        {isModalView ? (
+        {isModalView && cycleChartEnabled ? (
+          <div className={cn(
+            "relative w-full rounded-lg overflow-hidden border",
+            isDarkTheme
+              ? "border-slate-700/40"
+              : "border-slate-200/90",
+          )}>
+            <CryptoCycleChart market={market} theme={isDarkTheme ? 'dark' : 'light'} height={360} />
+          </div>
+        ) : isModalView ? (
           <div className={cn(
             "relative h-56 w-full rounded-lg overflow-hidden border flex flex-col",
             isDarkTheme
