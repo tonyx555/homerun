@@ -8757,11 +8757,17 @@ async def reconcile_live_positions(
                             )
                     except Exception as exc:
                         _apply_failed_exit_state(exit_record, error=exc, now=now, retry_count=1)
+                        # Always include the exception class name so empty-str
+                        # exceptions (e.g. ``Exception()``) don't trail off as
+                        # "trigger=...: " with nothing after the colon, and
+                        # attach exc_info so the traceback survives.
                         logger.warning(
-                            "Exit order exception for order=%s trigger=%s: %s",
+                            "Exit order exception for order=%s trigger=%s: %s: %s",
                             row.id,
                             close_trigger,
-                            exc,
+                            type(exc).__name__,
+                            str(exc) or "<no message>",
+                            exc_info=exc,
                         )
                 else:
                     exit_record["status"] = "failed"
