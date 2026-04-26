@@ -14,7 +14,7 @@ from config import settings
 from models.database import AsyncSessionLocal, TradeSignal, TradeSignalEmission
 from models.opportunity import Opportunity
 from services.event_bus import event_bus
-from services.live_pressure import db_pressure_remaining_seconds, is_db_pressure_active, maybe_mark_db_pressure
+from services.live_pressure import db_pressure_remaining_seconds, is_db_pressure_active, maybe_mark_db_pressure, publish_backpressure
 from services.runtime_signal_queue import publish_signal_batch
 from services.signal_bus import (
     SIGNAL_ACTIVE_STATUSES as BUS_SIGNAL_ACTIVE_STATUSES,
@@ -2141,6 +2141,25 @@ class IntentRuntime:
     async def _run_projection_loop(self) -> None:
         while True:
             payload = await self._projection_queue.get()
+            # Publish queue saturation as backpressure so producers can
+            # voluntarily slow down before the queue fills (5000 cap).
+            # We compute the level here rather than on every put because
+            # the projection loop is the single drainer — saturation is
+            # bounded by what we can pull through, so this is the right
+            # spot to observe it. Curve: 0% at <50% full, ramps to 100%
+            # at full so producers feel pressure as the queue grows.
+            qsize = self._projection_queue.qsize()
+            qmax = max(1, self._projection_queue.maxsize)
+            qpct = qsize / qmax
+            if qpct < 0.5:
+                publish_backpressure("intent_runtime_queue", level=0.0)
+            else:
+                bp_level = (qpct - 0.5) / 0.5  # 0.0 at 50%, 1.0 at 100%
+                publish_backpressure(
+                    "intent_runtime_queue",
+                    level=bp_level,
+                    reason=f"queue@{qpct:.0%}({qsize}/{qmax})",
+                )
             try:
                 kind = str(payload.get("kind") or "").strip().lower()
                 if kind == "status":

@@ -36,7 +36,11 @@ from sqlalchemy.exc import DBAPIError
 from models.database import AsyncSessionLocal, FastAsyncSessionLocal, Trader, TraderSignalCursor
 from services.event_bus import event_bus
 from services.intent_runtime import get_intent_runtime
-from services.live_pressure import is_db_pressure_active
+from services.live_pressure import (
+    backpressure_extra_sleep_seconds,
+    current_backpressure_level,
+    is_db_pressure_active,
+)
 from services.strategy_loader import strategy_loader
 import services.trader_hot_state as hot_state
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
@@ -172,6 +176,19 @@ class _FastTraderTask:
                 break
             if not self._trader.get("is_enabled", True) or self._trader.get("is_paused", False):
                 continue
+            # Voluntary backpressure: when the system is approaching
+            # saturation (intent_runtime queue >50% full, future
+            # observers add their signals too) extend the cycle interval
+            # so we don't pile additional load onto an overloaded DB.
+            # Curve in backpressure_extra_sleep_seconds: 0 below 40%,
+            # ramps to 3× the base interval at 100%. For a fast trader
+            # on the 0.25s wake-poll, this caps the extra sleep at
+            # 0.75s — still snappy under contention.
+            extra_sleep = backpressure_extra_sleep_seconds(_POLL_FALLBACK_SECONDS)
+            if extra_sleep > 0:
+                await asyncio.sleep(extra_sleep)
+                if self._stopped:
+                    break
             cycle_started_at = time.monotonic()
             self._last_cycle_started_at = cycle_started_at
             try:
