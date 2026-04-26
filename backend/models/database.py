@@ -4248,6 +4248,81 @@ async def _reap_stale_checkouts() -> None:
     return reaped
 
 
+async def _observe_lock_contention() -> int:
+    """Probe pg_stat_activity for queries blocked >2s on row locks.
+
+    Returns the count of blocked queries observed. Logs each one at
+    WARNING with the blocking PID(s) and the query snippets so we can
+    see contention BEFORE it cascades into a worker-task timeout. Pure
+    diagnostic — never kills anything (the zombie sweeper handles
+    actually-stuck backends).
+
+    Uses a short-lived raw asyncpg connection separate from the
+    SQLAlchemy pool so this observer can never compete with the work
+    it's trying to observe.
+    """
+    try:
+        import asyncpg
+        dsn = str(settings.DATABASE_URL).replace("+asyncpg", "")
+        probe_conn = await asyncio.wait_for(asyncpg.connect(dsn=dsn, timeout=3), timeout=4)
+    except Exception as exc:
+        _db_logger.debug("Lock observer probe connect failed: %s", exc)
+        return 0
+    try:
+        rows = await asyncio.wait_for(
+            probe_conn.fetch(
+                """
+                SELECT
+                    pid,
+                    application_name,
+                    EXTRACT(EPOCH FROM now() - xact_start)::int AS age_s,
+                    wait_event_type,
+                    wait_event,
+                    LEFT(query, 200) AS q,
+                    pg_blocking_pids(pid) AS blocked_by
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND state = 'active'
+                  AND wait_event_type = 'Lock'
+                  AND xact_start < now() - interval '2 seconds'
+                ORDER BY age_s DESC
+                LIMIT 20
+                """,
+            ),
+            timeout=4,
+        )
+    except Exception as exc:
+        _db_logger.debug("Lock observer query failed: %s", exc)
+        try:
+            await probe_conn.close()
+        except Exception:
+            pass
+        return 0
+    finally:
+        try:
+            await probe_conn.close()
+        except Exception:
+            pass
+    if not rows:
+        return 0
+    # Surface contention loudly. The format is structured-friendly so
+    # downstream log parsing can extract the blocking_pid and the
+    # blocked-by chain.
+    for row in rows:
+        blocked_by = list(row["blocked_by"] or [])
+        _db_logger.warning(
+            "LOCK CONTENTION blocked_pid=%d age=%ds blocked_by=%s wait=%s/%s app=%s query=%r",
+            int(row["pid"]),
+            int(row["age_s"] or 0),
+            blocked_by,
+            row["wait_event_type"],
+            row["wait_event"],
+            (row["application_name"] or "?"),
+            row["q"] or "",
+        )
+    return len(rows)
+
+
 async def _sweep_zombie_backends() -> int:
     """Terminate Postgres backends stuck in active Client/ClientRead.
 
@@ -4340,6 +4415,21 @@ async def _pool_watchdog_loop() -> None:
                     )
             except Exception as sweep_exc:
                 _db_logger.debug("Zombie sweeper error (non-fatal): %s", sweep_exc)
+
+            # Phase 1c: pure-observability lock-contention probe. Logs
+            # any query that has been waiting on a row lock for >2s,
+            # plus the blocking PID(s). Lets us SEE contention before
+            # it cascades into a worker-task timeout — useful both in
+            # production logs and for post-incident diagnosis.
+            try:
+                contended = await _observe_lock_contention()
+                if contended:
+                    _db_logger.warning(
+                        "LOCK OBSERVER: %d blocked-on-lock queries this scan",
+                        contended,
+                    )
+            except Exception as obs_exc:
+                _db_logger.debug("Lock observer error (non-fatal): %s", obs_exc)
 
             # Phase 2: check pool utilization
             stats = _get_pool_stats()
