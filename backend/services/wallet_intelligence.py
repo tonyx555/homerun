@@ -158,110 +158,120 @@ class ConfluenceDetector:
             return await self.get_active_signals()
 
         # -- Phase 2: group events and build candidate list (pure Python) --
-        grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
-        for event in events:
-            side = self._normalize_side(event.get("side"))
-            if side not in ("BUY", "SELL"):
-                continue
-            market_id = str(event.get("market_id") or "")
-            if not market_id:
-                continue
-            key = (market_id, side)
-            grouped.setdefault(key, []).append(event)
+        # Pure Python over potentially thousands of events, with
+        # nested per-event dict lookups against ``wallet_map``.  When
+        # the activity rollup is busy (which is exactly when this scan
+        # matters), this runs into multi-second territory and blocks
+        # the asyncio loop.  Run in a thread so concurrent IO tasks
+        # (Polymarket WS heartbeats, asyncpg socket reads, fast trader
+        # cycles) keep making progress.
+        def _build_candidates() -> list[dict]:
+            grouped: dict[tuple[str, str], list[dict[str, object]]] = {}
+            for event in events:
+                side_inner = self._normalize_side(event.get("side"))
+                if side_inner not in ("BUY", "SELL"):
+                    continue
+                market_id_inner = str(event.get("market_id") or "")
+                if not market_id_inner:
+                    continue
+                key_inner = (market_id_inner, side_inner)
+                grouped.setdefault(key_inner, []).append(event)
 
-        # Pre-compute per-market-side stats, filtering by wallet count early.
-        candidates: list[dict] = []
-        for (market_id, side), side_events in grouped.items():
-            unique_wallets = {
-                str(event.get("wallet_address") or "").strip().lower()
-                for event in side_events
-                if str(event.get("wallet_address") or "").strip()
-            }
-            if len(unique_wallets) < self.MIN_WALLETS_WATCH:
-                continue
+            built: list[dict] = []
+            for (market_id, side), side_events in grouped.items():
+                unique_wallets = {
+                    str(event.get("wallet_address") or "").strip().lower()
+                    for event in side_events
+                    if str(event.get("wallet_address") or "").strip()
+                }
+                if len(unique_wallets) < self.MIN_WALLETS_WATCH:
+                    continue
 
-            cluster_groups: dict[str, set[str]] = {}
-            unclustered = 0
-            for addr in unique_wallets:
-                cluster_id = wallet_map.get(addr, {}).get("cluster_id")
-                if cluster_id:
-                    cluster_groups.setdefault(cluster_id, set()).add(addr)
-                else:
-                    unclustered += 1
-            cluster_adjusted = len(cluster_groups) + unclustered
-            if cluster_adjusted < self.MIN_WALLETS_WATCH:
-                continue
+                cluster_groups: dict[str, set[str]] = {}
+                unclustered = 0
+                for addr in unique_wallets:
+                    cluster_id = wallet_map.get(addr, {}).get("cluster_id")
+                    if cluster_id:
+                        cluster_groups.setdefault(cluster_id, set()).add(addr)
+                    else:
+                        unclustered += 1
+                cluster_adjusted = len(cluster_groups) + unclustered
+                if cluster_adjusted < self.MIN_WALLETS_WATCH:
+                    continue
 
-            window_events = [
-                event
-                for event in side_events
-                if isinstance(event.get("traded_at"), datetime) and event["traded_at"] >= cutoff_15m
-            ]
-            window_minutes = 15 if window_events else 60
-            active_events = window_events or side_events
+                window_events = [
+                    event
+                    for event in side_events
+                    if isinstance(event.get("traded_at"), datetime) and event["traded_at"] >= cutoff_15m
+                ]
+                window_minutes = 15 if window_events else 60
+                active_events = window_events or side_events
 
-            wallets_sorted = sorted(unique_wallets)
-            avg_rank = 0.0
-            weighted_wallet_score = 0.0
-            anomaly_avg = 0.0
-            core_wallets = 0
-            if wallets_sorted:
-                rank_vals = [wallet_map.get(w, {}).get("rank_score", 0.0) for w in wallets_sorted]
-                comp_vals = [wallet_map.get(w, {}).get("composite_score", 0.0) for w in wallets_sorted]
-                an_vals = [wallet_map.get(w, {}).get("anomaly_score", 0.0) for w in wallets_sorted]
-                avg_rank = sum(rank_vals) / len(rank_vals)
-                weighted_wallet_score = sum(comp_vals) / len(comp_vals)
-                anomaly_avg = sum(an_vals) / len(an_vals)
-                core_wallets = sum(1 for w in wallets_sorted if wallet_map.get(w, {}).get("in_top_pool"))
+                wallets_sorted = sorted(unique_wallets)
+                avg_rank = 0.0
+                weighted_wallet_score = 0.0
+                anomaly_avg = 0.0
+                core_wallets = 0
+                if wallets_sorted:
+                    rank_vals = [wallet_map.get(w, {}).get("rank_score", 0.0) for w in wallets_sorted]
+                    comp_vals = [wallet_map.get(w, {}).get("composite_score", 0.0) for w in wallets_sorted]
+                    an_vals = [wallet_map.get(w, {}).get("anomaly_score", 0.0) for w in wallets_sorted]
+                    avg_rank = sum(rank_vals) / len(rank_vals)
+                    weighted_wallet_score = sum(comp_vals) / len(comp_vals)
+                    anomaly_avg = sum(an_vals) / len(an_vals)
+                    core_wallets = sum(1 for w in wallets_sorted if wallet_map.get(w, {}).get("in_top_pool"))
 
-            prices = [
-                float(event.get("price") or 0)
-                for event in active_events
-                if event.get("price") is not None and float(event.get("price") or 0) > 0
-            ]
-            sizes = [abs(float(event.get("size") or 0)) for event in active_events if event.get("size") is not None]
-            avg_entry_price = sum(prices) / len(prices) if prices else None
-            total_size = sum(sizes) if sizes else None
-            net_notional = sum(abs(float(event.get("notional") or 0.0)) for event in active_events)
-            timestamps = [
-                event["traded_at"]
-                for event in active_events
-                if isinstance(event.get("traded_at"), datetime)
-            ]
-            timing_tightness = self._timing_tightness(timestamps)
+                prices = [
+                    float(event.get("price") or 0)
+                    for event in active_events
+                    if event.get("price") is not None and float(event.get("price") or 0) > 0
+                ]
+                sizes = [abs(float(event.get("size") or 0)) for event in active_events if event.get("size") is not None]
+                avg_entry_price = sum(prices) / len(prices) if prices else None
+                total_size = sum(sizes) if sizes else None
+                net_notional = sum(abs(float(event.get("notional") or 0.0)) for event in active_events)
+                timestamps = [
+                    event["traded_at"]
+                    for event in active_events
+                    if isinstance(event.get("traded_at"), datetime)
+                ]
+                timing_tightness = self._timing_tightness(timestamps)
 
-            candidates.append({
-                "market_id": market_id,
-                "side": side,
-                "unique_wallets": unique_wallets,
-                "cluster_adjusted": cluster_adjusted,
-                "window_minutes": window_minutes,
-                "wallets_sorted": wallets_sorted,
-                "avg_rank": avg_rank,
-                "weighted_wallet_score": weighted_wallet_score,
-                "anomaly_avg": anomaly_avg,
-                "core_wallets": core_wallets,
-                "avg_entry_price": avg_entry_price,
-                "total_size": total_size,
-                "net_notional": net_notional,
-                "timing_tightness": timing_tightness,
-            })
+                built.append({
+                    "market_id": market_id,
+                    "side": side,
+                    "unique_wallets": unique_wallets,
+                    "cluster_adjusted": cluster_adjusted,
+                    "window_minutes": window_minutes,
+                    "wallets_sorted": wallets_sorted,
+                    "avg_rank": avg_rank,
+                    "weighted_wallet_score": weighted_wallet_score,
+                    "anomaly_avg": anomaly_avg,
+                    "core_wallets": core_wallets,
+                    "avg_entry_price": avg_entry_price,
+                    "total_size": total_size,
+                    "net_notional": net_notional,
+                    "timing_tightness": timing_tightness,
+                })
+
+            built.sort(
+                key=lambda candidate: (
+                    -int(candidate["cluster_adjusted"]),
+                    -int(candidate["core_wallets"]),
+                    -float(candidate["net_notional"]),
+                    -float(candidate["weighted_wallet_score"]),
+                    str(candidate["market_id"]),
+                )
+            )
+            if len(built) > _CONFLUENCE_CANDIDATE_LIMIT:
+                built = built[:_CONFLUENCE_CANDIDATE_LIMIT]
+            return built
+
+        candidates = await asyncio.to_thread(_build_candidates)
 
         if not candidates:
             await self.expire_old_signals()
             return await self.get_active_signals()
-
-        candidates.sort(
-            key=lambda candidate: (
-                -int(candidate["cluster_adjusted"]),
-                -int(candidate["core_wallets"]),
-                -float(candidate["net_notional"]),
-                -float(candidate["weighted_wallet_score"]),
-                str(candidate["market_id"]),
-            )
-        )
-        if len(candidates) > _CONFLUENCE_CANDIDATE_LIMIT:
-            candidates = candidates[:_CONFLUENCE_CANDIDATE_LIMIT]
 
         # -- Phase 3: batch-fetch conflicting notionals (single session) --
         conflicting_map = await self._batch_conflicting_notional(
@@ -1649,34 +1659,49 @@ class CrossPlatformTracker:
                 logger.info("No Polymarket markets available")
                 return
 
-            kalshi_token_index = matcher._refresh_kalshi_tokens(kalshi_markets)
-            multiway_events = _detect_multiway_kalshi_events(kalshi_markets)
-            matched_pairs = []
-            for pm in poly_markets:
-                if pm.closed or not pm.active:
-                    continue
-                if len(list(getattr(pm, "outcome_prices", []) or [])) != 2:
-                    continue
-                pm_tokens = _tokenize(pm.question)
-                if not pm_tokens:
-                    continue
-                match = matcher._find_best_match(pm, pm_tokens, kalshi_token_index, multiway_events)
-                if match is None:
-                    continue
-                best_km, best_score = match
-                matched_pairs.append(
-                    {
-                        "polymarket_id": pm.id,
-                        "polymarket_question": pm.question,
-                        "kalshi_id": best_km.id,
-                        "kalshi_question": best_km.question,
-                        "similarity": best_score,
-                        "pm_yes_price": pm.yes_price,
-                        "pm_no_price": pm.no_price,
-                        "k_yes_price": best_km.yes_price,
-                        "k_no_price": best_km.no_price,
-                    }
-                )
+            # Match every Polymarket market against the Kalshi token index
+            # synchronously — this is O(poly_markets × kalshi_tokens)
+            # and routinely scans thousands × thousands of pairs.
+            # Awaited directly it would block the asyncio loop for
+            # tens of seconds at a time (starving the Polymarket WS
+            # heartbeat and stalling asyncpg socket reads).  Run the
+            # whole match phase in a worker thread.
+            def _build_matched_pairs(matcher_local, poly_markets_local, kalshi_markets_local):
+                kalshi_token_index_local = matcher_local._refresh_kalshi_tokens(kalshi_markets_local)
+                multiway_events_local = _detect_multiway_kalshi_events(kalshi_markets_local)
+                pairs: list[dict] = []
+                for pm in poly_markets_local:
+                    if pm.closed or not pm.active:
+                        continue
+                    if len(list(getattr(pm, "outcome_prices", []) or [])) != 2:
+                        continue
+                    pm_tokens = _tokenize(pm.question)
+                    if not pm_tokens:
+                        continue
+                    match = matcher_local._find_best_match(
+                        pm, pm_tokens, kalshi_token_index_local, multiway_events_local
+                    )
+                    if match is None:
+                        continue
+                    best_km, best_score = match
+                    pairs.append(
+                        {
+                            "polymarket_id": pm.id,
+                            "polymarket_question": pm.question,
+                            "kalshi_id": best_km.id,
+                            "kalshi_question": best_km.question,
+                            "similarity": best_score,
+                            "pm_yes_price": pm.yes_price,
+                            "pm_no_price": pm.no_price,
+                            "k_yes_price": best_km.yes_price,
+                            "k_no_price": best_km.no_price,
+                        }
+                    )
+                return pairs
+
+            matched_pairs = await asyncio.to_thread(
+                _build_matched_pairs, matcher, poly_markets, kalshi_markets
+            )
 
             logger.info(
                 "Cross-platform market matches found",
@@ -1894,11 +1919,27 @@ class WhaleCohortAnalyzer:
             self._cached_graph = self._empty_graph()
             return []
 
-        participation = self._build_participation_matrix(rollups)
+        # The participation matrix, pairwise scoring, and cohort
+        # detection are pure-Python compute over up to MAX_WALLETS
+        # entries.  Pairwise scoring is O(n²) and routinely runs
+        # 10+ seconds for production-sized rollups.  Awaiting these
+        # directly held the asyncio event loop hostage, starving the
+        # Polymarket WS heartbeat task and causing socket reads to
+        # stall (the same pattern produced the 11s ClientWrite stalls
+        # on market_catalog and the 30s authority_recovery timeouts).
+        # Run the whole sync chain in a worker thread so the loop
+        # stays free for IO tasks.
+        def _compute_cohort_results() -> tuple[
+            Dict[str, Dict[str, dict]],
+            Dict[Tuple[str, str], dict],
+            List[dict],
+        ]:
+            participation_local = self._build_participation_matrix(rollups)
+            pair_scores_local = self._compute_pairwise_scores(participation_local)
+            cohorts_local = self._find_cohorts(pair_scores_local, participation_local)
+            return participation_local, pair_scores_local, cohorts_local
 
-        pair_scores = self._compute_pairwise_scores(participation)
-
-        cohorts = self._find_cohorts(pair_scores, participation)
+        participation, pair_scores, cohorts = await asyncio.to_thread(_compute_cohort_results)
         graph = await self._build_network_graph_payload(
             participation=participation,
             pair_scores=pair_scores,
