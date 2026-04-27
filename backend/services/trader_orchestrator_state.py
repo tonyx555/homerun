@@ -4484,7 +4484,25 @@ def _serialize_order(
         "unrealized_pnl": float(unrealized_pnl) if unrealized_pnl is not None else None,
         "edge_percent": row.edge_percent,
         "confidence": row.confidence,
-        "actual_profit": row.actual_profit,
+        # Polymarket-truth: only return actual_profit if the row's
+        # verification_status is venue_fill (CLOB confirmed filled with
+        # real average_fill_price) or wallet_activity (matched to actual
+        # on-chain trade by tx_hash). Any other status means the value
+        # is inferred / unverified — return null so the UI doesn't
+        # contribute it to displayed P&L totals (the UI sums per-order
+        # client-side, so the backend aggregation filter alone is not
+        # enough). The verification_status field is exposed below so
+        # the UI can flag unverified rows visually.
+        "actual_profit": (
+            row.actual_profit
+            if str(row.verification_status or "").strip().lower()
+            in ("venue_fill", "wallet_activity")
+            else None
+        ),
+        "verification_status": row.verification_status,
+        "verification_source": row.verification_source,
+        "verification_tx_hash": row.verification_tx_hash,
+        "verified_at": to_iso(row.verified_at),
         "reason": row.reason,
         "close_trigger": close_trigger or None,
         "close_reason": close_reason or None,
@@ -9019,15 +9037,23 @@ async def get_realized_pnl(
     since: Optional[datetime] = None,
 ) -> float:
     # Only sum actual_profit for orders whose realized P&L was verified
-    # against Polymarket (venue_fill / wallet_position / wallet_activity /
-    # venue_order). "summary_only" / "local" / "disputed" rows have not
-    # been reconciled to a real on-venue fill — including them produces
-    # phantom P&L that will not match the user's actual Polymarket account.
+    # against Polymarket. Truly-verified = wallet_activity (matched to
+    # actual on-chain trade by tx_hash) or venue_fill (CLOB confirmed
+    # filled with real average_fill_price). Everything else is inferred
+    # — wallet_position guesses close_price from currentPrice / wallet
+    # aggregate, which conflates manual user trades with bot fills and
+    # produces phantom P&L (the Flash Crash +$85 the user caught).
     query = select(func.coalesce(func.sum(TraderOrder.actual_profit), 0.0)).where(
         TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
         _visible_trader_order_query_clause(),
         func.lower(func.coalesce(TraderOrder.verification_status, "")).notin_(
-            ("summary_only", "local", "disputed")
+            (
+                "summary_only",
+                "local",
+                "disputed",
+                "wallet_position",
+                "venue_order",
+            )
         ),
     )
     if trader_id:
@@ -9725,14 +9751,30 @@ async def get_trader_orders_summary(
     is_resolved = status_col.in_(resolved_statuses)
     is_failed = status_col.in_(failed_statuses)
     # Only count actual_profit for orders whose realized P&L was verified
-    # against Polymarket as the source of truth. "summary_only" rows are
-    # PnL inferred from wallet aggregate / current price — we cannot trust
-    # those numbers for displayed totals because they conflate manual user
-    # trades with bot fills. "local" rows have never been reconciled.
-    # "disputed" rows were verified and disagreed with our internal claim.
-    # Anything else (venue_fill, wallet_position, wallet_activity,
-    # venue_order) reflects an actual on-venue event we matched.
-    _UNVERIFIED_VERIFICATION_STATUSES = ("summary_only", "local", "disputed")
+    # against Polymarket as the source of truth. The ONLY truly-verified
+    # statuses are:
+    #   * wallet_activity — actual on-chain trade matched by tx_hash
+    #     from polymarket.get_wallet_trades (covers bot SELLs, manual
+    #     user sells, and resolution payouts after Phase 4)
+    #   * venue_fill     — Polymarket CLOB order status confirmed filled
+    #     with an actual average_fill_price from the venue
+    #
+    # Everything else is inferred / pending and excluded from totals:
+    #   * wallet_position — wallet shows balance=0, close_price was
+    #     guessed from currentPrice / wallet aggregate (this is the
+    #     phantom-PnL path the user caught — Flash Crash $85)
+    #   * venue_order     — order on the book, not yet filled
+    #   * local           — bot's local belief, no venue confirmation
+    #   * summary_only    — wallet shows position closed but no trade
+    #     match (verifier will upgrade once trades data appears)
+    #   * disputed        — venue truth contradicts our internal claim
+    _UNVERIFIED_VERIFICATION_STATUSES = (
+        "summary_only",
+        "local",
+        "disputed",
+        "wallet_position",
+        "venue_order",
+    )
     is_pnl_verified = func.lower(
         func.coalesce(TraderOrder.verification_status, "")
     ).notin_(_UNVERIFIED_VERIFICATION_STATUSES)
