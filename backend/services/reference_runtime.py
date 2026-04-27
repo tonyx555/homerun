@@ -189,14 +189,53 @@ class ReferenceRuntime:
             }
         return out
 
-    def get_oracle_history(self, asset: str, *, points: int = 80) -> list[dict[str, Any]]:
+    def get_oracle_history(
+        self,
+        asset: str,
+        *,
+        points: int = 80,
+        max_age_seconds: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return a sampled price history for ``asset``.
+
+        Two-stage selection so backfilled klines (older than the
+        live-tick stream) survive the sample:
+
+        * ``max_age_seconds`` filters the rolling buffer to the relevant
+          window (e.g. 900 for a 15-min market).  Without this, dense
+          live ticks at ~10/s push backfilled minute-klines out of the
+          last-N-by-count slice within seconds, leaving the chart with
+          ~12s of data crammed into a 900s window.
+        * ``points`` is enforced via uniform time-bucketing across the
+          filtered range — the latest entry per bucket wins, with the
+          very last raw point appended so the chart's tail tracks live
+          data exactly.
+        """
         history = getattr(self._chainlink_feed, "_history", {}).get(str(asset or "").upper())
         if not history:
             return []
-        return [
-            {"t": int(ts_ms), "p": round(float(price), 6)}
-            for ts_ms, price in list(history)[-max(1, int(points)) :]
-        ]
+        history_list = list(history)
+        if max_age_seconds is not None and max_age_seconds > 0:
+            cutoff_ms = int(time.time() * 1000) - int(float(max_age_seconds) * 1000)
+            history_list = [(t, p) for t, p in history_list if int(t) >= cutoff_ms]
+        if not history_list:
+            return []
+        n = max(1, int(points))
+        if len(history_list) <= n:
+            return [{"t": int(ts_ms), "p": round(float(price), 6)} for ts_ms, price in history_list]
+        start_ms = int(history_list[0][0])
+        end_ms = int(history_list[-1][0])
+        span_ms = max(1, end_ms - start_ms)
+        bucket_ms = max(1, span_ms // n)
+        buckets: dict[int, tuple[int, float]] = {}
+        for ts_ms, price in history_list:
+            bucket = (int(ts_ms) - start_ms) // bucket_ms
+            buckets[bucket] = (int(ts_ms), float(price))
+        sampled = sorted(buckets.values(), key=lambda pair: pair[0])
+        last_pair = (int(history_list[-1][0]), float(history_list[-1][1]))
+        if not sampled or sampled[-1] != last_pair:
+            sampled.append(last_pair)
+        return [{"t": int(ts_ms), "p": round(float(price), 6)} for ts_ms, price in sampled]
 
     def get_oracle_motion_summary(
         self,

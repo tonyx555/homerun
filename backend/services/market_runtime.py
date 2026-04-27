@@ -51,6 +51,27 @@ _CRYPTO_ML_TASK_KEY = "crypto_directional"
 _CRYPTO_ORACLE_HISTORY_POINTS = 120
 
 
+def _oracle_history_max_age_seconds(timeframe: Any) -> float:
+    """Map a market timeframe to the chart's visible window in seconds.
+
+    Mirrors the frontend ``livelineWindow`` switch in CryptoMarketsPanel
+    so the backend always sends just enough history to fill the chart
+    plus a small buffer.  Without this the dense WS tick stream (~10/s)
+    pushes backfilled minute-klines out of the response within seconds
+    and the chart squishes to ~12s of data on a 900s axis.
+    """
+    raw = str(timeframe or "").lower()
+    if "4h" in raw or "240" in raw:
+        return 4 * 3600.0
+    if "1h" in raw or "60" in raw:
+        return 3600.0
+    if "15m" in raw or "15min" in raw or "15-min" in raw:
+        return 900.0
+    if "5m" in raw or "5min" in raw or "5-min" in raw or (raw.startswith("5") and "15" not in raw):
+        return 300.0
+    return 900.0
+
+
 def _to_float(value: Any) -> float | None:
     try:
         parsed = float(value)
@@ -1004,7 +1025,15 @@ class MarketRuntime:
             row["oracle_updated_at_ms"] = oracle.get("updated_at_ms") if oracle else None
             row["oracle_age_seconds"] = oracle.get("age_seconds") if oracle else None
             row["oracle_prices_by_source"] = reference_runtime.get_oracle_prices_by_source(asset) if asset else {}
-            oracle_history = reference_runtime.get_oracle_history(asset, points=_CRYPTO_ORACLE_HISTORY_POINTS) if asset else []
+            oracle_history = (
+                reference_runtime.get_oracle_history(
+                    asset,
+                    points=_CRYPTO_ORACLE_HISTORY_POINTS,
+                    max_age_seconds=_oracle_history_max_age_seconds(row.get("timeframe")),
+                )
+                if asset
+                else []
+            )
             row["oracle_history"] = oracle_history
             if asset:
                 motion_summary = motion_summary_by_asset.get(asset)
@@ -1580,7 +1609,15 @@ class MarketRuntime:
             row["oracle_updated_at_ms"] = oracle.get("updated_at_ms") if oracle else row.get("oracle_updated_at_ms")
             row["oracle_age_seconds"] = oracle.get("age_seconds") if oracle else row.get("oracle_age_seconds")
             row["oracle_prices_by_source"] = reference_runtime.get_oracle_prices_by_source(asset) if asset else row.get("oracle_prices_by_source")
-            row["oracle_history"] = reference_runtime.get_oracle_history(asset, points=_CRYPTO_ORACLE_HISTORY_POINTS) if asset else row.get("oracle_history")
+            row["oracle_history"] = (
+                reference_runtime.get_oracle_history(
+                    asset,
+                    points=_CRYPTO_ORACLE_HISTORY_POINTS,
+                    max_age_seconds=_oracle_history_max_age_seconds(row.get("timeframe")),
+                )
+                if asset
+                else row.get("oracle_history")
+            )
             if asset:
                 motion_summary = motion_summary_by_asset.get(asset)
                 if motion_summary is None:
