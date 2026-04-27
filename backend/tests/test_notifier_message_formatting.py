@@ -130,7 +130,7 @@ async def test_position_close_alert_skips_replayed_close_marker(monkeypatch):
     monkeypatch.setattr(notifier, "_persist_runtime_state", _persist)
 
     close_at = "2026-03-02T12:00:00Z"
-    notifier._close_alert_markers = {"order-1": f"resolved_win|{close_at}"}
+    notifier._close_alert_markers = {"order-1": "resolved_win|pnl_cents:1550"}
     now = datetime(2026, 3, 2, 13, 0, tzinfo=timezone.utc)
     orders = [
         SimpleNamespace(
@@ -185,6 +185,7 @@ async def test_position_close_alert_uses_wallet_activity_identity_not_updated_cl
             SimpleNamespace(
                 id="order-1",
                 status="closed_loss",
+                actual_profit=-0.74,
                 payload_json={"position_close": {**base_position_close, "closed_at": "2026-03-02T12:05:00Z"}},
                 updated_at=datetime(2026, 3, 2, 12, 5, tzinfo=timezone.utc),
                 executed_at=datetime(2026, 3, 2, 11, 0, tzinfo=timezone.utc),
@@ -247,10 +248,7 @@ async def test_seed_close_alert_markers_rekeys_old_persisted_marker():
 
     await notifier._seed_close_alert_markers(session, preserve_existing=True)
 
-    assert notifier._close_alert_markers["order-1"] == (
-        "closed_loss|wallet_activity_transaction_hash:0xclose|"
-        "wallet_activity_timestamp:2026-03-02T12:00:00Z"
-    )
+    assert notifier._close_alert_markers["order-1"] == "closed_loss|pnl_cents:0"
     assert any(key.startswith("evidence:") for key in notifier._close_alert_markers)
 
 

@@ -1,0 +1,122 @@
+{
+  "runId": 1777260590800,
+  "workflowRunId": 24974990994,
+  "workflowId": 230872278,
+  "workflowName": "CI",
+  "workflowUrl": "https://github.com/braedonsaunders/homerun/actions/runs/24974990994",
+  "branch": "main",
+  "headSha": "1467bb71079469fba14c52de52ae8769c14d1dd1",
+  "prNumber": null,
+  "passes": [
+    {
+      "pass": 1,
+      "cluster": {
+        "type": "lint",
+        "files": [
+          "backend/models/database.py"
+        ],
+        "failures": [
+          {
+            "type": "lint",
+            "file": "backend/models/database.py",
+            "line": 60,
+            "column": 1,
+            "message": "Module level import not at top of file",
+            "rule": "E402",
+            "rawLog": "E402 Module level import not at top of file\n  --> models/database.py:60:1",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/models/database.py",
+            "line": 61,
+            "column": 1,
+            "message": "Module level import not at top of file",
+            "rule": "E402",
+            "rawLog": "E402 Module level import not at top of file\n  --> models/database.py:61:1",
+            "confidence": 0.95
+          }
+        ],
+        "strategy": "llm"
+      },
+      "commitSha": "4dc200ee2a7a2ef0e63598c4adffb1ade2035f3d",
+      "filesChanged": [
+        "backend/models/database.py"
+      ],
+      "result": "fixed",
+      "newFailures": [],
+      "costCents": 1,
+      "durationMs": 62243
+    }
+  ],
+  "totalCostCents": 1,
+  "startedAt": "2026-04-27T03:29:50.800Z",
+  "result": null,
+  "commits": [
+    "4dc200ee2a7a2ef0e63598c4adffb1ade2035f3d"
+  ],
+  "latestFailures": [
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_notifier_message_formatting.py",
+      "line": null,
+      "column": null,
+      "message": "AssertionError: assert ['✅ <b>Autotr...:take_profit'] == []",
+      "rule": null,
+      "rawLog": "FAILED tests/test_notifier_message_formatting.py::test_position_close_alert_skips_replayed_close_marker - AssertionError: assert ['✅ <b>Autotr...:take_profit'] == []",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_notifier_message_formatting.py",
+      "line": null,
+      "column": null,
+      "message": "AssertionError: assert ['✅ <b>Autotr...let_activity'] == []",
+      "rule": null,
+      "rawLog": "FAILED tests/test_notifier_message_formatting.py::test_position_close_alert_uses_wallet_activity_identity_not_updated_closed_at - AssertionError: assert ['✅ <b>Autotr...let_activity'] == []",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_notifier_message_formatting.py",
+      "line": null,
+      "column": null,
+      "message": "AssertionError: assert 'closed_loss|pnl_cents:0' == 'closed_loss|...-02T12:00:00Z'",
+      "rule": null,
+      "rawLog": "FAILED tests/test_notifier_message_formatting.py::test_seed_close_alert_markers_rekeys_old_persisted_marker - AssertionError: assert 'closed_loss|pnl_cents:0' == 'closed_loss|...-02T12:00:00Z'",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_position_lifecycle_resolution.py",
+      "line": null,
+      "column": null,
+      "message": "assert None == -0.5 ± 5.0e-07",
+      "rule": null,
+      "rawLog": "FAILED tests/test_trader_position_lifecycle_resolution.py::test_reconcile_live_positions_does_not_reopen_verified_wallet_activity_close_for_partial_exit - assert None == -0.5 ± 5.0e-07",
+      "confidence": 0.7
+    },
+    {
+      "type": "lint",
+      "file": "backend/models/database.py",
+      "line": 60,
+      "column": 1,
+      "message": "Module level import not at top of file",
+      "rule": "E402",
+      "rawLog": "E402 Module level import not at top of file\n  --> models/database.py:60:1",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/models/database.py",
+      "line": 61,
+      "column": 1,
+      "message": "Module level import not at top of file",
+      "rule": "E402",
+      "rawLog": "E402 Module level import not at top of file\n  --> models/database.py:61:1",
+      "confidence": 0.95
+    }
+  ],
+  "latestParserUsed": "pytest, ruff",
+  "latestLogPath": ".greencheck/logs/workflow-run-24974990994.log"
+}
