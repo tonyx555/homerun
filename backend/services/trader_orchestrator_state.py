@@ -3115,6 +3115,18 @@ async def recover_missing_live_trader_orders(
             )
             status_changed = False
             existing_position_close = merged_payload.get("position_close")
+            # If polymarket_trade_verifier wrote a verified_close
+            # block (matched to on-chain settlement or trade), it is
+            # the authoritative actual_profit. Don't recompute from
+            # the stale position_close payload, which still carries
+            # whatever wallet_summary_recovery / inferred close wrote
+            # before the verifier ran. (This was the path that kept
+            # snapping Flash Crash from -$2.31 back to +$32.82.)
+            _verified_close = merged_payload.get("verified_close") if isinstance(merged_payload, dict) else None
+            _has_verified_close = (
+                isinstance(_verified_close, dict)
+                and str(getattr(existing_row, "verification_status", "") or "").strip().lower() == "wallet_activity"
+            )
             if isinstance(existing_position_close, dict) and _position_close_has_live_terminal_authority(
                 existing_position_close
             ):
@@ -3127,9 +3139,13 @@ async def recover_missing_live_trader_orders(
                     existing_row.status = terminal_status
                     existing_status = terminal_status
                     status_changed = True
-                if safe_float(existing_row.actual_profit, None) != terminal_pnl:
-                    existing_row.actual_profit = float(terminal_pnl)
-                    status_changed = True
+                # Only overwrite actual_profit from the position_close
+                # payload if no Polymarket-verified close exists. The
+                # verifier owns the value once it has stamped one.
+                if not _has_verified_close:
+                    if safe_float(existing_row.actual_profit, None) != terminal_pnl:
+                        existing_row.actual_profit = float(terminal_pnl)
+                        status_changed = True
                 existing_status_is_terminal = True
                 if not str(existing_position_close.get("closed_at") or "").strip():
                     existing_position_close["closed_at"] = to_iso(now)

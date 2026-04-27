@@ -25,6 +25,7 @@ from services.trader_order_verification import (
     derive_trader_order_verification,
 )
 from services.trader_orchestrator_state import _dedupe_live_authority_rows, _extract_copy_source_wallet_from_payload
+from services.trader_orchestrator import exit_executor
 from utils.utcnow import utcnow
 from utils.converters import safe_float
 import services.trader_hot_state as hot_state
@@ -1954,6 +1955,13 @@ def _remaining_exit_size(
 ) -> float:
     required = max(0.0, float(required_exit_size))
     already_filled = max(0.0, safe_float(pending_exit.get("filled_size"), 0.0) or 0.0)
+    # Laddered exits accumulate fills across child orders; the parent's
+    # ``filled_size`` is updated via aggregation but may lag a single tick.
+    # Prefer the child aggregate when it's larger.
+    children = pending_exit.get("children") if isinstance(pending_exit, dict) else None
+    if isinstance(children, list) and children:
+        agg = exit_executor.aggregate_children_fills(children)
+        already_filled = max(already_filled, agg["filled_size"])
     remaining = max(0.0, required - already_filled)
     if required > 0.0 and remaining <= 0.0 and already_filled <= 0.0:
         remaining = required
@@ -2020,6 +2028,14 @@ def _pending_exit_fill_evidence(pending_exit: dict[str, Any]) -> tuple[str, floa
 
 
 def _pending_exit_has_verified_terminal_fill(pending_exit: dict[str, Any]) -> bool:
+    children = pending_exit.get("children") if isinstance(pending_exit, dict) else None
+    if isinstance(children, list) and children:
+        # Laddered exit: terminal when the executor reports completion AND
+        # aggregated child fills account for at least the target size, OR
+        # at least one child has filled and the rest are terminal.
+        agg = exit_executor.aggregate_children_fills(children)
+        if agg["filled_size"] > _WALLET_SIZE_EPSILON and exit_executor.is_exit_complete(pending_exit):
+            return True
     provider_status, filled_size, filled_notional, average_fill_price = _pending_exit_fill_evidence(pending_exit)
     if provider_status not in {"filled", "matched", "executed"}:
         return False
@@ -2785,21 +2801,21 @@ def _apply_wallet_position_reopen(
     if wallet_size <= _WALLET_SIZE_EPSILON:
         return wallet_size, wallet_notional, wallet_entry_price, wallet_mark_price, payload
 
-    # Don't reopen rows that polymarket_trade_verifier already closed
-    # and verified against actual on-chain settlement (status=resolved
-    # + verification_status=wallet_activity). Wallet position lingering
-    # after resolution (winning shares pending redemption to USDC) is
-    # normal — the bot used to interpret that as "position is still
-    # open" and reopen it, which downgraded verification_status from
+    # Don't reopen rows that polymarket_trade_verifier already
+    # closed and verified against actual on-chain settlement /
+    # trade data. Wallet position lingering after resolution
+    # (winning shares pending redemption to USDC) is normal — the
+    # bot used to interpret that as "position is still open" and
+    # reopen it, which downgraded verification_status from
     # wallet_activity to wallet_position. The DB-layer guard then
-    # NULL'd actual_profit, erasing the verified P&L on every restart.
-    _existing_verification = str(getattr(row, "verification_status", None) or "").strip().lower()
-    _existing_status = str(getattr(row, "status", None) or "").strip().lower()
-    _is_resolved_status = _existing_status in {
+    # NULL'd actual_profit, erasing the verified P&L.
+    existing_verification = str(getattr(row, "verification_status", None) or "").strip().lower()
+    existing_status = str(getattr(row, "status", None) or "").strip().lower()
+    is_resolved_status = existing_status in {
         "resolved", "resolved_win", "resolved_loss",
         "closed_win", "closed_loss", "win", "loss",
     }
-    if _existing_verification == "wallet_activity" and _is_resolved_status:
+    if existing_verification == "wallet_activity" and is_resolved_status:
         return wallet_size, wallet_notional, wallet_entry_price, wallet_mark_price, payload
 
     reopened_size = float(allocated_size) if allocated_size is not None and allocated_size > 0.0 else wallet_size
@@ -5086,7 +5102,8 @@ async def reconcile_live_positions(
             ]
             canonical_clob_ids = sorted({value for value in canonical_clob_ids if value})
             # Same guard as _apply_wallet_position_reopen — don't
-            # downgrade rows already verified against Polymarket truth.
+            # downgrade rows already verified against Polymarket
+            # truth. See that function for the full rationale.
             _existing_verification = str(getattr(canonical_row, "verification_status", None) or "").strip().lower()
             _existing_status = str(getattr(canonical_row, "status", None) or "").strip().lower()
             _is_resolved_status = _existing_status in {
@@ -5224,6 +5241,16 @@ async def reconcile_live_positions(
             pending_status = str(pending_exit.get("status") or "").strip().lower()
             if pending_status in {"pending", "submitted", "working", "filled"}:
                 return True
+            # Laddered exits: any non-terminal child means we need wallet
+            # history to verify partial fills against wallet activity.
+            children = pending_exit.get("children")
+            if isinstance(children, list) and children:
+                for child in children:
+                    if not isinstance(child, dict):
+                        continue
+                    cs = str(child.get("status") or "").strip().lower()
+                    if cs in {"submitted", "partial", "planned", "escalated"}:
+                        return True
         token_id = _extract_live_token_id(payload)
         if not token_id:
             return False
@@ -5456,24 +5483,39 @@ async def reconcile_live_positions(
                     if midpoint is not None:
                         clob_mid_prices[str(token_id).strip()] = midpoint
 
-        pending_exit_provider_ids = sorted(
-            {
-                _pending_exit_provider_clob_id(pending_exit)
-                for pending_exit in ((dict((row.payload_json or {})).get("pending_live_exit")) for row in candidates)
-                if isinstance(pending_exit, dict)
-                and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
-                and _pending_exit_provider_clob_id(pending_exit)
-            }
-        )
-        pending_exit_order_ids = sorted(
-            {
-                str(pending_exit.get("exit_order_id") or "").strip()
-                for pending_exit in ((dict((row.payload_json or {})).get("pending_live_exit")) for row in candidates)
-                if isinstance(pending_exit, dict)
-                and str(pending_exit.get("status") or "").strip().lower() in {"submitted", "pending"}
-                and str(pending_exit.get("exit_order_id") or "").strip()
-            }
-        )
+        # Collect parent + child clob_order_ids that we need provider snapshots
+        # for. A laddered exit has no provider id on the parent — the venue
+        # ids live on each child.
+        _pending_provider_id_set: set[str] = set()
+        _pending_order_id_set: set[str] = set()
+        for _row in candidates:
+            _pe = (dict((_row.payload_json or {})).get("pending_live_exit"))
+            if not isinstance(_pe, dict):
+                continue
+            _status = str(_pe.get("status") or "").strip().lower()
+            _children = _pe.get("children") if isinstance(_pe.get("children"), list) else None
+            if _children:
+                # Laddered exit: collect every child's ids, regardless of the
+                # parent's status (which is purely a high-level marker).
+                for _child in _children:
+                    if not isinstance(_child, dict):
+                        continue
+                    _cid = str(_child.get("provider_clob_order_id") or "").strip()
+                    if _cid:
+                        _pending_provider_id_set.add(_cid)
+                    _oid = str(_child.get("exit_order_id") or "").strip()
+                    if _oid:
+                        _pending_order_id_set.add(_oid)
+            else:
+                if _status in {"submitted", "pending"}:
+                    _pid = _pending_exit_provider_clob_id(_pe)
+                    if _pid:
+                        _pending_provider_id_set.add(_pid)
+                    _oid = str(_pe.get("exit_order_id") or "").strip()
+                    if _oid:
+                        _pending_order_id_set.add(_oid)
+        pending_exit_provider_ids = sorted(_pending_provider_id_set)
+        pending_exit_order_ids = sorted(_pending_order_id_set)
         pending_exit_snapshots: dict[str, dict[str, Any]] = {}
         if pending_exit_provider_ids:
             pending_exit_snapshots = await _load_mapping_with_timeout(
@@ -6212,18 +6254,17 @@ async def reconcile_live_positions(
             # didn't match the user's actual ~-$100 Polymarket account).
             #
             # The only legitimate sources of realized P&L are:
-            #   1. A confirmed on-chain trade record (the wallet_activity
-            #      block above already handles this with the real fill
-            #      price + transactionHash from polymarket trades API)
-            #   2. A market-resolution payout (deterministic $1/$0)
+            #   1. A confirmed on-chain trade record (wallet_close_activity
+            #      path above — already handled with the real fill price)
+            #   2. A market-resolution payout ($1 winning / $0 losing)
             #
-            # If we got here, neither has fired yet. We mark the position
-            # closed (so it doesn't sit "open" forever) but record
-            # actual_profit=NULL and verification_status=summary_only so
-            # the aggregation queries (already filtered) exclude it from
-            # displayed P&L. The continuous trade verifier
-            # (polymarket_trade_verifier) fills in the real number on
-            # the next sweep when wallet_trades data becomes available.
+            # If we got here, neither source has fired yet. We mark the
+            # position closed (so it doesn't sit "open" forever) but
+            # record actual_profit=NULL and verification_status=summary_only
+            # so the aggregation queries (already filtered) exclude it
+            # from displayed P&L. The continuous trade verifier will fill
+            # in the real number on the next sweep when wallet_trades data
+            # becomes available.
             close_price = None
             realized_pnl = None
             closed_position_total_size = max(
@@ -6722,6 +6763,243 @@ async def reconcile_live_positions(
         def _attach_pending_state(target_payload: dict[str, Any]) -> None:
             if pending_state_changed:
                 target_payload["position_state"] = pending_next_state
+
+        # ── Laddered (multi-child) exit reconcile ─────────────────────────
+        # When pending_live_exit carries a ``children`` list, the orchestrator
+        # delegates submission/escalation/reprice to ``exit_executor``. The
+        # legacy single-order branches below are skipped for this row this
+        # pass — they assume one provider order id on the parent.
+        _children = (
+            pending_exit.get("children")
+            if isinstance(pending_exit, dict) and isinstance(pending_exit.get("children"), list)
+            else None
+        )
+        if _children and not force_mark_to_market:
+            # 1. Apply provider snapshots to each child
+            for _child in _children:
+                if not isinstance(_child, dict):
+                    continue
+                _cid = str(_child.get("provider_clob_order_id") or "").strip()
+                _snap = pending_exit_snapshots.get(_cid) if _cid else None
+                if _snap is None and _cid:
+                    _snap = pending_exit_snapshot_fallbacks.get(_cid)
+                if not isinstance(_snap, dict):
+                    continue
+                _snap_status = _resolved_snapshot_status(
+                    _snap, _snap.get("normalized_status"), _child.get("provider_status")
+                )
+                _snap_filled = max(0.0, safe_float(_snap.get("filled_size"), 0.0) or 0.0)
+                _snap_price = safe_float(_snap.get("average_fill_price"))
+                if _snap_price is None or _snap_price <= 0:
+                    _snap_price = safe_float(_snap.get("limit_price"))
+                if _snap_filled > 0:
+                    _child["filled_size"] = float(max(_snap_filled, safe_float(_child.get("filled_size"), 0.0) or 0.0))
+                if _snap_price is not None and _snap_price > 0:
+                    _child["average_fill_price"] = float(_snap_price)
+                if _snap_status == "filled" or (
+                    _snap_status in {"matched", "executed"}
+                    and _child["filled_size"] + 1e-9 >= float(_child.get("size", 0.0) or 0.0)
+                ):
+                    _child["status"] = exit_executor.CHILD_FILLED
+                elif _snap_status in {"cancelled", "expired"}:
+                    _child["status"] = exit_executor.CHILD_CANCELLED
+                elif _snap_status in {"failed"}:
+                    _child["status"] = exit_executor.CHILD_FAILED
+                elif _snap_filled > 0:
+                    _child["status"] = exit_executor.CHILD_PARTIAL
+                _child["provider_status"] = _snap_status
+
+            # 2. Check completion. Terminalize if done.
+            if exit_executor.is_exit_complete(pending_exit):
+                _agg = exit_executor.aggregate_children_fills(_children)
+                _filled_sz = _agg["filled_size"]
+                _avg_px = _agg["average_fill_price"]
+                pending_exit["filled_size"] = float(_filled_sz)
+                pending_exit["average_fill_price"] = float(_avg_px) if _avg_px > 0 else pending_exit.get("average_fill_price")
+                pending_exit["children_filled_size"] = float(_filled_sz)
+                pending_exit["children_filled_notional"] = float(_agg["filled_notional"])
+                pending_exit["status"] = "filled"
+                _close_trigger = str(pending_exit.get("close_trigger") or "ladder_exit_complete")
+                _required = max(0.0, safe_float(pending_exit.get("target_size"), 0.0) or 0.0)
+                _entry_not = safe_float(pending_exit.get("entry_notional_usd")) or (safe_float(row.notional_usd) or 0.0)
+                _entry_qty = safe_float(pending_exit.get("entry_filled_size")) or (
+                    safe_float(_payload_strategy_exit_config(payload).get("filled_size"))
+                )
+                if not _entry_qty or _entry_qty <= 0:
+                    _fill_not, _fill_sz, _fill_px = _extract_live_fill_metrics(payload)
+                    _entry_qty = _fill_sz if _fill_sz > 0 else (
+                        (_fill_not / _fill_px) if _fill_px and _fill_px > 0 else 0.0
+                    )
+                    if _entry_not <= 0:
+                        _entry_not = _fill_not
+                _close_qty = min(_filled_sz, _entry_qty) if _entry_qty > 0 else _filled_sz
+                _cost_basis = (
+                    _entry_not * (_close_qty / _entry_qty) if _entry_qty > 0 else _entry_not
+                )
+                _proceeds = _close_qty * _avg_px if _close_qty > 0 and _avg_px > 0 else 0.0
+                _pnl = _proceeds - _cost_basis if _cost_basis > 0 else 0.0
+                _ns = _status_for_close(pnl=_pnl, close_trigger=_close_trigger)
+                if not dry_run:
+                    row.status = _ns
+                    row.actual_profit = _pnl
+                    row.updated_at = now
+                    payload["pending_live_exit"] = pending_exit
+                    payload["position_close"] = {
+                        "close_price": _avg_px if _avg_px > 0 else (safe_float(pending_exit.get("close_price")) or 0.0),
+                        "price_source": "ladder_aggregate",
+                        "close_trigger": _close_trigger,
+                        "realized_pnl": _pnl,
+                        "cost_basis_usd": _cost_basis,
+                        "settlement_proceeds_usd": _proceeds,
+                        "filled_size": _close_qty,
+                        "filled_notional_usd": _close_qty * _avg_px if _avg_px > 0 else 0.0,
+                        "ladder_children": [
+                            {
+                                "child_id": c.get("child_id"),
+                                "price": c.get("price"),
+                                "filled_size": c.get("filled_size"),
+                                "average_fill_price": c.get("average_fill_price"),
+                                "status": c.get("status"),
+                            }
+                            for c in _children
+                            if isinstance(c, dict)
+                        ],
+                        "closed_at": _iso_utc(now),
+                        "reason": reason,
+                    }
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    hot_state.record_order_resolved(
+                        trader_id=trader_id,
+                        mode=str(row.mode or ""),
+                        order_id=str(row.id or ""),
+                        market_id=str(row.market_id or ""),
+                        direction=str(row.direction or ""),
+                        source=str(row.source or ""),
+                        status=_ns,
+                        actual_profit=_pnl,
+                        payload=payload,
+                        copy_source_wallet=_extract_copy_source_wallet_from_payload(payload),
+                    )
+                    closed += 1
+                total_realized_pnl += _pnl
+                by_status[_ns] = int(by_status.get(_ns, 0)) + 1
+                would_close += 1
+                details.append(
+                    {
+                        "order_id": row.id,
+                        "market_id": row.market_id,
+                        "close_trigger": _close_trigger,
+                        "close_price": _avg_px,
+                        "realized_pnl": _pnl,
+                        "next_status": _ns,
+                        "ladder_filled_size": _filled_sz,
+                        "ladder_child_count": len(_children),
+                    }
+                )
+                continue
+
+            # 3. Run another executor pass: submit planned, escalate stale,
+            #    reprice on drift. Submission counter is shared with legacy
+            #    paths so we don't double-spend the per-trader budget.
+            _ladder_token_id = (
+                _extract_live_token_id(payload)
+                or str(pending_exit.get("token_id") or "")
+            )
+            if not _ladder_token_id:
+                # Token id missing; fail-safe and try again next pass.
+                pending_exit["last_error"] = "ladder_missing_token_id"
+                if not dry_run:
+                    payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            _ladder_min_order_size_usd = _resolve_position_min_order_size_usd(
+                trader_params=params, payload=payload, mode="live",
+            )
+            _ladder_remaining_budget = max(
+                0, _live_exit_submission_cap() - exit_submissions_this_pass[0]
+            )
+            if _ladder_remaining_budget <= 0:
+                # No budget for this row this pass. The remaining children
+                # are still tracked by the snapshot loop and will be picked
+                # up on the next reconcile cycle.
+                if not dry_run:
+                    payload["pending_live_exit"] = pending_exit
+                    _attach_pending_state(payload)
+                    row.payload_json = payload
+                    row.updated_at = now
+                    state_updates += 1
+                held += 1
+                continue
+
+            _ladder_budget = exit_executor.PassBudget(
+                submits=_ladder_remaining_budget,
+                escalations=_ladder_remaining_budget,
+                reprices=_ladder_remaining_budget,
+            )
+
+            from services.live_execution_adapter import execute_live_order as _ladder_place_order
+
+            async def _ladder_cancel(_clob_id: str) -> bool:
+                async with release_conn(session):
+                    try:
+                        return bool(await live_execution_service.cancel_order(_clob_id))
+                    except Exception:
+                        return False
+
+            try:
+                async with release_conn(session):
+                    try:
+                        await live_execution_service.prepare_sell_balance_allowance(_ladder_token_id)
+                    except Exception:
+                        pass
+                    _ladder_report = await exit_executor.run_exit_pass(
+                        pending_exit=pending_exit,
+                        token_id=_ladder_token_id,
+                        side="SELL",
+                        min_order_size_usd=_ladder_min_order_size_usd,
+                        place_order=_ladder_place_order,
+                        cancel_fn=_ladder_cancel,
+                        current_mid=pending_current_price,
+                        tick_size=exit_executor.DEFAULT_TICK_SIZE,
+                        budget=_ladder_budget,
+                        now=now,
+                    )
+                exit_submissions_this_pass[0] += int(
+                    _ladder_report.get("submitted", 0)
+                    + _ladder_report.get("escalated", 0)
+                    + _ladder_report.get("repriced", 0)
+                )
+                pending_exit["last_pass_at"] = _iso_utc(now)
+                pending_exit["last_pass_report"] = dict(_ladder_report)
+                if _ladder_report.get("complete"):
+                    # Will terminalize on the next reconcile cycle via the
+                    # completion branch above; persist and re-iterate.
+                    pending_exit["status"] = pending_exit.get("status") or "submitted"
+                else:
+                    pending_exit["status"] = "submitted"
+            except Exception as _ladder_exc:
+                logger.warning(
+                    "Laddered exit pass exception for order=%s: %s",
+                    row.id,
+                    _format_exit_error(_ladder_exc),
+                    exc_info=_ladder_exc,
+                )
+                pending_exit["last_error"] = _format_exit_error(_ladder_exc)
+
+            if not dry_run:
+                payload["pending_live_exit"] = pending_exit
+                _attach_pending_state(payload)
+                row.payload_json = payload
+                row.updated_at = now
+                state_updates += 1
+            held += 1
+            continue
 
         if (
             isinstance(pending_exit, dict)
@@ -8703,6 +8981,122 @@ async def reconcile_live_positions(
                     close_trigger,
                 )
                 rapid_close_exit = _is_rapid_close_trigger(close_trigger)
+
+                # ── Resolve advanced exit policy ──────────────────────────
+                # Prefer per-decision override on the strategy's ExitDecision;
+                # else look up the strategy's per-trigger ``exit_policies``
+                # map. ``_exit_instance`` and ``strategy_exit`` were set in
+                # the strategy-exit block above (else: None / never raised).
+                _resolved_policy = None
+                _local_exit_instance = locals().get("_exit_instance")
+                _local_strategy_exit = locals().get("strategy_exit")
+                if _local_exit_instance is not None and hasattr(
+                    _local_exit_instance, "resolve_exit_policy"
+                ):
+                    try:
+                        _resolved_policy = _local_exit_instance.resolve_exit_policy(
+                            _local_strategy_exit, str(close_trigger or "")
+                        )
+                    except Exception as _policy_exc:
+                        logger.warning(
+                            "Strategy resolve_exit_policy() error for %s: %s",
+                            payload.get("strategy_type"),
+                            _policy_exc,
+                        )
+                        _resolved_policy = None
+
+                if _resolved_policy is not None and token_id and exit_size > 0:
+                    _exit_id, _children_records = exit_executor.build_initial_children(
+                        target_size=float(exit_size),
+                        trigger_price=float(close_price) if close_price else 0.0,
+                        side="SELL",
+                        policy=_resolved_policy,
+                        tick_size=exit_executor.DEFAULT_TICK_SIZE,
+                    )
+                    if _children_records:
+                        _entry_filled_not, _entry_filled_sz, _entry_filled_px = (
+                            _extract_live_fill_metrics(payload)
+                        )
+                        exit_record["exit_id"] = _exit_id
+                        exit_record["children"] = _children_records
+                        exit_record["policy"] = exit_executor.serialize_policy(_resolved_policy)
+                        exit_record["target_size"] = float(exit_size)
+                        exit_record["trigger_price"] = float(close_price or 0.0)
+                        exit_record["entry_notional_usd"] = float(_entry_filled_not)
+                        exit_record["entry_filled_size"] = float(_entry_filled_sz)
+                        exit_record["status"] = "submitted"
+                        exit_record["last_attempt_at"] = _iso_utc(now)
+                        # First executor pass — submit the inside-most rungs.
+                        _initial_budget_room = max(
+                            0,
+                            _live_exit_submission_cap()
+                            - exit_submissions_this_pass[0],
+                        )
+                        if _initial_budget_room > 0:
+                            from services.live_execution_adapter import (
+                                execute_live_order as _ladder_first_place_order,
+                            )
+
+                            async def _ladder_first_cancel(_clob_id: str) -> bool:
+                                async with release_conn(session):
+                                    try:
+                                        return bool(
+                                            await live_execution_service.cancel_order(_clob_id)
+                                        )
+                                    except Exception:
+                                        return False
+
+                            try:
+                                async with release_conn(session):
+                                    try:
+                                        await live_execution_service.prepare_sell_balance_allowance(
+                                            token_id
+                                        )
+                                    except Exception:
+                                        pass
+                                    _first_report = await exit_executor.run_exit_pass(
+                                        pending_exit=exit_record,
+                                        token_id=token_id,
+                                        side="SELL",
+                                        min_order_size_usd=min_order_size_usd,
+                                        place_order=_ladder_first_place_order,
+                                        cancel_fn=_ladder_first_cancel,
+                                        current_mid=close_price,
+                                        tick_size=exit_executor.DEFAULT_TICK_SIZE,
+                                        budget=exit_executor.PassBudget(
+                                            submits=_initial_budget_room,
+                                            escalations=_initial_budget_room,
+                                            reprices=_initial_budget_room,
+                                        ),
+                                        now=now,
+                                    )
+                                exit_submissions_this_pass[0] += int(
+                                    _first_report.get("submitted", 0)
+                                    + _first_report.get("escalated", 0)
+                                    + _first_report.get("repriced", 0)
+                                )
+                                logger.info(
+                                    "Laddered exit initialized for order=%s trigger=%s children=%d submitted=%d",
+                                    row.id,
+                                    close_trigger,
+                                    len(_children_records),
+                                    int(_first_report.get("submitted", 0) or 0),
+                                )
+                            except Exception as _first_exc:
+                                exit_record["last_error"] = _format_exit_error(_first_exc)
+                                logger.warning(
+                                    "Laddered exit initial pass exception for order=%s: %s",
+                                    row.id,
+                                    _format_exit_error(_first_exc),
+                                    exc_info=_first_exc,
+                                )
+                        payload["pending_live_exit"] = exit_record
+                        row.payload_json = payload
+                        row.updated_at = now
+                        state_updates += 1
+                        held += 1
+                        continue
+
                 if token_id and exit_size > 0:
                     exit_size = _remaining_exit_size(
                         required_exit_size=exit_size,
