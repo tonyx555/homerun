@@ -512,8 +512,49 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
             return
         from services.polymarket_trade_verifier import (
             verify_orders_against_wallet_trades,
-            verify_orders_against_market_resolutions,
+            verify_orders_against_closed_positions,
         )
+        # PASS 1: closed_positions FIRST.
+        #
+        # For resolved markets, the on-chain settlement price (curPrice
+        # on /data/closed-positions) is deterministic truth and cannot
+        # be misattributed by manual user trades on the same wallet/
+        # token (unlike the trade matcher, which can pull in unrelated
+        # SELL trades and conflate them with the bot's exit). We run
+        # this first so trade-matcher results don't override the
+        # higher-authority settlement.
+        async with AsyncSessionLocal() as cp_session:
+            try:
+                cp_result = await asyncio.wait_for(
+                    verify_orders_against_closed_positions(
+                        cp_session,
+                        wallet_address=wallet_address,
+                        commit=True,
+                    ),
+                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "polymarket_trade_verifier (closed_positions) timed out after %.1fs",
+                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+                return
+        if cp_result.get("verified", 0) > 0:
+            logger.info(
+                "polymarket_trade_verifier sweep (closed_positions)",
+                examined=cp_result.get("examined"),
+                verified=cp_result.get("verified"),
+                unmatched=cp_result.get("unmatched"),
+                skipped_already_verified=cp_result.get("skipped_already_verified"),
+                closed_positions_fetched=cp_result.get("closed_positions_fetched"),
+                pnl_delta=round(cp_result.get("pnl_delta", 0.0), 4),
+            )
+        # PASS 2: trade matcher second.
+        #
+        # Catches non-resolved positions that the bot exited via SELL
+        # (or any other on-chain wallet activity that touched our
+        # tokens — manual sells, transfers, etc). Skips rows that
+        # closed_positions already wallet_activity-verified.
         async with AsyncSessionLocal() as verify_session:
             try:
                 trade_result = await asyncio.wait_for(
@@ -540,33 +581,6 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
                 pnl_total_before=round(trade_result.get("pnl_total_before", 0.0), 4),
                 pnl_total_after=round(trade_result.get("pnl_total_after", 0.0), 4),
                 pnl_delta=round(trade_result.get("pnl_delta", 0.0), 4),
-            )
-        # Now sweep resolved-but-untraded orders for deterministic
-        # resolution payouts ($1 winning / $0 losing). Catches positions
-        # the user holds through resolution rather than exiting via SELL.
-        async with AsyncSessionLocal() as resolution_session:
-            try:
-                resolution_result = await asyncio.wait_for(
-                    verify_orders_against_market_resolutions(
-                        resolution_session,
-                        commit=True,
-                    ),
-                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "polymarket_trade_verifier (resolutions) timed out after %.1fs",
-                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
-                )
-                return
-        if resolution_result.get("verified", 0) > 0:
-            logger.info(
-                "polymarket_trade_verifier sweep (resolutions)",
-                examined=resolution_result.get("examined"),
-                verified=resolution_result.get("verified"),
-                skipped_unresolved=resolution_result.get("skipped_unresolved"),
-                skipped_already_verified=resolution_result.get("skipped_already_verified"),
-                pnl_delta=round(resolution_result.get("pnl_delta", 0.0), 4),
             )
     except Exception as exc:
         logger.warning("polymarket_trade_verifier sweep failed", exc_info=exc)

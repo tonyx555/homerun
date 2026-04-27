@@ -453,6 +453,14 @@ async def verify_orders_against_wallet_trades(
 
     for row in rows:
         examined += 1
+        # Skip rows already verified by closed_positions or a prior
+        # trade-matcher run — closed_positions takes priority because
+        # its settlement price is deterministic and immune to
+        # manual-user-sell conflation. Trade matcher only fills in
+        # gaps where closed_positions didn't have data.
+        existing_status = str(row.verification_status or "").strip().lower()
+        if existing_status == "wallet_activity" and row.actual_profit is not None:
+            continue
         prior_profit = float(row.actual_profit) if row.actual_profit is not None else 0.0
         token_id = _entry_token_id(row)
         if not token_id:
@@ -535,6 +543,205 @@ async def verify_orders_against_wallet_trades(
         "verified": verified,
         "unmatched": unmatched,
         "wallet_trades_fetched": len(trades_raw or []),
+        "pnl_total_before": pnl_total_before,
+        "pnl_total_after": pnl_total_after,
+        "pnl_delta": pnl_total_after - pnl_total_before,
+        "dry_run": dry_run,
+    }
+
+
+async def verify_orders_against_closed_positions(
+    session: AsyncSession,
+    *,
+    wallet_address: str,
+    order_window_start: datetime | None = None,
+    order_ids: Iterable[str] | None = None,
+    max_positions: int = 500,
+    commit: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Resolve held-to-resolution P&L from Polymarket closed_positions.
+
+    For positions the bot held until market resolution, there is no
+    SELL trade in /data/trades — the wallet simply gets paid out
+    deterministically ($1 per winning share, $0 per losing share). The
+    /data/closed-positions endpoint reflects exactly this state with
+    curPrice = the resolved settlement price.
+
+    For each TraderOrder not yet wallet_activity-verified by the trade
+    matcher above:
+      1. Look up the matching closed_position by asset (token_id)
+      2. Compute realized_pnl using the bot's own cost basis and the
+         resolution settlement price:
+            bot_pnl = (settled_curPrice - bot_avg_price) * bot_size
+      3. This is robust to the wallet/manual-trade conflation problem
+         because settled curPrice is the same for everyone who held
+         the token (resolution payouts are deterministic per outcome).
+
+    Writes verification_status = wallet_activity with
+    verification_source = polymarket_closed_positions, since the
+    on-chain settlement is unambiguous truth.
+    """
+    wallet_lower = str(wallet_address or "").strip().lower()
+    if not wallet_lower:
+        return {"error": "missing_wallet_address", "examined": 0, "verified": 0, "unmatched": 0}
+
+    try:
+        positions_raw = await polymarket_client.get_closed_positions_paginated(
+            wallet_lower, max_positions=max_positions
+        )
+    except Exception as exc:
+        logger.warning(
+            "polymarket_trade_verifier closed_positions fetch failed",
+            wallet=wallet_lower,
+            exc_info=exc,
+        )
+        return {
+            "error": "closed_positions_fetch_failed",
+            "error_type": type(exc).__name__,
+            "examined": 0,
+            "verified": 0,
+            "unmatched": 0,
+        }
+
+    closed_by_asset: dict[str, dict[str, Any]] = {}
+    for cp in positions_raw or []:
+        if not isinstance(cp, dict):
+            continue
+        asset = str(cp.get("asset") or "").strip()
+        if not asset:
+            continue
+        # If multiple closed_positions for same asset (rare — wallet
+        # opens, fully closes, re-opens, fully closes again), keep the
+        # most recent by timestamp.
+        existing = closed_by_asset.get(asset)
+        if existing is not None:
+            new_ts = safe_float(cp.get("timestamp"), 0.0) or 0.0
+            old_ts = safe_float(existing.get("timestamp"), 0.0) or 0.0
+            if new_ts <= old_ts:
+                continue
+        closed_by_asset[asset] = cp
+
+    query = (
+        select(TraderOrder)
+        .where(TraderOrder.mode == "live")
+        .where(TraderOrder.status.in_(_RESOLVED_STATUSES))
+    )
+    if order_ids is not None:
+        ids = [str(oid).strip() for oid in order_ids if str(oid).strip()]
+        if not ids:
+            return {"examined": 0, "verified": 0, "unmatched": 0}
+        query = query.where(TraderOrder.id.in_(ids))
+    else:
+        if order_window_start is None:
+            from datetime import timedelta
+            order_window_start = utcnow() - timedelta(days=14)
+        query = query.where(TraderOrder.updated_at >= order_window_start)
+
+    rows = list((await session.execute(query)).scalars().all())
+
+    examined = 0
+    verified = 0
+    unmatched = 0
+    skipped_already_verified = 0
+    pnl_total_before = 0.0
+    pnl_total_after = 0.0
+    now = utcnow()
+
+    for row in rows:
+        examined += 1
+        # The trade-matcher above is HIGHER fidelity (transaction-hash
+        # level) than per-position aggregate, so don't override its
+        # values. This path only fills in held-to-resolution positions
+        # the trade matcher couldn't see.
+        existing_status = str(row.verification_status or "").strip().lower()
+        if existing_status == "wallet_activity" and row.actual_profit is not None:
+            skipped_already_verified += 1
+            continue
+
+        token_id = _entry_token_id(row)
+        if not token_id:
+            unmatched += 1
+            continue
+        cp = closed_by_asset.get(token_id)
+        if not cp:
+            unmatched += 1
+            continue
+
+        # The bot's own cost basis and size from our recorded fill.
+        bot_size = _entry_fill_size(row)
+        bot_cost = _entry_cost_basis(row)
+        if bot_size <= 0.0 or bot_cost <= 0.0:
+            unmatched += 1
+            continue
+        bot_avg_price = bot_cost / bot_size
+        # Resolution settlement price (curPrice on a closed position
+        # is the on-chain settlement value: $1 per winning share, $0
+        # per losing share, or fractional in rare cases).
+        settled_price = safe_float(cp.get("curPrice"), None)
+        if settled_price is None or settled_price < 0.0:
+            unmatched += 1
+            continue
+        verified_pnl = (settled_price - bot_avg_price) * bot_size
+        prior_profit = float(row.actual_profit) if row.actual_profit is not None else 0.0
+        verified += 1
+        pnl_total_before += prior_profit
+        pnl_total_after += verified_pnl
+
+        if dry_run:
+            continue
+
+        row.actual_profit = float(verified_pnl)
+        row.updated_at = now
+        apply_trader_order_verification(
+            row,
+            verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+            verification_source="polymarket_closed_positions",
+            verification_reason=f"settled@{settled_price:.4f}",
+            execution_wallet_address=wallet_lower,
+            verified_at=now,
+            force=True,
+        )
+        payload = dict(row.payload_json or {})
+        payload["verified_close"] = {
+            "verified_at": now.isoformat(),
+            "matched_size": bot_size,
+            "settled_price": settled_price,
+            "bot_avg_price": bot_avg_price,
+            "matched_proceeds": bot_size * settled_price,
+            "allocated_cost": bot_cost,
+            "realized_pnl": verified_pnl,
+            "source": "polymarket_closed_positions",
+            "wallet_aggregate_realized_pnl": cp.get("realizedPnl"),
+            "wallet_aggregate_total_bought": cp.get("totalBought"),
+        }
+        row.payload_json = payload
+        append_trader_order_verification_event(
+            session,
+            trader_order_id=str(row.id),
+            verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+            source="polymarket_closed_positions",
+            event_type="verified_close_from_closed_positions",
+            reason=f"verified_pnl={verified_pnl:.4f} settled={settled_price:.4f}",
+            payload_json={
+                "settled_price": settled_price,
+                "bot_avg_price": bot_avg_price,
+                "bot_size": bot_size,
+                "prior_actual_profit": prior_profit,
+                "verified_actual_profit": verified_pnl,
+            },
+            created_at=now,
+        )
+
+    if commit and not dry_run and verified > 0:
+        await session.commit()
+
+    return {
+        "examined": examined,
+        "verified": verified,
+        "unmatched": unmatched,
+        "skipped_already_verified": skipped_already_verified,
+        "closed_positions_fetched": len(positions_raw or []),
         "pnl_total_before": pnl_total_before,
         "pnl_total_after": pnl_total_after,
         "pnl_delta": pnl_total_after - pnl_total_before,
