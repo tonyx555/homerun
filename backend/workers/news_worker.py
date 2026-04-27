@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from config import settings
 from models.database import AsyncSessionLocal, Trader, recover_pool
+from services.live_pressure import current_backpressure_level, is_db_pressure_active
 from services.news import shared_state
 from services.data_events import DataEvent
 from services.event_dispatcher import event_dispatcher
@@ -267,8 +268,17 @@ async def _run_loop() -> None:
         except Exception as exc:
             logger.debug("News intent expiry pass failed: %s", exc)
 
+        # Defer scheduled news scans when DB pressure is active or
+        # backpressure is high.  News work is COLD — story fetches +
+        # bulk inserts — and should not compete with the orchestrator
+        # hot path.  An explicit user-triggered run still bypasses.
+        backpressure_defer = is_db_pressure_active() or current_backpressure_level() > 0.6
         should_run_scheduled = (
-            enabled and auto_run and not paused and (next_scheduled_run_at is None or now >= next_scheduled_run_at)
+            enabled
+            and auto_run
+            and not paused
+            and (next_scheduled_run_at is None or now >= next_scheduled_run_at)
+            and not backpressure_defer
         )
         should_run = requested or should_run_scheduled
 

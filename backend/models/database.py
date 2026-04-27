@@ -1288,6 +1288,11 @@ class AppSettings(Base):
     max_slippage_percent = Column(Float, default=2.0)
     min_account_balance_usd = Column(Float, default=0.0)
 
+    # CTF Redeemer Policy (UI-tunable; see alembic 202604280001)
+    redeemer_min_payout_usd = Column(Float, nullable=True)
+    redeemer_max_gas_price_gwei = Column(Float, nullable=True)
+    redeemer_force_including_losers = Column(Boolean, nullable=True)
+
     # Search Settings (which platforms to query, result limits)
     search_polymarket_enabled = Column(Boolean, default=True)
     search_kalshi_enabled = Column(Boolean, default=False)

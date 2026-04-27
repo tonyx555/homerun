@@ -14,6 +14,7 @@ from datetime import datetime
 from models.database import AppSettings, AsyncSessionLocal, CortexMemory
 from services.ai.agent import Agent, AgentEventType
 from services.ai.tools import get_all_tools
+from services.live_pressure import current_backpressure_level, is_db_pressure_active
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
@@ -327,6 +328,12 @@ async def maybe_run_cortex_tick() -> None:
         return
 
     if not cfg.get("enabled"):
+        return
+
+    # Defer cortex cycles when DB pressure is active or backpressure is
+    # elevated.  Cortex is COLD — heavy LLM/tool calls + DB reads — and
+    # should yield to the orchestrator hot path.
+    if is_db_pressure_active() or current_backpressure_level() > 0.6:
         return
 
     interval = max(30, cfg.get("interval_seconds", 300))

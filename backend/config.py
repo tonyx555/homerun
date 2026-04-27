@@ -212,6 +212,18 @@ class Settings(BaseSettings):
     MIN_ACCOUNT_BALANCE_USD: float = 0.0  # Keep this balance untouched for buys
     MIN_ORDER_SIZE_USD: float = 1.0  # Minimum order size
 
+    # CTF Redeemer Policy
+    # ----------------------------------------------------------------
+    # The redeemer worker sweeps resolved Polymarket positions and calls
+    # ``redeemPositions`` to convert conditional tokens into USDC. For
+    # winning outcomes that's free money; for losing outcomes the on-
+    # chain payout is $0 and the redemption is a pure gas-cost burn.
+    # These settings make the redeem-vs-skip decision configurable so
+    # the bot never auto-burns gas without explicit operator opt-in.
+    REDEEMER_MIN_PAYOUT_USD: float = 0.10  # Skip redemption below this expected payout
+    REDEEMER_MAX_GAS_PRICE_GWEI: float = 200.0  # Defer redemption when network is hot
+    REDEEMER_FORCE_INCLUDING_LOSERS: bool = False  # Operator override: redeem $0-payout dust too
+
     # Order Settings
     DEFAULT_ORDER_TYPE: str = "GTC"  # GTC (Good Till Cancel) or FOK (Fill Or Kill)
     MAX_SLIPPAGE_PERCENT: float = 2.0  # Maximum acceptable slippage
@@ -789,6 +801,10 @@ async def apply_search_filters():
         ("MAX_DAILY_TRADE_VOLUME", "max_daily_trade_volume", 1000.0),
         ("MAX_SLIPPAGE_PERCENT", "max_slippage_percent", 2.0),
         ("MIN_ACCOUNT_BALANCE_USD", "min_account_balance_usd", 0.0),
+        # CTF Redeemer policy — see Settings class above for semantics.
+        ("REDEEMER_MIN_PAYOUT_USD", "redeemer_min_payout_usd", None),
+        ("REDEEMER_MAX_GAS_PRICE_GWEI", "redeemer_max_gas_price_gwei", None),
+        ("REDEEMER_FORCE_INCLUDING_LOSERS", "redeemer_force_including_losers", None),
     ]
 
     for config_attr, db_attr, default in _apply:

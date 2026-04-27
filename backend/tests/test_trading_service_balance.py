@@ -361,6 +361,10 @@ async def test_place_sell_order_fails_before_submit_when_pre_submit_gate_fails(m
     service._balance_signature_type = 1
     client = _SellGateClient()
     service._client = client
+    # ``place_order`` always persists; without these stubs the test wallet
+    # would leak rows into the real ``live_trading_orders`` table.
+    monkeypatch.setattr(service, "_persist_orders", AsyncMock())
+    monkeypatch.setattr(service, "_persist_runtime_state", AsyncMock())
 
     order = await service.place_order(
         token_id="token-123",
@@ -413,6 +417,10 @@ async def test_place_buy_order_fails_before_submit_when_pre_submit_gate_fails(mo
     service._balance_signature_type = 1
     client = _BuyGateClient()
     service._client = client
+    # ``place_order`` always persists; without these stubs the test wallet
+    # would leak rows into the real ``live_trading_orders`` table.
+    monkeypatch.setattr(service, "_persist_orders", AsyncMock())
+    monkeypatch.setattr(service, "_persist_runtime_state", AsyncMock())
 
     order = await service.place_order(
         token_id="token-123",

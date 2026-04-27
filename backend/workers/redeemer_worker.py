@@ -25,7 +25,13 @@ WORKER_NAME = "redeemer"
 DEFAULT_INTERVAL_SECONDS = 120
 _IDLE_SLEEP_SECONDS = 2
 _MAX_CONSECUTIVE_DB_FAILURES = 3
+# Dry-run scans (the default scheduled cycle) only do view calls and finish
+# in seconds, but a real-mode run has to walk every resolved condition with
+# multiple chain RPCs (payoutDenominator + per-token balance + redeem) and
+# can comfortably exceed 90s on slower providers.  Give real cycles a much
+# wider budget; dry-runs still complete inside their normal envelope.
 _REDEEM_CYCLE_TIMEOUT_SECONDS = 90.0
+_REDEEM_REAL_CYCLE_TIMEOUT_SECONDS = 240.0
 
 
 async def _run_redeem_cycle(*, dry_run: bool) -> dict[str, Any]:
@@ -83,9 +89,14 @@ async def run_worker_loop() -> None:
                 continue
 
             cycle_reason = "requested" if requested_run else "scheduled"
+            cycle_timeout = (
+                _REDEEM_REAL_CYCLE_TIMEOUT_SECONDS
+                if requested_run
+                else _REDEEM_CYCLE_TIMEOUT_SECONDS
+            )
             summary = await asyncio.wait_for(
                 _run_redeem_cycle(dry_run=not requested_run),
-                timeout=_REDEEM_CYCLE_TIMEOUT_SECONDS,
+                timeout=cycle_timeout,
             )
 
             async with AsyncSessionLocal() as session:

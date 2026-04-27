@@ -4509,6 +4509,13 @@ async def reconcile_live_positions(
             hours=max(_TERMINAL_REOPEN_LOOKBACK_HOURS, _NONACTIVE_WALLET_REOPEN_LOOKBACK_HOURS)
         )
         terminal_stmt = terminal_stmt.where(terminal_age_expr >= audit_cutoff)
+        # Bound the SQL fetch.  Without a LIMIT, traders with hundreds of
+        # terminal orders in the 72h lookback window were returning the
+        # full set every reconciliation cycle (driving pre_io >10s).  We
+        # take the OLDEST first and cap well above the Python-side
+        # _TERMINAL_REOPEN_AUDIT_MAX_ROWS_PER_PASS so the post-filter
+        # still has room.
+        terminal_stmt = terminal_stmt.limit(_TERMINAL_REOPEN_AUDIT_MAX_ROWS_PER_PASS * 8)
     terminal_rows = list(((await session.execute(terminal_stmt)).scalars().all()))
     if max_age_hours is None:
         terminal_rows = [row for row in terminal_rows if _terminal_row_requires_reopen_audit(row, now_naive)]

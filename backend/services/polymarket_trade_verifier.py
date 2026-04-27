@@ -85,6 +85,26 @@ _RESOLVED_STATUSES = (
     "loss",
 )
 
+
+def _reconcile_status_with_pnl(row: TraderOrder, verified_pnl: float) -> None:
+    # The verifier may overwrite ``actual_profit`` with on-chain truth long
+    # after the orchestrator decided the win/loss label from a different
+    # (often coarser) close-price estimate.  When the verifier's number
+    # disagrees in sign with the existing label, flip the label so the UI
+    # and aggregation queries don't show "resolved_win" with negative pnl.
+    current_status = str(row.status or "").strip().lower()
+    if current_status not in {"closed_win", "closed_loss", "resolved_win", "resolved_loss"}:
+        return
+    is_resolution = current_status.startswith("resolved")
+    if verified_pnl > 0:
+        target = "resolved_win" if is_resolution else "closed_win"
+    elif verified_pnl < 0:
+        target = "resolved_loss" if is_resolution else "closed_loss"
+    else:
+        return
+    if target != current_status:
+        row.status = target
+
 # Cap HTTP-fetch portion of the verifier sweeps separately from the
 # overall session timeout (30s).  Without this, a slow Polymarket
 # pagination consumes the entire budget and the verifier holds its
@@ -481,6 +501,15 @@ async def verify_orders_against_wallet_trades(
 
     now = utcnow()
 
+    # Commit per-batch to keep row-lock duration short.  Without this
+    # the loop holds TransactionID locks on every updated trader_orders
+    # row until the final commit, blocking other writers (orchestrator,
+    # fast_trader_runtime) for seconds.  Production saw 3s+ lock holds
+    # surface as ``LOCK CONTENTION`` watchdog warnings on UPDATE
+    # trader_orders.  See _on_observe_lock_contention pool listener.
+    _COMMIT_BATCH_SIZE = 50
+    _commit_batch = 0
+
     for row in rows:
         examined += 1
         # Skip rows already verified by closed_positions or a prior
@@ -523,6 +552,7 @@ async def verify_orders_against_wallet_trades(
             continue
 
         row.actual_profit = float(verified_pnl)
+        _reconcile_status_with_pnl(row, float(verified_pnl))
         row.updated_at = now
         first_tx = match.tx_hashes[0] if match.tx_hashes else None
         apply_trader_order_verification(
@@ -564,8 +594,12 @@ async def verify_orders_against_wallet_trades(
             },
             created_at=now,
         )
+        _commit_batch += 1
+        if commit and _commit_batch >= _COMMIT_BATCH_SIZE:
+            await session.commit()
+            _commit_batch = 0
 
-    if commit and not dry_run and verified > 0:
+    if commit and not dry_run and _commit_batch > 0:
         await session.commit()
 
     return {
@@ -761,6 +795,7 @@ async def verify_orders_from_bot_lineage(
             pnl_total_after += verified_pnl
             if not dry_run:
                 row.actual_profit = float(verified_pnl)
+                _reconcile_status_with_pnl(row, float(verified_pnl))
                 row.updated_at = now
                 apply_trader_order_verification(
                     row,
@@ -820,6 +855,7 @@ async def verify_orders_from_bot_lineage(
                 pnl_total_after += verified_pnl
                 if not dry_run:
                     row.actual_profit = float(verified_pnl)
+                    _reconcile_status_with_pnl(row, float(verified_pnl))
                     row.updated_at = now
                     apply_trader_order_verification(
                         row,
@@ -1043,6 +1079,7 @@ async def verify_orders_against_closed_positions(
             continue
 
         row.actual_profit = float(verified_pnl)
+        _reconcile_status_with_pnl(row, float(verified_pnl))
         row.updated_at = now
         apply_trader_order_verification(
             row,
@@ -1263,6 +1300,7 @@ async def verify_orders_against_market_resolutions(
             continue
 
         row.actual_profit = float(verified_pnl)
+        _reconcile_status_with_pnl(row, float(verified_pnl))
         row.updated_at = now
         apply_trader_order_verification(
             row,

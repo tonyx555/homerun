@@ -9,6 +9,7 @@ from typing import Any
 from config import apply_runtime_settings_overrides, settings
 from models.database import AsyncSessionLocal
 from services.event_bus import event_bus
+from services.live_pressure import backpressure_extra_sleep_seconds
 from services.shared_state import (
     list_open_scanner_slo_incidents,
     read_scanner_control,
@@ -363,7 +364,13 @@ async def _run_loop() -> None:
                 state["activity"] = f"Scanner SLO evaluation error: {exc}"
                 logger.exception("Scanner SLO evaluation cycle failed")
 
-            await asyncio.sleep(float(interval_seconds))
+            # Add backpressure sleep on top of the base interval — under
+            # DB pressure (or sustained queue saturation) the SLO loop
+            # can voluntarily slow down so the orchestrator hot path
+            # gets connection-pool / planner headroom back.
+            base_sleep = float(interval_seconds)
+            extra_sleep = backpressure_extra_sleep_seconds(base_sleep)
+            await asyncio.sleep(base_sleep + extra_sleep)
     finally:
         heartbeat_stop_event.set()
         heartbeat_task.cancel()

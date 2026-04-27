@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import time
+from datetime import timedelta
 from typing import Any
 
 import asyncpg
@@ -61,9 +62,23 @@ _last_position_mark_sync_at = 0.0
 # ledger is only updated at service init; off-app activity (manual sells
 # on the UI, transfers, redemptions) silently drifts the ledger and
 # causes "balance is not enough" rejections at exit time.
-_LIVE_WALLET_POSITIONS_SYNC_INTERVAL_SECONDS = 90.0
+_LIVE_WALLET_POSITIONS_SYNC_INTERVAL_SECONDS = 30.0
 _last_live_wallet_positions_sync_at = 0.0
 _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
+# Sweep open CLOB orders that are clearly stuck — old enough to be
+# unintentional and far enough off-market that they will not fill
+# during their remaining lifetime.  Strategies still re-quote on their
+# normal cadence; the sweeper only handles abandoned residue.
+_STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS = 300.0
+_last_stale_open_order_sweep_at = 0.0
+_STALE_OPEN_ORDER_AGE_HOURS = 6.0
+# Cancel an exit order if its target price is more than this multiple
+# off the current mid (e.g. SELL @ 0.12 vs mid 0.02 = 6x off-market).
+_STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE = 2.5
+# Always sweep residual size below this threshold — Polymarket's per-
+# order min is 5 shares so anything left below this can never fill.
+_STALE_OPEN_ORDER_RESIDUAL_SHARES = 1.0
+_STALE_OPEN_ORDER_SWEEP_TIMEOUT_SECONDS = 25.0
 # Polymarket-truth realized P&L verification: every 5 minutes, walk all
 # orders closed today, fetch the wallet's actual on-chain SELL trades,
 # match them to our orders, and overwrite actual_profit with verified
@@ -144,6 +159,37 @@ def _discard_abandoned_task(task: asyncio.Task) -> None:
             task.exception()
         except (asyncio.CancelledError, asyncio.InvalidStateError):
             pass
+
+
+# Strong-ref bag for fire-and-forget background tasks spawned out of
+# the reconciliation loop.  asyncio only weakly references tasks; if
+# we don't hold a ref the task can be GC'd mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro, *, label: str) -> asyncio.Task:
+    """Schedule *coro* as a fire-and-forget background task.
+
+    Use this for non-critical work that must NOT block the reconciliation
+    cycle (e.g., HTTP refreshes that have been observed to time out at
+    20s+).  The task's exception is logged at warning level.
+    """
+    task = asyncio.create_task(coro, name=f"trader-reconciliation-bg-{label}")
+    _background_tasks.add(task)
+
+    def _on_done(t: asyncio.Task) -> None:
+        _background_tasks.discard(t)
+        if t.cancelled():
+            return
+        try:
+            exc = t.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            logger.warning("background task %s failed", label, exc_info=exc)
+
+    task.add_done_callback(_on_done)
+    return task
 
 
 def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
@@ -487,6 +533,153 @@ async def _sync_live_wallet_positions() -> None:
         )
     except Exception as exc:
         logger.warning("live wallet positions sync failed", exc_info=exc)
+
+
+async def _sweep_stale_open_orders() -> dict[str, Any]:
+    # Cancel CLOB orders that are old enough and off-market enough that they
+    # are functionally abandoned.  Three reasons we sweep:
+    #   1. Take-profit limits whose target price is far above the current
+    #      mid (e.g. SELL @ 0.44 vs mid 0.14) — strategy left them and
+    #      moved on; they sit consuming inventory reservation forever.
+    #   2. BUY residuals whose remaining size is below the Polymarket
+    #      minimum (~5 shares) — they cannot fill regardless of price.
+    #   3. Anything older than the configured age that no strategy has
+    #      touched in that time.
+    global _last_stale_open_order_sweep_at
+    now_mono = time.monotonic()
+    if (now_mono - _last_stale_open_order_sweep_at) < _STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS:
+        return {"checked": False, "cancelled": 0, "scanned": 0}
+    _last_stale_open_order_sweep_at = now_mono
+
+    summary: dict[str, Any] = {
+        "checked": True,
+        "scanned": 0,
+        "cancelled": 0,
+        "errors": [],
+    }
+    try:
+        if not live_execution_service.is_ready():
+            return summary
+        open_orders = await asyncio.wait_for(
+            live_execution_service.get_open_orders(),
+            timeout=_STALE_OPEN_ORDER_SWEEP_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        summary["errors"].append("get_open_orders_timeout")
+        return summary
+    except Exception as exc:
+        logger.warning("stale-order sweep failed to fetch open orders", exc_info=exc)
+        summary["errors"].append(str(exc))
+        return summary
+
+    if not open_orders:
+        return summary
+
+    summary["scanned"] = len(open_orders)
+    age_cutoff = utcnow() - timedelta(hours=_STALE_OPEN_ORDER_AGE_HOURS)
+    candidates: list[tuple[Any, str]] = []
+    token_ids: set[str] = set()
+    for order in open_orders:
+        try:
+            created = order.created_at
+            if created is None or created > age_cutoff:
+                continue
+            remaining = float(order.size or 0.0) - float(order.filled_size or 0.0)
+            if remaining <= 0:
+                continue
+            target = str(order.clob_order_id or order.id or "").strip()
+            if not target:
+                continue
+            if remaining < _STALE_OPEN_ORDER_RESIDUAL_SHARES:
+                candidates.append((order, "residual_below_min"))
+                continue
+            tid = str(getattr(order, "token_id", "") or "").strip()
+            if tid:
+                token_ids.add(tid)
+            candidates.append((order, "pending_price_check"))
+        except Exception:
+            continue
+
+    if not candidates:
+        return summary
+
+    mids: dict[str, float] = {}
+    if token_ids:
+        try:
+            from services.polymarket import polymarket_client
+
+            price_payload = await asyncio.wait_for(
+                polymarket_client.get_prices_batch(list(token_ids)),
+                timeout=10.0,
+            )
+            for tid, data in (price_payload or {}).items():
+                if isinstance(data, dict):
+                    mid = data.get("mid") or data.get("last") or data.get("price")
+                else:
+                    mid = data
+                try:
+                    mid_f = float(mid) if mid is not None else 0.0
+                except (TypeError, ValueError):
+                    mid_f = 0.0
+                if mid_f > 0:
+                    mids[str(tid)] = mid_f
+        except Exception as exc:
+            logger.warning("stale-order sweep mid-price lookup failed", exc_info=exc)
+
+    cancellable: list[tuple[Any, str]] = []
+    for order, reason in candidates:
+        if reason == "residual_below_min":
+            cancellable.append((order, reason))
+            continue
+        tid = str(getattr(order, "token_id", "") or "").strip()
+        mid = mids.get(tid, 0.0)
+        try:
+            limit = float(order.price or 0.0)
+        except (TypeError, ValueError):
+            limit = 0.0
+        side = getattr(order, "side", None)
+        side_text = str(getattr(side, "value", side) or "").strip().upper()
+        if mid > 0 and limit > 0:
+            if side_text == "SELL" and limit >= mid * _STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE:
+                cancellable.append((order, f"sell_far_above_mid mid={mid:.4f}"))
+                continue
+            if side_text == "BUY" and mid >= limit * _STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE:
+                cancellable.append((order, f"buy_far_below_mid mid={mid:.4f}"))
+                continue
+        # No mid available — fall back to age-only cancellation if the
+        # order is significantly older than the threshold.
+        try:
+            age_hours = (utcnow() - order.created_at).total_seconds() / 3600.0
+        except Exception:
+            age_hours = 0.0
+        if age_hours >= _STALE_OPEN_ORDER_AGE_HOURS * 4:
+            cancellable.append((order, f"age_only hours={age_hours:.1f}"))
+
+    for order, reason in cancellable:
+        target = str(order.clob_order_id or order.id or "").strip()
+        if not target:
+            continue
+        try:
+            ok = await asyncio.wait_for(
+                live_execution_service.cancel_order(target),
+                timeout=15.0,
+            )
+        except asyncio.TimeoutError:
+            ok = False
+        if ok:
+            summary["cancelled"] = int(summary["cancelled"]) + 1
+            logger.info(
+                "stale-order sweeper cancelled order",
+                order_id=target,
+                reason=reason,
+                side=str(getattr(order, "side", "")),
+                price=float(getattr(order, "price", 0) or 0),
+                size=float(getattr(order, "size", 0) or 0),
+                filled=float(getattr(order, "filled_size", 0) or 0),
+            )
+        else:
+            summary["errors"].append(target)
+    return summary
 
 
 async def _verify_realized_pnl_against_wallet_trades() -> None:
@@ -1283,8 +1476,22 @@ async def run_worker_loop() -> None:
                 await _sync_position_marks_and_exit_registry()
                 # Refresh the live wallet position snapshot from the data API
                 # so the in-memory ledger does not silently drift from chain
-                # state when off-app activity touches the wallet.
-                await _sync_live_wallet_positions()
+                # state when off-app activity touches the wallet.  Spawn as
+                # a background task instead of awaiting — the function has
+                # internal 30s throttling so it won't pile up, and a slow
+                # Polymarket /positions response (saw 20s timeouts in prod)
+                # must not block the reconciliation loop.
+                _spawn_background(
+                    _sync_live_wallet_positions(),
+                    label="sync_live_wallet_positions",
+                )
+                # Cancel CLOB orders that are clearly abandoned (old + far
+                # off-market or below the Polymarket per-order minimum so they
+                # cannot fill).  Throttled internally to ~5 minutes.
+                try:
+                    await _sweep_stale_open_orders()
+                except Exception as exc:
+                    logger.warning("stale-order sweep failed", exc_info=exc)
                 # Reconcile reported realized P&L against Polymarket truth.
                 # Walks today's closed orders, fetches actual on-chain SELL
                 # trades from the data API, FIFO-matches and writes the

@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_FLOOR
 import uuid
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import InterfaceError, OperationalError
 
@@ -1821,6 +1821,66 @@ class LiveExecutionService:
                 if needs_retry:
                     await asyncio.sleep(_db_retry_delay(attempt))
 
+    async def _derive_pnl_counters_from_orders(
+        self, session: Any, wallet: str
+    ) -> dict[str, Any]:
+        # ``TraderOrder.actual_profit`` is the verified-truth ledger maintained
+        # by ``polymarket_trade_verifier``; aggregating it here keeps the
+        # runtime-state row honest without inventing a parallel accumulator.
+        from sqlalchemy import func as _func
+        from models.database import TraderOrder
+
+        wallet_lower = (wallet or "").lower()
+        wallet_addr = _func.lower(_func.coalesce(TraderOrder.execution_wallet_address, ""))
+        base_filter = (wallet_addr == wallet_lower) & (
+            TraderOrder.actual_profit.isnot(None)
+        )
+        totals = (
+            await session.execute(
+                select(
+                    _func.coalesce(_func.sum(TraderOrder.actual_profit), 0.0),
+                    _func.coalesce(
+                        _func.sum(
+                            case((TraderOrder.actual_profit > 0, 1), else_=0)
+                        ),
+                        0,
+                    ),
+                    _func.coalesce(
+                        _func.sum(
+                            case((TraderOrder.actual_profit < 0, 1), else_=0)
+                        ),
+                        0,
+                    ),
+                ).where(base_filter)
+            )
+        ).one()
+
+        daily_cutoff = datetime.combine(
+            self._daily_volume_reset, datetime.min.time(), tzinfo=timezone.utc
+        )
+        daily_pnl = (
+            await session.execute(
+                select(
+                    _func.coalesce(_func.sum(TraderOrder.actual_profit), 0.0)
+                ).where(
+                    base_filter
+                    & (
+                        _func.coalesce(
+                            TraderOrder.executed_at, TraderOrder.created_at
+                        )
+                        >= daily_cutoff
+                    )
+                )
+            )
+        ).scalar() or 0.0
+
+        return {
+            "total_pnl": float(totals[0] or 0.0),
+            "winning_trades": int(totals[1] or 0),
+            "losing_trades": int(totals[2] or 0),
+            "daily_pnl": float(daily_pnl),
+        }
+
     async def _persist_runtime_state(self) -> None:
         wallet = self._wallet_for_persistence()
         if not wallet:
@@ -1847,14 +1907,25 @@ class LiveExecutionService:
                             row = LiveTradingRuntimeState(id=runtime_id, wallet_address=wallet)
                             session.add(row)
 
+                        # Derive realized P&L counters from the verified
+                        # ground truth (TraderOrder.actual_profit).  The legacy
+                        # in-memory accumulators on ``self._stats``/``self._total_pnl``
+                        # were never wired to the close-of-position path, which
+                        # left ``winning_trades`` / ``losing_trades`` /
+                        # ``total_pnl`` stuck at 0 across every wallet.  Sourcing
+                        # from TraderOrder also picks up the verifier's
+                        # corrections automatically.
+                        derived = await self._derive_pnl_counters_from_orders(
+                            session, wallet
+                        )
                         row.wallet_address = wallet
                         row.total_trades = int(self._stats.total_trades)
-                        row.winning_trades = int(self._stats.winning_trades)
-                        row.losing_trades = int(self._stats.losing_trades)
+                        row.winning_trades = int(derived["winning_trades"])
+                        row.losing_trades = int(derived["losing_trades"])
                         row.total_volume = float(self._total_volume)
-                        row.total_pnl = float(self._total_pnl)
+                        row.total_pnl = float(derived["total_pnl"])
                         row.daily_volume = float(self._daily_volume)
-                        row.daily_pnl = float(self._daily_pnl)
+                        row.daily_pnl = float(derived["daily_pnl"])
                         row.open_positions = int(self._stats.open_positions)
                         row.last_trade_at = last_trade_at
                         row.daily_volume_reset_at = daily_reset_at
@@ -2282,6 +2353,26 @@ class LiveExecutionService:
         average_fill_price = safe_float(snapshot.get("average_fill_price"))
         if average_fill_price is not None and average_fill_price > 0:
             order.average_fill_price = float(average_fill_price)
+        else:
+            # Provider snapshots sometimes omit ``average_fill_price`` (or report
+            # 0) on partially/fully filled orders.  When that happens but the
+            # snapshot carries a fill notional, infer the average price so the
+            # persisted row isn't ``status=filled, average_fill_price=0``.
+            current_filled_size = max(0.0, safe_float(order.filled_size, 0.0) or 0.0)
+            if current_filled_size > 0:
+                filled_notional_usd = safe_float(snapshot.get("filled_notional_usd"))
+                if filled_notional_usd is not None and filled_notional_usd > 0:
+                    inferred = float(filled_notional_usd) / current_filled_size
+                    if inferred > 0:
+                        order.average_fill_price = inferred
+                elif (
+                    not order.average_fill_price or order.average_fill_price <= 0
+                ) and order.price and float(order.price) > 0:
+                    # Last-resort: use the limit price.  For GTC limits the
+                    # fill price equals the limit (or better), and Polymarket
+                    # clamps to whole-cent ticks, so this is safe.  This keeps
+                    # downstream P&L math from dividing by zero.
+                    order.average_fill_price = float(order.price)
         order.updated_at = utcnow()
 
     async def get_order_snapshots_by_clob_ids(self, clob_order_ids: list[str]) -> dict[str, dict[str, Any]]:

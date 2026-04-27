@@ -1,5 +1,6 @@
 """Shared fixtures for Polymarket arbitrage tests."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -8,6 +9,61 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 import pytest
+
+
+_TEST_WALLET_PREFIXES = ("0x1234567890abcdef", "0xdeadbeef", "0x0000000000000000")
+
+
+@pytest.fixture(autouse=True)
+def _block_test_wallet_db_writes(monkeypatch):
+    # Defense-in-depth: tests that exercise LiveExecutionService with a
+    # placeholder wallet (e.g. ``0x1234...5678``) used to leak failed-order
+    # rows into the real ``live_trading_orders`` table because the suite has
+    # no separate test database.  This autouse fixture intercepts any
+    # ``_persist_orders`` / ``_persist_runtime_state`` / ``_persist_positions``
+    # call coming from a known test-wallet address and turns it into a no-op,
+    # without affecting tests that exercise the persistence path explicitly
+    # (those should set a non-test wallet or override this fixture themselves).
+    if os.environ.get("HOMERUN_ALLOW_TEST_WALLET_DB_WRITES") == "1":
+        return
+
+    try:
+        from services import live_execution_service as _live
+    except Exception:
+        return
+
+    original_persist_orders = _live.LiveExecutionService._persist_orders
+    original_persist_runtime = _live.LiveExecutionService._persist_runtime_state
+    original_persist_positions = _live.LiveExecutionService._persist_positions
+
+    async def _maybe_skip_orders(self, orders):
+        wallet = (str(getattr(self, "_wallet_address", "") or "")).lower()
+        if any(wallet.startswith(prefix) for prefix in _TEST_WALLET_PREFIXES):
+            return
+        return await original_persist_orders(self, orders)
+
+    async def _maybe_skip_runtime(self):
+        wallet = (str(getattr(self, "_wallet_address", "") or "")).lower()
+        if any(wallet.startswith(prefix) for prefix in _TEST_WALLET_PREFIXES):
+            return
+        return await original_persist_runtime(self)
+
+    async def _maybe_skip_positions(self):
+        wallet = (str(getattr(self, "_wallet_address", "") or "")).lower()
+        if any(wallet.startswith(prefix) for prefix in _TEST_WALLET_PREFIXES):
+            return
+        return await original_persist_positions(self)
+
+    monkeypatch.setattr(
+        _live.LiveExecutionService, "_persist_orders", _maybe_skip_orders
+    )
+    monkeypatch.setattr(
+        _live.LiveExecutionService, "_persist_runtime_state", _maybe_skip_runtime
+    )
+    monkeypatch.setattr(
+        _live.LiveExecutionService, "_persist_positions", _maybe_skip_positions
+    )
+
 from datetime import timedelta
 from utils.utcnow import utcnow
 from unittest.mock import AsyncMock, MagicMock

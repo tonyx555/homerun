@@ -18,6 +18,7 @@ from services.discovery_shared_state import (
     read_discovery_control,
     write_discovery_snapshot,
 )
+from services.live_pressure import current_backpressure_level, is_db_pressure_active
 from services.pause_state import global_pause_state
 from services.wallet_discovery import wallet_discovery
 from services.worker_state import write_worker_snapshot
@@ -132,11 +133,18 @@ async def _run_loop() -> None:
         enabled = bool(control.get("is_enabled", True))
         now = datetime.now(timezone.utc)
 
+        # Defer scheduled discovery cycles when DB pressure is active
+        # or backpressure is elevated.  Discovery is COLD work — heavy
+        # DB scans + Polymarket HTTP — that the orchestrator hot path
+        # should not compete with.  An explicit user-triggered run
+        # (``requested``) still bypasses this check.
+        backpressure_defer = is_db_pressure_active() or current_backpressure_level() > 0.6
         should_run_scheduled = (
             enabled
             and not paused
             and not global_pause_state.is_paused
             and (next_scheduled_run_at is None or now >= next_scheduled_run_at)
+            and not backpressure_defer
         )
         should_run = requested or should_run_scheduled
 
