@@ -71,6 +71,7 @@ interface AutoresearchViewProps {
   tuneSaveError: string | null
   tuneRevertError: string | null
   formatTimestamp: (iso: string) => string
+  forceArMode?: 'params' | 'code'
 }
 
 interface StreamIteration {
@@ -107,6 +108,7 @@ export default function AutoresearchView({
   tuneSaveError,
   tuneRevertError,
   formatTimestamp,
+  forceArMode,
 }: AutoresearchViewProps) {
   const queryClient = useQueryClient()
   const abortRef = useRef<AbortController | null>(null)
@@ -115,7 +117,7 @@ export default function AutoresearchView({
   const [topTab, setTopTab] = useState<'parameters' | 'autoresearch'>('parameters')
 
   // Autoresearch inner mode: "params" or "code"
-  const [arMode, setArMode] = useState<'params' | 'code'>('params')
+  const [arMode, setArMode] = useState<'params' | 'code'>(forceArMode ?? 'params')
 
   // Streaming state — streamingMode tracks which mode started the experiment
   const [isStreaming, setIsStreaming] = useState(false)
