@@ -87,6 +87,63 @@ _RESOLVED_STATUSES = (
 )
 
 
+def _direction_to_outcome_index(direction: str | None) -> int | None:
+    """Map our `direction` field to a binary outcome index (0/1).
+
+    Polymarket binary markets index outcomes as 0=Yes (or first listed)
+    and 1=No (or second listed). We canonicalize "yes"/"buy_yes"/etc.
+    """
+    if not direction:
+        return None
+    text = str(direction).strip().lower()
+    if text in {"yes", "buy_yes", "long", "0"}:
+        return 0
+    if text in {"no", "buy_no", "short", "1"}:
+        return 1
+    return None
+
+
+def _market_winning_outcome_index(market_info: dict[str, Any]) -> int | None:
+    """Extract the winning outcome index from market metadata."""
+    if not isinstance(market_info, dict):
+        return None
+    raw = (
+        market_info.get("winning_outcome")
+        if market_info.get("winning_outcome") is not None
+        else market_info.get("winningOutcome")
+    )
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if not text:
+        return None
+    if text in {"yes", "0", "true"}:
+        return 0
+    if text in {"no", "1", "false"}:
+        return 1
+    # Some payloads encode the winning index directly
+    try:
+        return int(text)
+    except ValueError:
+        return None
+
+
+def _market_is_resolved(market_info: dict[str, Any]) -> bool:
+    if not isinstance(market_info, dict):
+        return False
+    if market_info.get("resolved") is True or market_info.get("is_resolved") is True:
+        return True
+    if _market_winning_outcome_index(market_info) is not None:
+        return True
+    status = str(
+        market_info.get("status")
+        or market_info.get("market_status")
+        or market_info.get("marketStatus")
+        or ""
+    ).strip().lower()
+    return status in {"resolved", "settled", "final"}
+
+
 def _trade_token_id(trade: dict[str, Any]) -> str:
     return str(trade.get("asset") or trade.get("token_id") or "").strip()
 
@@ -424,6 +481,166 @@ async def verify_orders_against_wallet_trades(
         "verified": verified,
         "unmatched": unmatched,
         "wallet_trades_fetched": len(trades_raw or []),
+        "pnl_total_before": pnl_total_before,
+        "pnl_total_after": pnl_total_after,
+        "pnl_delta": pnl_total_after - pnl_total_before,
+        "dry_run": dry_run,
+    }
+
+
+async def verify_orders_against_market_resolutions(
+    session: AsyncSession,
+    *,
+    order_window_start: datetime | None = None,
+    order_ids: Iterable[str] | None = None,
+    commit: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Verify P&L for resolved markets via deterministic payout.
+
+    For markets that have settled, winning outcome shares pay $1 each
+    and losing shares pay $0. This is on-chain deterministic — when the
+    market resolves, the proxy wallet's winning shares become claimable
+    USDC at par. We DO NOT need a SELL trade record to know the P&L for
+    resolution closures.
+
+    This function targets orders that:
+      * are in a closed status (resolved/closed_win/closed_loss)
+      * have verification_status = summary_only OR actual_profit IS NULL
+        (i.e. weren't matched by the trade-based verifier above)
+      * the underlying market has resolved with a known winning outcome
+
+    For each match: realized_pnl = (winning ? size * 1.0 : 0.0) - cost_basis
+    Writes verification_status = wallet_activity (this IS truth — the
+    payout is deterministic from chain state) with verification_source
+    = polymarket_market_resolution.
+    """
+    from services.polymarket import polymarket_client
+
+    query = (
+        select(TraderOrder)
+        .where(TraderOrder.mode == "live")
+        .where(TraderOrder.status.in_(_RESOLVED_STATUSES))
+    )
+    if order_ids is not None:
+        ids = [str(oid).strip() for oid in order_ids if str(oid).strip()]
+        if not ids:
+            return {"examined": 0, "verified": 0, "skipped": 0}
+        query = query.where(TraderOrder.id.in_(ids))
+    else:
+        if order_window_start is None:
+            # 7-day default window — resolutions usually happen within
+            # days/weeks of entry.
+            from datetime import timedelta
+            order_window_start = utcnow() - timedelta(days=7)
+        query = query.where(TraderOrder.updated_at >= order_window_start)
+
+    rows = list((await session.execute(query)).scalars().all())
+
+    examined = 0
+    verified = 0
+    skipped_unresolved = 0
+    skipped_already_verified = 0
+    pnl_total_before = 0.0
+    pnl_total_after = 0.0
+    now = utcnow()
+
+    for row in rows:
+        examined += 1
+        # Only process rows that the trade-based verifier didn't already
+        # mark as wallet_activity. Don't overwrite higher-authority states.
+        existing_status = str(row.verification_status or "").strip().lower()
+        if existing_status in {"wallet_activity", "venue_fill"} and row.actual_profit is not None:
+            skipped_already_verified += 1
+            continue
+
+        market_id = str(row.market_id or "").strip()
+        if not market_id:
+            skipped_unresolved += 1
+            continue
+
+        try:
+            market_info = await polymarket_client.get_market_info(market_id)
+        except Exception:
+            market_info = None
+        if not isinstance(market_info, dict) or not _market_is_resolved(market_info):
+            skipped_unresolved += 1
+            continue
+
+        winning_idx = _market_winning_outcome_index(market_info)
+        if winning_idx is None:
+            skipped_unresolved += 1
+            continue
+
+        our_idx = _direction_to_outcome_index(row.direction)
+        if our_idx is None:
+            skipped_unresolved += 1
+            continue
+
+        size = _entry_fill_size(row)
+        cost_basis = _entry_cost_basis(row)
+        if size <= 0.0:
+            skipped_unresolved += 1
+            continue
+
+        won = our_idx == winning_idx
+        payout = size * (1.0 if won else 0.0)
+        verified_pnl = payout - cost_basis
+        prior_profit = float(row.actual_profit) if row.actual_profit is not None else 0.0
+        verified += 1
+        pnl_total_before += prior_profit
+        pnl_total_after += verified_pnl
+
+        if dry_run:
+            continue
+
+        row.actual_profit = float(verified_pnl)
+        row.updated_at = now
+        apply_trader_order_verification(
+            row,
+            verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+            verification_source="polymarket_market_resolution",
+            verification_reason=("won" if won else "lost") + " on resolution",
+            verified_at=now,
+            force=True,
+        )
+        payload = dict(row.payload_json or {})
+        payload["verified_close"] = {
+            "verified_at": now.isoformat(),
+            "matched_size": size,
+            "matched_proceeds": payout,
+            "allocated_cost": cost_basis,
+            "realized_pnl": verified_pnl,
+            "winning_outcome_index": winning_idx,
+            "our_outcome_index": our_idx,
+            "won": won,
+            "source": "polymarket_market_resolution",
+        }
+        row.payload_json = payload
+        append_trader_order_verification_event(
+            session,
+            trader_order_id=str(row.id),
+            verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+            source="polymarket_market_resolution",
+            event_type="verified_close_from_market_resolution",
+            reason=f"verified_pnl={verified_pnl:.4f} won={won} size={size:.4f}",
+            payload_json={
+                "winning_outcome_index": winning_idx,
+                "our_outcome_index": our_idx,
+                "prior_actual_profit": prior_profit,
+                "verified_actual_profit": verified_pnl,
+            },
+            created_at=now,
+        )
+
+    if commit and not dry_run and verified > 0:
+        await session.commit()
+
+    return {
+        "examined": examined,
+        "verified": verified,
+        "skipped_unresolved": skipped_unresolved,
+        "skipped_already_verified": skipped_already_verified,
         "pnl_total_before": pnl_total_before,
         "pnl_total_after": pnl_total_after,
         "pnl_delta": pnl_total_after - pnl_total_before,

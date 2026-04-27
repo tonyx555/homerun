@@ -512,10 +512,11 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
             return
         from services.polymarket_trade_verifier import (
             verify_orders_against_wallet_trades,
+            verify_orders_against_market_resolutions,
         )
         async with AsyncSessionLocal() as verify_session:
             try:
-                result = await asyncio.wait_for(
+                trade_result = await asyncio.wait_for(
                     verify_orders_against_wallet_trades(
                         verify_session,
                         wallet_address=wallet_address,
@@ -525,20 +526,47 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
                 )
             except asyncio.TimeoutError:
                 logger.warning(
-                    "polymarket_trade_verifier timed out after %.1fs",
+                    "polymarket_trade_verifier (trades) timed out after %.1fs",
                     _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
                 )
                 return
-        if result.get("verified", 0) > 0 or result.get("examined", 0) > 0:
+        if trade_result.get("verified", 0) > 0 or trade_result.get("examined", 0) > 0:
             logger.info(
-                "polymarket_trade_verifier sweep",
-                examined=result.get("examined"),
-                verified=result.get("verified"),
-                unmatched=result.get("unmatched"),
-                wallet_trades_fetched=result.get("wallet_trades_fetched"),
-                pnl_total_before=round(result.get("pnl_total_before", 0.0), 4),
-                pnl_total_after=round(result.get("pnl_total_after", 0.0), 4),
-                pnl_delta=round(result.get("pnl_delta", 0.0), 4),
+                "polymarket_trade_verifier sweep (trades)",
+                examined=trade_result.get("examined"),
+                verified=trade_result.get("verified"),
+                unmatched=trade_result.get("unmatched"),
+                wallet_trades_fetched=trade_result.get("wallet_trades_fetched"),
+                pnl_total_before=round(trade_result.get("pnl_total_before", 0.0), 4),
+                pnl_total_after=round(trade_result.get("pnl_total_after", 0.0), 4),
+                pnl_delta=round(trade_result.get("pnl_delta", 0.0), 4),
+            )
+        # Now sweep resolved-but-untraded orders for deterministic
+        # resolution payouts ($1 winning / $0 losing). Catches positions
+        # the user holds through resolution rather than exiting via SELL.
+        async with AsyncSessionLocal() as resolution_session:
+            try:
+                resolution_result = await asyncio.wait_for(
+                    verify_orders_against_market_resolutions(
+                        resolution_session,
+                        commit=True,
+                    ),
+                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "polymarket_trade_verifier (resolutions) timed out after %.1fs",
+                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+                return
+        if resolution_result.get("verified", 0) > 0:
+            logger.info(
+                "polymarket_trade_verifier sweep (resolutions)",
+                examined=resolution_result.get("examined"),
+                verified=resolution_result.get("verified"),
+                skipped_unresolved=resolution_result.get("skipped_unresolved"),
+                skipped_already_verified=resolution_result.get("skipped_already_verified"),
+                pnl_delta=round(resolution_result.get("pnl_delta", 0.0), 4),
             )
     except Exception as exc:
         logger.warning("polymarket_trade_verifier sweep failed", exc_info=exc)
