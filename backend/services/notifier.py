@@ -424,44 +424,24 @@ class TelegramNotifier:
 
     @staticmethod
     def _close_alert_marker_for_order(order: TraderOrder) -> str:
+        # Stable terminal marker. We deliberately do NOT include any
+        # timestamp or activity-id fields here — those get rewritten
+        # every reconciliation cycle when the lifecycle re-evaluates
+        # a position (e.g. wallet_activity matches a slightly different
+        # activity record, position_close.closed_at gets refreshed),
+        # which used to fire the same Telegram alert again and again
+        # for the same actual close (the user observed the All India
+        # AIADMK / Donald Trump insult / SPX rows notifying dozens of
+        # times). The marker is now just (status, rounded_pnl_cents) —
+        # once we've notified for an order in a given terminal state at
+        # a given P&L, never notify again unless the close materially
+        # changes (different status or different P&L).
         status = str(getattr(order, "status", "") or "").strip().lower() or "closed"
-        position_close = _position_close_payload(order)
-        pending_exit = _pending_exit_payload(order)
-
-        close_identity_parts: list[str] = []
-        for key in (
-            "wallet_activity_transaction_hash",
-            "wallet_trade_id",
-            "wallet_activity_id",
-            "wallet_trade_timestamp",
-            "wallet_activity_timestamp",
-            "wallet_closed_position_timestamp",
-        ):
-            value = str(position_close.get(key) or "").strip()
-            if value:
-                close_identity_parts.append(f"{key}:{value}")
-        if not close_identity_parts:
-            # ``last_snapshot_at`` deliberately excluded — that field is
-            # rewritten every reconcile cycle, which would change the
-            # marker for the same close on every poll and fire a
-            # duplicate Telegram alert per cycle until wallet authority
-            # populates one of the keys above.  The remaining fallback
-            # keys are stable per close.
-            for key in ("provider_clob_order_id", "exit_order_id", "filled_at"):
-                value = str(pending_exit.get(key) or "").strip()
-                if value:
-                    close_identity_parts.append(f"{key}:{value}")
-
-        closed_marker = "|".join(close_identity_parts)
-        if not closed_marker:
-            closed_marker = str(position_close.get("closed_at") or "").strip()
-        if not closed_marker and getattr(order, "executed_at", None) is not None:
-            closed_marker = _to_utc(order.executed_at).isoformat()
-        if not closed_marker and getattr(order, "created_at", None) is not None:
-            closed_marker = _to_utc(order.created_at).isoformat()
-        if not closed_marker:
-            closed_marker = str(getattr(order, "id", "") or "").strip()
-        return f"{status}|{closed_marker}"
+        pnl = _realized_pnl_for_order(order)
+        # Round to cents to absorb tiny lifecycle-driven repricing
+        # without firing a duplicate alert.
+        pnl_cents = int(round(pnl * 100))
+        return f"{status}|pnl_cents:{pnl_cents}"
 
     @staticmethod
     def _close_alert_evidence_key_for_order(order: TraderOrder, marker: str) -> str:
