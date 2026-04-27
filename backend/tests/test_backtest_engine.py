@@ -15,8 +15,6 @@ order-book tape that exercises:
 
 from __future__ import annotations
 
-import asyncio
-import math
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -50,10 +48,7 @@ from services.backtest import (
 from services.backtest.matching_engine import FeeModel, make_order_id
 from services.backtest.metrics import (
     TradeOutcome,
-    hit_rate_of,
     max_drawdown,
-    profit_factor_of,
-    sharpe_of_returns,
 )
 from services.backtest.venue_model import TIF_FOK, TIF_GTC, TIF_IOC
 from services.strategies.base import BaseStrategy, ExitDecision
@@ -462,7 +457,7 @@ class TestEndToEnd:
             ),
             strategy=_LadderExitStrategy(),
         )
-        result = await engine.run(book_source=br, trade_intents=[intent])
+        await engine.run(book_source=br, trade_intents=[intent])
         # Engine must produce > 1 exit fill (laddered children)
         exit_orders = [o for o in engine.matching.all_orders() if o.meta.get("role") == "exit_child"]
         assert len(exit_orders) > 1

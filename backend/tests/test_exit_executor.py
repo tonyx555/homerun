@@ -7,7 +7,6 @@ keep tests hermetic).
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone

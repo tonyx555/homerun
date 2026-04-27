@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import bisect
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Iterable, Iterator, Optional, Sequence
+from typing import Any, AsyncIterator, Iterable, Optional, Sequence
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,14 +119,15 @@ class BookSnapshot:
         side_norm = (side or "").upper()
         if side_norm == "SELL":
             levels = self.bids
-            crosses = (
-                lambda lp: limit_price is not None and lp + 1e-12 < float(limit_price)
-            )
+
+            def crosses(lp: float) -> bool:
+                return limit_price is not None and lp + 1e-12 < float(limit_price)
+
         elif side_norm == "BUY":
             levels = self.asks
-            crosses = (
-                lambda lp: limit_price is not None and lp - 1e-12 > float(limit_price)
-            )
+
+            def crosses(lp: float) -> bool:
+                return limit_price is not None and lp - 1e-12 > float(limit_price)
         else:
             return []
         fills: list[tuple[float, float]] = []

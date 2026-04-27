@@ -46,7 +46,6 @@ an orphan.
 
 from __future__ import annotations
 
-import asyncio
 import math
 import uuid
 from dataclasses import dataclass
@@ -205,12 +204,12 @@ def deserialize_policy(snapshot: dict[str, Any] | None) -> ExitPolicy | None:
         return None
     ladder = None
     if isinstance(snapshot.get("ladder"), dict):
-        l = snapshot["ladder"]
+        ld = snapshot["ladder"]
         ladder = LadderSpec(
-            levels=int(l.get("levels", 5)),
-            step_ticks=int(l.get("step_ticks", 1)),
-            offset_ticks=int(l.get("offset_ticks", 0)),
-            distribution=str(l.get("distribution") or "uniform"),
+            levels=int(ld.get("levels", 5)),
+            step_ticks=int(ld.get("step_ticks", 1)),
+            offset_ticks=int(ld.get("offset_ticks", 0)),
+            distribution=str(ld.get("distribution") or "uniform"),
         )
     escalation = None
     if isinstance(snapshot.get("escalation"), dict):
@@ -953,7 +952,6 @@ async def escalate_child_order(
             widen = 25.0
         # Move the price toward the inside (toward mid) by widen_bps.
         current = float(child["price"])
-        ref = current_mid if (current_mid is not None and current_mid > 0) else current
         # For SELL exits, "more aggressive" = lower price; for BUY exits = higher.
         if (side or "SELL").upper() == "SELL":
             new_raw = current * (1.0 - widen / 10000.0)
@@ -1126,7 +1124,6 @@ async def run_exit_pass(
             # Slide each child's price by the same delta as the mid drift,
             # preserving the level offset relative to mid.
             child = children[idx]
-            old_price = safe_float(child.get("price"), 0.0) or 0.0
             # Rebuild the price = mid - (level_idx * step_ticks * tick) for SELL.
             # We don't know the original mid, so use a simple anchor: snap to
             # the new mid less the original offset.

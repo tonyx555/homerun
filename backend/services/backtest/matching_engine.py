@@ -37,13 +37,10 @@ inputs (including latency-model seed) it produces identical fills.
 from __future__ import annotations
 
 import logging
-import math
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any, Optional
-
-from utils.converters import safe_float
 
 from services.backtest.book_replay import BookSnapshot
 from services.backtest.latency_model import LatencyModel
@@ -53,7 +50,6 @@ from services.backtest.venue_model import (
     TIF_GTC,
     TIF_IOC,
     PolymarketVenue,
-    SubmitDecision,
     Venue,
 )
 

@@ -36,9 +36,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, AsyncIterator, Iterable, Iterator, Optional, Protocol, Sequence
+from typing import Any, AsyncIterator, Optional, Protocol, Sequence
 
-from services.backtest.book_replay import BookSnapshot, InMemoryBookReplay
+from services.backtest.book_replay import BookSnapshot
 from services.backtest.latency_model import LatencyModel
 from services.backtest.matching_engine import (
     BacktestOrder,

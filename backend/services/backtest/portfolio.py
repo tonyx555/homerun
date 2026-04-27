@@ -26,11 +26,9 @@ from __future__ import annotations
 import logging
 import math
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Iterable, Optional
-
-from utils.converters import safe_float
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Iterable, Optional
 
 from services.backtest.matching_engine import Fill, FeeModel
 

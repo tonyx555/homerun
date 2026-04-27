@@ -20,7 +20,7 @@ import math
 import random
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Iterable, Optional, Sequence
+from typing import Optional, Sequence
 
 
 # Annualization constants. Polymarket markets resolve discretely; we use

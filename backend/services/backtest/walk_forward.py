@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Optional, Sequence
+from typing import Optional
 
 from services.backtest.metrics import BacktestMetrics, MetricCI
 
@@ -89,7 +89,6 @@ def walk_forward_split(
     n = max(1, int(cfg.n_folds))
     embargo = timedelta(seconds=max(0.0, float(cfg.embargo_seconds)))
 
-    total = end - start
     if cfg.mode == "anchored":
         return _anchored_windows(start, end, n, cfg.train_ratio, embargo)
     return _rolling_windows(start, end, n, embargo)

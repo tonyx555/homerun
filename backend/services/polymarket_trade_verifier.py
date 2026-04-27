@@ -691,8 +691,6 @@ async def verify_orders_from_bot_lineage(
         if bot_size <= 0.0 or bot_cost <= 0.0:
             unmatched += 1
             continue
-        bot_avg_price = bot_cost / bot_size
-
         # Path A: bot recorded a confirmed SELL fill on its own
         # clob_order_id. This is the strongest evidence — manual user
         # trades have different clob_order_ids and cannot pollute it.
