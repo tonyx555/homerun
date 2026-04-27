@@ -3378,6 +3378,85 @@ _sa_event.listen(TraderOrder, "before_insert", _enforce_pnl_verification_guard)
 _sa_event.listen(TraderOrder, "before_update", _enforce_pnl_verification_guard)
 
 
+# ── trader_order_verification: writer-isolation table ────────────────
+#
+# Splits the verification-related columns off TraderOrder onto a
+# 1-to-1 child table.  Rationale: the Polymarket verifier and the
+# orchestrator/lifecycle BOTH UPDATE the same trader_orders row.  Even
+# though the verifier only touches verification_* + actual_profit and
+# the orchestrator only touches status + payload_json, PG row-locks
+# are at the row level, so the two writers serialize on the same
+# TransactionID lock.  The 24h log captured this as
+# ``LOCK CONTENTION ... UPDATE trader_orders SET status=...
+# verification_status=...``.
+#
+# Splitting verification fields onto their own row eliminates the lock
+# collision STRUCTURALLY: verifier writes to trader_order_verification,
+# orchestrator writes to trader_orders, no shared row, no lock queue.
+#
+# Migration is staged across multiple commits:
+#   * THIS commit (step 1): add table + ORM model + backfill.  No
+#     application code reads or writes from the new table yet.  Schema
+#     is purely additive; rolling back is just an index drop.
+#   * Step 2: route verifier writes to the new table.  Orchestrator
+#     keeps writing trader_orders.verification_status for the
+#     wallet_position path.  Readers fall back: prefer the new table's
+#     value, drop to the old column when missing.
+#   * Step 3: drop old columns once readers are fully cut over.
+
+class TraderOrderVerification(Base):
+    """1:1 child of TraderOrder holding verification fields.
+
+    Why a separate table: the verifier and the orchestrator both write
+    to trader_orders today, and PG row-level locks force their writes
+    to serialize on the same row even though they touch disjoint
+    columns.  Moving verification fields to their own row makes the
+    two writers never share a lock target.
+
+    The DB-layer guard (_enforce_pnl_verification_guard above) is
+    re-implemented for this table — actual_profit can only be
+    non-NULL when verification_status == "wallet_activity".
+    """
+
+    __tablename__ = "trader_order_verification"
+
+    trader_order_id = Column(
+        String,
+        ForeignKey("trader_orders.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    verification_status = Column(String, nullable=False, default="local", index=True)
+    verification_source = Column(String, nullable=True)
+    verification_reason = Column(Text, nullable=True)
+    verification_tx_hash = Column(String, nullable=True, index=True)
+    verified_at = Column(DateTime, nullable=True)
+    actual_profit = Column(Float, nullable=True)
+    execution_wallet_address = Column(String, nullable=True, index=True)
+    updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
+
+    __table_args__ = (
+        Index(
+            "idx_trader_order_verification_wallet_realized_pnl",
+            "execution_wallet_address",
+            postgresql_where=(actual_profit.isnot(None)),
+        ),
+    )
+
+
+def _enforce_pnl_verification_guard_v2(mapper, connection, target):  # noqa: ANN001
+    """Same invariant as _enforce_pnl_verification_guard, applied to
+    the trader_order_verification side table."""
+    status = str(getattr(target, "verification_status", "") or "").strip().lower()
+    if status in _VERIFIED_PNL_STATUSES:
+        return
+    if getattr(target, "actual_profit", None) is not None:
+        target.actual_profit = None
+
+
+_sa_event.listen(TraderOrderVerification, "before_insert", _enforce_pnl_verification_guard_v2)
+_sa_event.listen(TraderOrderVerification, "before_update", _enforce_pnl_verification_guard_v2)
+
+
 class TraderOrderVerificationEvent(Base):
     """Immutable verification evidence attached to a trader order."""
 
