@@ -64,6 +64,15 @@ _last_position_mark_sync_at = 0.0
 _LIVE_WALLET_POSITIONS_SYNC_INTERVAL_SECONDS = 90.0
 _last_live_wallet_positions_sync_at = 0.0
 _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
+# Polymarket-truth realized P&L verification: every 5 minutes, walk all
+# orders closed today, fetch the wallet's actual on-chain SELL trades,
+# match them to our orders, and overwrite actual_profit with verified
+# values. This is the only way our reported P&L stays 100% in sync with
+# the user's actual Polymarket account (covers bot-initiated SELLs,
+# manual user sells via the Polymarket UI, and any other on-chain exit).
+_REALIZED_PNL_VERIFY_INTERVAL_SECONDS = 300.0
+_last_realized_pnl_verify_at = 0.0
+_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS = 30.0
 _MAX_CONSECUTIVE_DB_FAILURES = 3
 _CONTROL_REFRESH_SECONDS = 5.0
 _ACTIVE_POSITION_TICK_SECONDS = 60.0
@@ -469,6 +478,70 @@ async def _sync_live_wallet_positions() -> None:
         )
     except Exception as exc:
         logger.warning("live wallet positions sync failed", exc_info=exc)
+
+
+async def _verify_realized_pnl_against_wallet_trades() -> None:
+    """Periodically reconcile reported realized P&L against Polymarket truth.
+
+    Walks today's closed orders, fetches the wallet's actual on-chain
+    SELL trades from the Polymarket data API, FIFO-matches sells to
+    orders by token_id + timestamp, and writes the verified P&L back to
+    each row (with verification_status=wallet_activity and the trade's
+    transactionHash on verification_tx_hash).
+
+    Catches both bot-initiated SELLs and any manual user sells made via
+    the Polymarket UI — both end up as on-chain trade records on the
+    same proxy wallet, indistinguishable to the data API. That is the
+    correct behavior: we want our DB to match Polymarket regardless of
+    who pulled the trigger.
+
+    Orders with no matching SELL trade are NOT touched; they remain
+    summary_only with actual_profit=NULL until either a trade record
+    appears or the resolution-payout path (separate) verifies them.
+    """
+    global _last_realized_pnl_verify_at
+    now_mono = time.monotonic()
+    if (now_mono - _last_realized_pnl_verify_at) < _REALIZED_PNL_VERIFY_INTERVAL_SECONDS:
+        return
+    _last_realized_pnl_verify_at = now_mono
+    try:
+        if not live_execution_service.is_ready():
+            return
+        wallet_address = live_execution_service.get_execution_wallet_address()
+        if not wallet_address:
+            return
+        from services.polymarket_trade_verifier import (
+            verify_orders_against_wallet_trades,
+        )
+        async with AsyncSessionLocal() as verify_session:
+            try:
+                result = await asyncio.wait_for(
+                    verify_orders_against_wallet_trades(
+                        verify_session,
+                        wallet_address=wallet_address,
+                        commit=True,
+                    ),
+                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "polymarket_trade_verifier timed out after %.1fs",
+                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+                return
+        if result.get("verified", 0) > 0 or result.get("examined", 0) > 0:
+            logger.info(
+                "polymarket_trade_verifier sweep",
+                examined=result.get("examined"),
+                verified=result.get("verified"),
+                unmatched=result.get("unmatched"),
+                wallet_trades_fetched=result.get("wallet_trades_fetched"),
+                pnl_total_before=round(result.get("pnl_total_before", 0.0), 4),
+                pnl_total_after=round(result.get("pnl_total_after", 0.0), 4),
+                pnl_delta=round(result.get("pnl_delta", 0.0), 4),
+            )
+    except Exception as exc:
+        logger.warning("polymarket_trade_verifier sweep failed", exc_info=exc)
 
 
 async def _sync_position_marks_and_exit_registry() -> None:
@@ -1147,6 +1220,15 @@ async def run_worker_loop() -> None:
                 # so the in-memory ledger does not silently drift from chain
                 # state when off-app activity touches the wallet.
                 await _sync_live_wallet_positions()
+                # Reconcile reported realized P&L against Polymarket truth.
+                # Walks today's closed orders, fetches actual on-chain SELL
+                # trades from the data API, FIFO-matches and writes the
+                # verified P&L back to each row. World-class financial
+                # accuracy — Polymarket's wallet trades are the SINGLE
+                # source of truth for realized P&L (covers bot SELLs,
+                # manual user sells via the Polymarket UI, and any other
+                # on-chain exit that touches the proxy wallet).
+                await _verify_realized_pnl_against_wallet_trades()
                 last_open_positions = int(cycle_summary.get("inventory_open_positions", 0) or 0)
                 if provider_pass:
                     last_provider_pass_at = time.monotonic()
