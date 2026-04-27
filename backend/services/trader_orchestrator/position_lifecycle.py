@@ -6157,7 +6157,34 @@ async def reconcile_live_positions(
             and not terminal_reopen_blocked_wallet_close
             and not closed_position_reopen_blocked
         ):
-            aggregate_realized_pnl = safe_float(closed_position.get("realizedPnl"), None)
+            # ARCHITECTURE — Polymarket-truth requirement:
+            #
+            # We are here because the wallet shows zero balance for this
+            # token, the position is in Polymarket's closed_positions API,
+            # but we do NOT have a matching on-chain trade record (a
+            # `wallet_close_activity`) — that path was checked above. The
+            # earlier implementation tried to back into a close_price by
+            # falling through `currentPrice` / `curPrice` (live market
+            # prices, NOT realized) and then attributed wallet-aggregate
+            # realizedPnl to this single order via token-id matching. That
+            # produced phantom P&L (the +$82 phantom on Flash Crash that
+            # didn't match the user's actual ~-$100 Polymarket account).
+            #
+            # The only legitimate sources of realized P&L are:
+            #   1. A confirmed on-chain trade record (the wallet_activity
+            #      block above already handles this with the real fill
+            #      price + transactionHash from polymarket trades API)
+            #   2. A market-resolution payout (deterministic $1/$0)
+            #
+            # If we got here, neither has fired yet. We mark the position
+            # closed (so it doesn't sit "open" forever) but record
+            # actual_profit=NULL and verification_status=summary_only so
+            # the aggregation queries (already filtered) exclude it from
+            # displayed P&L. The continuous trade verifier
+            # (polymarket_trade_verifier) fills in the real number on
+            # the next sweep when wallet_trades data becomes available.
+            close_price = None
+            realized_pnl = None
             closed_position_total_size = max(
                 0.0,
                 safe_float(
@@ -6169,38 +6196,8 @@ async def reconcile_live_positions(
                 )
                 or 0.0,
             )
-            close_price = None
-            close_price_candidates = (
-                wallet_settlement_price,
-                safe_float(closed_position.get("settlementPrice"), None),
-                safe_float(closed_position.get("redeemPrice"), None),
-                safe_float(closed_position.get("closePrice"), None),
-                safe_float(closed_position.get("currentPrice"), None),
-                safe_float(closed_position.get("curPrice"), None),
-                safe_float(closed_position.get("price"), None),
-            )
-            for candidate_close_price in close_price_candidates:
-                if candidate_close_price is not None and candidate_close_price >= 0.0:
-                    close_price = candidate_close_price
-                    break
-            if close_price is None and aggregate_realized_pnl is not None and closed_position_total_size > 0.0:
-                aggregate_cost_basis = safe_float(
-                    closed_position.get("costBasis"),
-                    safe_float(
-                        closed_position.get("cashInvested"),
-                        safe_float(closed_position.get("totalCost"), None),
-                    ),
-                )
-                if aggregate_cost_basis is not None and aggregate_cost_basis > 0.0:
-                    close_price = (aggregate_cost_basis + aggregate_realized_pnl) / closed_position_total_size
-            if close_price is not None and entry_fill_size > 0.0:
-                realized_pnl = (entry_fill_size * close_price) - entry_fill_notional
-            elif aggregate_realized_pnl is not None and closed_position_total_size > 0.0 and entry_fill_size > 0.0:
-                realized_pnl = aggregate_realized_pnl * min(1.0, entry_fill_size / closed_position_total_size)
-            else:
-                realized_pnl = aggregate_realized_pnl
             close_trigger = "wallet_summary_recovery"
-            next_status = "resolved" if is_recovered_sell_authority else _status_for_close(pnl=realized_pnl or 0.0, close_trigger=close_trigger)
+            next_status = "resolved" if is_recovered_sell_authority else _status_for_close(pnl=0.0, close_trigger=close_trigger)
             details.append(
                 {
                     "order_id": row.id,
