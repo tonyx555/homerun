@@ -2637,6 +2637,20 @@ def _apply_position_close_verification(
         or (next_wallet and previous_wallet != next_wallet)
         or (next_tx_hash and previous_tx_hash != next_tx_hash)
     )
+    # Don't downgrade Polymarket-truth-verified rows. The general
+    # close-verification path uses force=True which would clobber
+    # wallet_activity status set by polymarket_trade_verifier.
+    _row_status_lower = str(getattr(row, "status", None) or "").strip().lower()
+    _is_resolved_status_for_guard = _row_status_lower in {
+        "resolved", "resolved_win", "resolved_loss",
+        "closed_win", "closed_loss", "win", "loss",
+    }
+    _existing_is_verified = (
+        previous_status.strip().lower() == "wallet_activity"
+        and _is_resolved_status_for_guard
+    )
+    if material_changed and _existing_is_verified:
+        material_changed = False
     if material_changed or row.verified_at is None:
         apply_trader_order_verification(
             row,

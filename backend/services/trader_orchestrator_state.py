@@ -3182,18 +3182,33 @@ async def recover_missing_live_trader_orders(
                 existing_row.actual_profit = None
                 existing_row.error_message = str(live_row.error_message or "").strip() or existing_row.error_message
                 existing_row.executed_at = None
-            verification_changed = apply_trader_order_verification(
-                existing_row,
-                verification_status=str(recovered_verification.get("verification_status") or TRADER_ORDER_VERIFICATION_LOCAL),
-                verification_source=str(recovered_verification.get("verification_source") or "").strip() or None,
-                verification_reason=str(recovered_verification.get("verification_reason") or "").strip() or None,
-                provider_order_id=str(recovered_verification.get("provider_order_id") or "").strip() or None,
-                provider_clob_order_id=str(recovered_verification.get("provider_clob_order_id") or "").strip() or None,
-                execution_wallet_address=str(recovered_verification.get("execution_wallet_address") or "").strip() or None,
-                verification_tx_hash=str(recovered_verification.get("verification_tx_hash") or "").strip() or None,
-                verified_at=now,
-                force=True,
-            )
+            # Don't downgrade rows polymarket_trade_verifier already
+            # verified against on-chain truth. The live-authority
+            # adoption path uses force=True which would otherwise
+            # bypass the rank gate and clobber wallet_activity status
+            # back to wallet_position (visible as a downgrade event
+            # right after every closed_positions sweep).
+            _existing_verification = str(getattr(existing_row, "verification_status", None) or "").strip().lower()
+            _existing_status_lower = str(getattr(existing_row, "status", None) or "").strip().lower()
+            _is_resolved_status_for_guard = _existing_status_lower in {
+                "resolved", "resolved_win", "resolved_loss",
+                "closed_win", "closed_loss", "win", "loss",
+            }
+            if _existing_verification == "wallet_activity" and _is_resolved_status_for_guard:
+                verification_changed = False
+            else:
+                verification_changed = apply_trader_order_verification(
+                    existing_row,
+                    verification_status=str(recovered_verification.get("verification_status") or TRADER_ORDER_VERIFICATION_LOCAL),
+                    verification_source=str(recovered_verification.get("verification_source") or "").strip() or None,
+                    verification_reason=str(recovered_verification.get("verification_reason") or "").strip() or None,
+                    provider_order_id=str(recovered_verification.get("provider_order_id") or "").strip() or None,
+                    provider_clob_order_id=str(recovered_verification.get("provider_clob_order_id") or "").strip() or None,
+                    execution_wallet_address=str(recovered_verification.get("execution_wallet_address") or "").strip() or None,
+                    verification_tx_hash=str(recovered_verification.get("verification_tx_hash") or "").strip() or None,
+                    verified_at=now,
+                    force=True,
+                )
             field_changed = False
             if recovered_entry_price is not None and recovered_entry_price > 0.0:
                 if safe_float(existing_row.entry_price, 0.0) <= 0.0:
