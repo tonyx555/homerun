@@ -126,6 +126,62 @@ def _market_winning_outcome_index(market_info: dict[str, Any]) -> int | None:
         return None
 
 
+def _entry_condition_id(row: TraderOrder) -> str:
+    """Best-effort condition_id (Polymarket 0x... hash) from the order payload."""
+    payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+    for key in ("condition_id", "conditionId"):
+        value = payload.get(key)
+        if value:
+            text = str(value).strip()
+            if text:
+                return text
+    live_market = payload.get("live_market") if isinstance(payload, dict) else None
+    if isinstance(live_market, dict):
+        for key in ("condition_id", "conditionId"):
+            value = live_market.get(key)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+    market = payload.get("market") if isinstance(payload, dict) else None
+    if isinstance(market, dict):
+        for key in ("condition_id", "conditionId"):
+            value = market.get(key)
+            if value:
+                text = str(value).strip()
+                if text:
+                    return text
+    return ""
+
+
+async def _fetch_market_info(row: TraderOrder) -> dict[str, Any] | None:
+    """Resolve the row to Polymarket market metadata.
+
+    TraderOrder.market_id is Polymarket's internal numeric id, NOT the
+    condition_id. The polymarket client only exposes
+    get_market_by_condition_id and get_market_by_token_id; both need
+    different identifiers. Pull condition_id from payload if present;
+    otherwise fall back to looking up by entry token_id.
+    """
+    cond_id = _entry_condition_id(row)
+    if cond_id:
+        try:
+            info = await polymarket_client.get_market_by_condition_id(cond_id)
+            if isinstance(info, dict):
+                return info
+        except Exception:
+            pass
+    token_id = _entry_token_id(row)
+    if token_id:
+        try:
+            info = await polymarket_client.get_market_by_token_id(token_id)
+            if isinstance(info, dict):
+                return info
+        except Exception:
+            pass
+    return None
+
+
 def _market_is_resolved(market_info: dict[str, Any]) -> bool:
     if not isinstance(market_info, dict):
         return False
@@ -543,24 +599,48 @@ async def verify_orders_against_market_resolutions(
     pnl_total_after = 0.0
     now = utcnow()
 
+    # Pre-fetch wallet trades — the BUY trade is the authoritative
+    # record of which outcome we hold (the order's "direction" string
+    # has been observed to mismap on multi-outcome markets, e.g. the
+    # Athletics vs Texas Rangers row recorded a $49.70 win when we
+    # actually bought Texas Rangers — the LOSING side — for a $9 loss).
+    # The on-chain BUY trade carries an `outcomeIndex` which is
+    # unambiguous truth.
+    wallet_lower_for_buys = ""
+    try:
+        from services.live_execution_service import live_execution_service as _les
+        wallet_lower_for_buys = (_les.get_execution_wallet_address() or "").strip().lower()
+    except Exception:
+        wallet_lower_for_buys = ""
+    buys_by_token: dict[str, list[dict[str, Any]]] = {}
+    if wallet_lower_for_buys:
+        try:
+            all_trades = await polymarket_client.get_wallet_trades_paginated(
+                wallet_lower_for_buys, max_trades=3000, page_size=500
+            )
+            for trade in all_trades or []:
+                if not isinstance(trade, dict) or _trade_side(trade) != "BUY":
+                    continue
+                tok = _trade_token_id(trade)
+                if not tok:
+                    continue
+                buys_by_token.setdefault(tok, []).append(trade)
+        except Exception as exc:
+            logger.warning(
+                "polymarket_trade_verifier resolution: get_wallet_trades failed",
+                exc_info=exc,
+            )
+
     for row in rows:
         examined += 1
-        # Only process rows that the trade-based verifier didn't already
-        # mark as wallet_activity. Don't overwrite higher-authority states.
-        existing_status = str(row.verification_status or "").strip().lower()
-        if existing_status in {"wallet_activity", "venue_fill"} and row.actual_profit is not None:
-            skipped_already_verified += 1
-            continue
-
-        market_id = str(row.market_id or "").strip()
-        if not market_id:
-            skipped_unresolved += 1
-            continue
-
-        try:
-            market_info = await polymarket_client.get_market_info(market_id)
-        except Exception:
-            market_info = None
+        # AUTHORITATIVE: Polymarket resolution data is single source of
+        # truth. We OVERRIDE any prior actual_profit (even venue_fill /
+        # wallet_activity values) when the market has resolved and we
+        # can determine win/loss from the on-chain BUY trade. The
+        # original Athletics/Rangers row was venue_fill = $49.70 but
+        # the truth was a $9 loss — the only way to catch that is to
+        # not skip "already verified" rows here.
+        market_info = await _fetch_market_info(row)
         if not isinstance(market_info, dict) or not _market_is_resolved(market_info):
             skipped_unresolved += 1
             continue
@@ -570,13 +650,45 @@ async def verify_orders_against_market_resolutions(
             skipped_unresolved += 1
             continue
 
-        our_idx = _direction_to_outcome_index(row.direction)
+        # Determine which outcome WE actually held. Prefer the BUY
+        # trade's outcomeIndex (on-chain truth); fall back to the
+        # order's direction mapping. The fallback is unreliable on
+        # multi-outcome markets — the BUY trade is what we want.
+        token_id = _entry_token_id(row)
+        anchor = _entry_anchor(row) or datetime.min
+        buy_trade: dict[str, Any] | None = None
+        for candidate in buys_by_token.get(token_id, []):
+            ts = _trade_timestamp(candidate)
+            if ts is not None and ts < anchor:
+                continue
+            buy_trade = candidate
+            break
+        our_idx: int | None = None
+        if buy_trade is not None:
+            try:
+                our_idx = int(buy_trade.get("outcomeIndex"))
+            except (TypeError, ValueError):
+                our_idx = None
+        if our_idx is None:
+            our_idx = _direction_to_outcome_index(row.direction)
         if our_idx is None:
             skipped_unresolved += 1
             continue
 
-        size = _entry_fill_size(row)
-        cost_basis = _entry_cost_basis(row)
+        # Cost basis: prefer the actual BUY trade (size * price) which
+        # captures real slippage; fall back to recorded notional.
+        if buy_trade is not None:
+            buy_size = safe_float(buy_trade.get("size"), 0.0) or 0.0
+            buy_price = safe_float(buy_trade.get("price"), None)
+            if buy_size > 0.0 and buy_price is not None and buy_price >= 0.0:
+                size = buy_size
+                cost_basis = buy_size * buy_price
+            else:
+                size = _entry_fill_size(row)
+                cost_basis = _entry_cost_basis(row)
+        else:
+            size = _entry_fill_size(row)
+            cost_basis = _entry_cost_basis(row)
         if size <= 0.0:
             skipped_unresolved += 1
             continue

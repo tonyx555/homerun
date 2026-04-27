@@ -4484,21 +4484,16 @@ def _serialize_order(
         "unrealized_pnl": float(unrealized_pnl) if unrealized_pnl is not None else None,
         "edge_percent": row.edge_percent,
         "confidence": row.confidence,
-        # Polymarket-truth: only return actual_profit if the row's
-        # verification_status is venue_fill (CLOB confirmed filled with
-        # real average_fill_price) or wallet_activity (matched to actual
-        # on-chain trade by tx_hash). Any other status means the value
-        # is inferred / unverified — return null so the UI doesn't
-        # contribute it to displayed P&L totals (the UI sums per-order
-        # client-side, so the backend aggregation filter alone is not
-        # enough). The verification_status field is exposed below so
-        # the UI can flag unverified rows visually.
-        "actual_profit": (
-            row.actual_profit
-            if str(row.verification_status or "").strip().lower()
-            in ("venue_fill", "wallet_activity")
-            else None
-        ),
+        # Returns row.actual_profit directly. The DB-layer guard in
+        # models/database.py (_enforce_pnl_verification_guard) coerces
+        # this column to NULL on insert/update unless verification_status
+        # is "wallet_activity" — so anything that surfaces here is
+        # already truth-matched against an on-chain Polymarket trade.
+        "actual_profit": row.actual_profit,
+        "verification_status": row.verification_status,
+        "verification_source": row.verification_source,
+        "verification_tx_hash": row.verification_tx_hash,
+        "verified_at": to_iso(row.verified_at),
         "reason": row.reason,
         "close_trigger": close_trigger or None,
         "close_reason": close_reason or None,

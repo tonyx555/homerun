@@ -2023,17 +2023,28 @@ class CortexRunLog(Base):
 
 
 class AutoresearchExperiment(Base):
-    """An autoresearch optimization experiment for a specific trader.
+    """An autoresearch optimization experiment.
 
-    Each experiment runs a continuous loop: LLM proposes param changes,
-    the backtest harness evaluates, and improvements are kept while
-    regressions are reverted.
+    Two scopes:
+      * **trader-scoped** (``trader_id`` set): per-bot parameter tuning
+        that operates on a specific bot's live ``strategy_params``. The
+        experiment proposes tweaks to the bot's running config.
+      * **strategy-scoped** (``strategy_id`` set, ``trader_id`` NULL):
+        per-strategy code evolution that operates on the backtest data
+        plane only. No bot is involved — the experiment evolves the
+        strategy's source code and kept versions are bumped on the
+        Strategy record itself.
+
+    Either ``trader_id`` or ``strategy_id`` must be set; both may be
+    set when a code experiment is initiated from a bot context.
     """
 
     __tablename__ = "autoresearch_experiments"
 
     id = Column(String, primary_key=True, default=lambda: str(__import__("uuid").uuid4()))
-    trader_id = Column(String, ForeignKey("traders.id", ondelete="CASCADE"), nullable=False)
+    trader_id = Column(
+        String, ForeignKey("traders.id", ondelete="CASCADE"), nullable=True
+    )
     name = Column(String, nullable=False)
     status = Column(String, nullable=False, default="running")  # running, paused, completed, failed
     mode = Column(String, default="params")  # "params" | "code"
@@ -2054,6 +2065,7 @@ class AutoresearchExperiment(Base):
 
     __table_args__ = (
         Index("idx_arx_trader_id", "trader_id"),
+        Index("idx_arx_strategy_id", "strategy_id"),
         Index("idx_arx_status", "status"),
     )
 
@@ -3170,6 +3182,57 @@ class TraderOrder(Base):
         Index("idx_trader_orders_trader_created", "trader_id", "created_at"),
         Index("idx_trader_orders_trader_mode_status", "trader_id", "mode", "status"),
     )
+
+
+# ── Single-source-of-truth enforcement for realized P&L ───────────
+#
+# Database-layer guard: reject any write of actual_profit unless the
+# row's verification_status is "wallet_activity" — meaning the row
+# was matched to an actual on-chain trade record (by transactionHash
+# from polymarket.get_wallet_trades) by polymarket_trade_verifier,
+# which is the SOLE authoritative writer of realized P&L.
+#
+# We deliberately do NOT trust "venue_fill" here even though it
+# *sounds* like a real fill. Lifecycle code historically set
+# verification_status=venue_fill for THREE different paths via
+# trader_order_verification.derive_trader_order_verification:
+#
+#   1. provider_exit_fill   — could be a real CLOB fill OR could be
+#                              inferred from a snapshot status check
+#   2. resolved_settlement  — INFERRED from market resolution metadata
+#                              (Athletics/Rangers case showed this can
+#                              get the winning-outcome mapping wrong
+#                              and produce a phantom +$49 win when we
+#                              actually lost $9)
+#   3. wallet_redeemable_mark — INFERRED from wallet's redeemable
+#                                balance, not a real fill record
+#
+# Only wallet_activity guarantees the value came from an on-chain
+# trade record we matched and computed PnL from real fill prices.
+# polymarket_trade_verifier writes wallet_activity atomically with
+# actual_profit, so its writes pass. Every other code path's writes
+# get silently coerced to None — deferring the value to the next
+# verifier sweep against Polymarket truth.
+#
+# This makes phantom-PnL writes IMPOSSIBLE at the database layer,
+# regardless of how many lifecycle paths get added in the future.
+# It is the only architecture that gives the financial accuracy
+# guarantee the user requires (UI numbers must equal Polymarket).
+
+_VERIFIED_PNL_STATUSES = frozenset({"wallet_activity"})
+
+
+def _enforce_pnl_verification_guard(mapper, connection, target):  # noqa: ANN001
+    """Coerce actual_profit to None unless verification_status is verified."""
+    status = str(getattr(target, "verification_status", "") or "").strip().lower()
+    if status in _VERIFIED_PNL_STATUSES:
+        return
+    if getattr(target, "actual_profit", None) is not None:
+        target.actual_profit = None
+
+
+_sa_event.listen(TraderOrder, "before_insert", _enforce_pnl_verification_guard)
+_sa_event.listen(TraderOrder, "before_update", _enforce_pnl_verification_guard)
 
 
 class TraderOrderVerificationEvent(Base):
