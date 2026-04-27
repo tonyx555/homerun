@@ -61,6 +61,20 @@ def _is_expected_close(exc: Exception) -> bool:
     return False
 
 
+def _ws_state_is_closed(ws: Any) -> bool:
+    """Best-effort check that a websockets connection is no longer open.
+
+    websockets >= 11 exposes ``state`` (an enum of OPEN/CLOSING/CLOSED);
+    older versions expose ``closed``.  Either signal that ``send()``
+    will raise, so callers can skip the attempt entirely.
+    """
+    state = getattr(ws, "state", None)
+    if state is not None:
+        name = getattr(state, "name", str(state)).upper()
+        return name in {"CLOSING", "CLOSED"}
+    return bool(getattr(ws, "closed", False))
+
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -898,15 +912,29 @@ class PolymarketWSFeed:
                 self._ws = None
 
     async def _send_subscribe(self, token_ids: List[str]) -> None:
-        """Send a subscribe message over the live WebSocket."""
-        if not self._ws or not token_ids:
+        """Send a subscribe message over the live WebSocket.
+
+        Captures a local reference to ``self._ws`` so a concurrent
+        reconnect that swaps ``self._ws`` mid-call cannot turn the send
+        into an attribute-on-None crash.  Also checks ``ws.state`` /
+        ``ws.closed`` first so a NORMAL_CLOSURE that arrived between
+        scheduling this coroutine and running it is treated as an
+        expected lifecycle event, not a warning.
+        """
+        if not token_ids:
+            return
+        ws = self._ws
+        if ws is None:
+            return
+        if getattr(ws, "closed", False) or _ws_state_is_closed(ws):
+            logger.debug("Polymarket WS subscribe skipped — socket already closed")
             return
         msg: dict[str, Any] = {
             "type": "market",
             "assets_ids": token_ids,
         }
         try:
-            await self._ws.send(json.dumps(msg))
+            await ws.send(json.dumps(msg))
             logger.debug("Polymarket WS subscribed", assets=len(token_ids))
         except Exception as exc:
             if _is_expected_close(exc):

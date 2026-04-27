@@ -594,13 +594,14 @@
 }
 
 .theme-light .terminal-surface {
-  background: #0a0f0c;
-  border-color: rgba(34, 197, 94, 0.25);
+  background: #f7f8f4;
+  border-color: rgba(22, 101, 52, 0.25);
+  color: #1e293b;
 }
 
 .theme-light .terminal-header {
-  background: #111813;
-  border-bottom-color: rgba(34, 197, 94, 0.2);
+  background: #eef0e9;
+  border-bottom-color: rgba(22, 101, 52, 0.2);
 }
 
 .terminal-view ::-webkit-scrollbar-thumb {
@@ -609,6 +610,14 @@
 
 .terminal-view ::-webkit-scrollbar-thumb:hover {
   background: rgba(0, 255, 136, 0.25);
+}
+
+.theme-light .terminal-view ::-webkit-scrollbar-thumb {
+  background: rgba(22, 101, 52, 0.25);
+}
+
+.theme-light .terminal-view ::-webkit-scrollbar-thumb:hover {
+  background: rgba(22, 101, 52, 0.4);
 }
 
 /* Terminal scanline effect */
@@ -626,6 +635,55 @@
   pointer-events: none;
   z-index: 1;
 }
+
+.theme-light .terminal-view::after {
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(22, 101, 52, 0.02) 2px,
+    rgba(22, 101, 52, 0.02) 4px
+  );
+}
+
+/* Light-mode terminal text overrides — keep the green/cyan/red semantics
+   readable on a light background. Tailwind's text-green-400 etc. read
+   fine on dark but wash out on white, so we remap to darker shades while
+   preserving alpha-modifier variants.                                       */
+.theme-light .terminal-view .text-green-400 { color: #15803d; }
+.theme-light .terminal-view .text-green-300\/80 { color: rgb(22 101 52 / 0.85); }
+.theme-light .terminal-view .text-green-300\/50 { color: rgb(22 101 52 / 0.7); }
+.theme-light .terminal-view .text-green-100\/70 { color: rgb(20 83 45 / 0.95); }
+.theme-light .terminal-view .text-green-500\/35 { color: rgb(21 128 61 / 0.6); }
+.theme-light .terminal-view .text-green-500\/30 { color: rgb(21 128 61 / 0.55); }
+.theme-light .terminal-view .text-green-500\/25 { color: rgb(21 128 61 / 0.5); }
+.theme-light .terminal-view .text-green-500\/15 { color: rgb(21 128 61 / 0.4); }
+.theme-light .terminal-view .text-green-500\/10 { color: rgb(21 128 61 / 0.35); }
+.theme-light .terminal-view .text-green-500\/\[0\.06\] { background-color: rgb(21 128 61 / 0.08); }
+.theme-light .terminal-view .text-green-500\/\[0\.03\] { background-color: rgb(21 128 61 / 0.04); }
+.theme-light .terminal-view .bg-green-500\/\[0\.06\] { background-color: rgb(21 128 61 / 0.1); }
+.theme-light .terminal-view .bg-green-500\/\[0\.03\] { background-color: rgb(21 128 61 / 0.05); }
+.theme-light .terminal-view .text-green-400\/70 { color: rgb(21 128 61 / 0.9); }
+.theme-light .terminal-view .text-green-400\/60 { color: rgb(21 128 61 / 0.8); }
+.theme-light .terminal-view .text-green-400\/50 { color: rgb(21 128 61 / 0.75); }
+.theme-light .terminal-view .text-green-400\/40 { color: rgb(21 128 61 / 0.65); }
+.theme-light .terminal-view .text-green-400\/25 { color: rgb(21 128 61 / 0.5); }
+.theme-light .terminal-view .border-green-500\/20 { border-color: rgb(21 128 61 / 0.35); }
+.theme-light .terminal-view .bg-green-400 { background-color: #15803d; }
+.theme-light .terminal-view .bg-red-400 { background-color: #b91c1c; }
+.theme-light .terminal-view .text-red-400 { color: #b91c1c; }
+.theme-light .terminal-view .text-red-400\/70 { color: rgb(185 28 28 / 0.9); }
+.theme-light .terminal-view .text-yellow-400 { color: #b45309; }
+.theme-light .terminal-view .text-yellow-400\/50 { color: rgb(180 83 9 / 0.8); }
+.theme-light .terminal-view .text-cyan-400 { color: #0e7490; }
+.theme-light .terminal-view .text-purple-400 { color: #6d28d9; }
+.theme-light .terminal-view .text-purple-400\/70 { color: rgb(109 40 217 / 0.9); }
+.theme-light .terminal-view .text-purple-300\/40 { color: rgb(109 40 217 / 0.6); }
+.theme-light .terminal-view .text-blue-400 { color: #1d4ed8; }
+.theme-light .terminal-view .text-blue-400\/70 { color: rgb(29 78 216 / 0.9); }
+.theme-light .terminal-view .text-blue-400\/50 { color: rgb(29 78 216 / 0.7); }
+.theme-light .terminal-view .text-indigo-400\/70 { color: rgb(67 56 202 / 0.9); }
+.theme-light .terminal-view .text-emerald-400\/70 { color: rgb(5 150 105 / 0.9); }
 
 /* ============================================
    COMPACT CARD GRID ENHANCEMENTS

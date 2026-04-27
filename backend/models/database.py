@@ -25,6 +25,37 @@ import enum
 import asyncio
 import os as _os
 import time as _time
+import warnings as _warnings
+
+# SAWarning fired from AsyncAdaptedQueuePool._finalize_fairy when the
+# *connection's* __del__ runs before the session's __del__ has finished
+# scheduling cleanup.  RetryableAsyncSession.__del__ already schedules
+# an async _do_close_or_invalidate, so the underlying connection is
+# either properly closed or invalidated — the pool's GC complaint is
+# stale by the time it logs.  Filter the specific message.
+_warnings.filterwarnings(
+    "ignore",
+    message=r"The garbage collector is trying to clean up non-checked-in connection.*",
+    category=Warning,
+)
+
+
+class _DropFinalizeFairyGCWarning(_logging.Filter):
+    """Drop the GC-cleanup error from sqlalchemy's pool finalizer.
+
+    Same root cause as the SAWarning above — the connection's __del__
+    races our session-side cleanup.  The pool log call is on a separate
+    channel from warnings.filterwarnings, so we silence it here too.
+    """
+
+    def filter(self, record: _logging.LogRecord) -> bool:  # type: ignore[override]
+        if "garbage collector is trying to clean up non-checked-in connection" in record.getMessage():
+            return False
+        return True
+
+
+_logging.getLogger("sqlalchemy.pool.impl.AsyncAdaptedQueuePool").addFilter(_DropFinalizeFairyGCWarning())
+_logging.getLogger("sqlalchemy.pool").addFilter(_DropFinalizeFairyGCWarning())
 
 from config import settings
 from models.types import PreciseFloat as Float
@@ -112,6 +143,51 @@ class RetryableAsyncSession(AsyncSession):
     # ------------------------------------------------------------------
     _cleanup_tasks: set = set()
 
+    # Per-session in-flight inner tasks. execute/commit/flush wrap the
+    # underlying SQLAlchemy call as a Task and shield it; if the calling
+    # task is cancelled, the inner Task keeps running until the asyncpg
+    # extended-protocol exchange completes.  close() must wait for these
+    # before releasing the connection — otherwise super().close() races
+    # with the still-active inner task and asyncpg raises
+    # ``cannot perform operation: another operation is in progress``.
+    _DRAIN_TIMEOUT_SECONDS = 10.0
+
+    def _get_inflight(self) -> set:
+        bag = getattr(self, "_inflight_tasks", None)
+        if bag is None:
+            bag = set()
+            setattr(self, "_inflight_tasks", bag)
+        return bag
+
+    def _track_inflight(self, task) -> None:
+        bag = self._get_inflight()
+        bag.add(task)
+        task.add_done_callback(bag.discard)
+
+    async def _wait_inflight(self) -> None:
+        """Drain any prior shielded inner tasks before starting new work.
+
+        If a previous execute/commit/flush was cancelled by ``wait_for``,
+        its shielded inner task continues running until the asyncpg
+        protocol exchange completes.  Starting a new operation on the
+        same session before that inner finishes raises
+        ``This session is provisioning a new connection; concurrent
+        operations are not permitted`` (SQLAlchemy isce) or
+        ``cannot perform operation: another operation is in progress``
+        (asyncpg).  Calling this at the top of every public method that
+        touches the connection serializes the cleanup with new work.
+        """
+        bag = getattr(self, "_inflight_tasks", None)
+        if not bag:
+            return
+        pending = [t for t in list(bag) if not t.done()]
+        if not pending:
+            return
+        try:
+            await asyncio.wait(pending, timeout=self._DRAIN_TIMEOUT_SECONDS)
+        except Exception:
+            pass
+
     @classmethod
     def _fire_and_forget(cls, coro) -> None:
         """Schedule *coro* as a background task that cannot be cancelled."""
@@ -124,6 +200,11 @@ class RetryableAsyncSession(AsyncSession):
     # ------------------------------------------------------------------
 
     async def rollback(self) -> None:
+        # Wait for any shielded inner tasks left by a cancelled
+        # execute/commit/flush before starting rollback — otherwise
+        # rollback's connection use races the leftover protocol and
+        # raises isce or "another operation in progress".
+        await self._wait_inflight()
         try:
             await super().rollback()
         except asyncio.CancelledError:
@@ -189,15 +270,21 @@ class RetryableAsyncSession(AsyncSession):
         """
         from utils.retry import is_db_connection_broken
 
+        await self._wait_inflight()
         for attempt in range(1, self._COMMIT_RETRY_ATTEMPTS + 1):
+            inner = asyncio.ensure_future(super().commit())
+            self._track_inflight(inner)
             try:
-                await asyncio.shield(super().commit())
+                await asyncio.shield(inner)
                 return
             except asyncio.CancelledError:
+                # Drain the inner commit before any cleanup so the
+                # extended-protocol sequence finishes atomically.
+                self._fire_and_forget(self._drain_then_invalidate(inner))
                 raise
             except DBAPIError as exc:
                 if is_db_connection_broken(exc):
-                    self._fire_and_forget(self._do_invalidate())
+                    self._fire_and_forget(self._drain_then_invalidate(inner))
                     raise
                 message = str(getattr(exc, "orig", exc)).lower()
                 retryable = any(marker in message for marker in self._COMMIT_RETRYABLE_MESSAGES)
@@ -217,30 +304,37 @@ class RetryableAsyncSession(AsyncSession):
         the session goes through here (including the ones that
         ``scalars()``, ``scalar()``, ``get()`` etc. call internally).
 
-        It has the same tear-in-the-middle hazard as commit/flush: a
-        CancelledError between Parse/Bind and Execute/Sync leaves the
-        asyncpg backend in state=active wait_event=Client/ClientRead
-        holding any row locks the statement acquired. The 4-min zombie
-        sweeper eventually clears those, but in the meantime any other
-        writer touching the same rows blocks indefinitely. Production
-        symptom: 60-100s connection holds on the audit-flush task,
-        20-60s reconcile times, projection-queue cascade.
+        Tear-in-the-middle hazard: a CancelledError between Parse/Bind
+        and Execute/Sync leaves the asyncpg backend in state=active
+        wait_event=Client/ClientRead holding row locks the statement
+        acquired. The 4-min zombie sweeper eventually clears those, but
+        in the meantime any other writer touching the same rows blocks.
 
-        Shield the execute so the extended-protocol sequence completes
-        atomically; CancelledError still propagates to the caller. On
-        cancel, INVALIDATE the connection — don't try rollback first.
-        A rollback after cancellation tries to use the same connection
-        whose protocol state may be uncertain; a failed rollback then
-        leaves the connection even more corrupted, and the pool hands
-        it to the next caller who hits "cannot perform operation:
-        another operation in progress". Forcing invalidate makes the
-        pool drop the connection and spin up a fresh one — one extra
-        connection cycle in exchange for no cross-task corruption.
+        Mitigation has two parts:
+          1. Run the underlying ``super().execute(...)`` as an explicit
+             Task and shield it. CancelledError propagates to the caller
+             but the inner Task keeps running until the extended-protocol
+             sequence completes atomically.
+          2. On cancel, schedule a fire-and-forget cleanup that *waits
+             for the inner task to drain* before invalidating the
+             connection. This is critical: invalidating while the inner
+             task is mid-protocol triggers asyncpg
+             ``InternalClientError: got result for unknown protocol
+             state`` because two coroutines end up sharing the same
+             connection. Drain first, then invalidate, then return —
+             zero cross-task corruption.
         """
+        # Drain any prior shielded inner left by a cancelled call on
+        # this session; without this a wait_for-cancelled execute on the
+        # same session would surface isce / "another operation in
+        # progress" the next time we touch the connection.
+        await self._wait_inflight()
+        inner = asyncio.ensure_future(super().execute(statement, params=params, **kwargs))
+        self._track_inflight(inner)
         try:
-            return await asyncio.shield(super().execute(statement, params=params, **kwargs))
+            return await asyncio.shield(inner)
         except asyncio.CancelledError:
-            self._fire_and_forget(self._do_invalidate())
+            self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
         except DBAPIError:
             try:
@@ -254,24 +348,19 @@ class RetryableAsyncSession(AsyncSession):
 
         flush() is where session.add() rows actually get sent to the
         server as INSERT/UPDATE statements over the asyncpg extended
-        protocol.  Same tear-in-the-middle hazard as commit: a
-        CancelledError between Parse/Bind and Execute/Sync leaves the
-        backend in state=active wait_event=Client/ClientRead with an
-        open transaction that neither statement_timeout nor
-        idle_in_transaction_session_timeout can reap.
-
-        Shield the flush so the extended-protocol sequence completes
-        atomically; CancelledError still propagates to the caller. On
-        non-cancellation exceptions, invalidate (not rollback) so the
-        pool drops the suspect connection — see execute() docstring
-        for the full rationale.
+        protocol.  Same tear-in-the-middle hazard as execute() — see
+        execute() docstring for the drain-then-invalidate rationale.
         """
+        await self._wait_inflight()
+        inner = asyncio.ensure_future(super().flush(objects))
+        self._track_inflight(inner)
         try:
-            await asyncio.shield(super().flush(objects))
+            await asyncio.shield(inner)
         except asyncio.CancelledError:
+            self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
         except Exception:
-            self._fire_and_forget(self._do_invalidate())
+            self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
 
     # ------------------------------------------------------------------
@@ -279,7 +368,39 @@ class RetryableAsyncSession(AsyncSession):
     # ------------------------------------------------------------------
 
     async def _do_close_or_invalidate(self) -> None:
-        """Close the session; fall back to invalidate on any error."""
+        """Close the session; fall back to invalidate on any error.
+
+        Before calling ``super().close()`` we wait for any shielded
+        inner tasks (execute/commit/flush) that may still be running to
+        drain.  Closing while a shielded inner task still holds the
+        asyncpg connection causes the close attempt to race with the
+        in-flight protocol, surfacing as
+        ``cannot perform operation: another operation is in progress``
+        and poisoning the next caller of that connection.
+
+        If the drain *times out* — an inner task is still running after
+        _DRAIN_TIMEOUT_SECONDS — we invalidate instead of closing.
+        ``super().close()`` would race the still-active protocol;
+        ``invalidate()`` lets the pool drop the connection cleanly.
+        """
+        bag = getattr(self, "_inflight_tasks", None)
+        drain_timed_out = False
+        if bag:
+            inflight = [t for t in list(bag) if not t.done()]
+            if inflight:
+                try:
+                    _done, pending = await asyncio.wait(
+                        inflight, timeout=self._DRAIN_TIMEOUT_SECONDS
+                    )
+                    drain_timed_out = bool(pending)
+                except Exception:
+                    drain_timed_out = True
+        if drain_timed_out:
+            try:
+                await super().invalidate()
+            except Exception:
+                pass
+            return
         try:
             await super().close()
         except Exception:
@@ -300,6 +421,24 @@ class RetryableAsyncSession(AsyncSession):
 
     async def _do_invalidate(self) -> None:
         """Invalidate, swallowing errors."""
+        try:
+            await super().invalidate()
+        except Exception:
+            pass
+
+    async def _drain_then_invalidate(self, inner) -> None:
+        """Wait for a shielded inner task to finish, then invalidate.
+
+        Invalidating while the inner protocol exchange is still in flight
+        causes two coroutines to race for the asyncpg connection lock,
+        which surfaces as ``InternalClientError: got result for unknown
+        protocol state``. Draining the inner task first guarantees the
+        connection is at a quiescent point before invalidate touches it.
+        """
+        try:
+            await inner
+        except Exception:
+            pass
         try:
             await super().invalidate()
         except Exception:
@@ -3939,25 +4078,16 @@ def _on_invalidate(dbapi_connection, connection_record, exception):
     checkout_task_name = connection_record.info.get("checkout_task_name", "unknown")
     checkout_task_coro = connection_record.info.get("checkout_task_coro", "unknown")
     exception_name = type(exception).__name__ if exception else "None"
-    if exception_name == "CancelledError":
-        if checkout_time is not None:
-            elapsed = _time.monotonic() - checkout_time
-            _db_logger.debug(
-                "Connection invalidated after %.1fs checked out due to cancellation (task=%s, coro=%s)",
-                elapsed,
-                checkout_task_name,
-                checkout_task_coro,
-            )
-        else:
-            _db_logger.debug(
-                "Connection invalidated due to cancellation (task=%s, coro=%s)",
-                checkout_task_name,
-                checkout_task_coro,
-            )
-        return
+    # CancelledError or no-exception invalidations are virtually always
+    # proactive cleanup from RetryableAsyncSession (post-cancel drain
+    # plus invalidate, or pool_pre_ping failover).  They do not indicate
+    # a problem with the *underlying* DB — they're cleanup signals.
+    # Demote to debug so reconnect bursts don't flood the warning channel.
+    is_proactive = exception is None or exception_name == "CancelledError"
+    log_fn = _db_logger.debug if is_proactive else _db_logger.warning
     if checkout_time is not None:
         elapsed = _time.monotonic() - checkout_time
-        _db_logger.warning(
+        log_fn(
             "Connection invalidated after %.1fs checked out (exception=%s, task=%s, coro=%s)",
             elapsed,
             exception_name,
@@ -3965,7 +4095,7 @@ def _on_invalidate(dbapi_connection, connection_record, exception):
             checkout_task_coro,
         )
         return
-    _db_logger.warning(
+    log_fn(
         "Connection invalidated (exception=%s, task=%s, coro=%s)",
         exception_name,
         checkout_task_name,

@@ -187,9 +187,12 @@ def _is_transient_db_error(exc: Exception) -> bool:
 _STRATEGY_EVAL_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="strategy-eval")
 _abandoned_trader_cycle_tasks: set[asyncio.Task] = set()
 _backgrounded_trader_cycle_tasks: set[asyncio.Task] = set()
-_inflight_trader_cycle_tasks: dict[str, asyncio.Task] = {}
-_inflight_trader_cycle_start: dict[str, float] = {}  # trader_id -> monotonic start time
-_inflight_trader_cycle_process_signals: dict[str, bool] = {}
+_inflight_trader_cycle_tasks: dict[str, set[asyncio.Task]] = {}
+# Per-task metadata (start_time + process_signals flag).  Keyed by Task
+# rather than trader_id so multiple concurrent cycles for the same
+# trader can each carry their own info.
+_inflight_trader_cycle_start: dict[asyncio.Task, float] = {}
+_inflight_trader_cycle_process_signals: dict[asyncio.Task, bool] = {}
 _pending_runtime_cycle_specs: dict[str, dict[str, Any]] = {}
 _skip_log_last_at: dict[str, float] = {}  # trader_id -> last log monotonic time
 _skip_log_suppressed: dict[str, int] = {}  # trader_id -> suppressed count
@@ -203,9 +206,40 @@ def _discard_abandoned_trader_cycle(task: asyncio.Task) -> None:
 
 
 def _clear_inflight_trader_cycle_task(trader_id: str, task: asyncio.Task) -> None:
-    if trader_id and _inflight_trader_cycle_tasks.get(trader_id) is task:
-        _inflight_trader_cycle_tasks.pop(trader_id, None)
-        _inflight_trader_cycle_process_signals.pop(trader_id, None)
+    if trader_id:
+        bucket = _inflight_trader_cycle_tasks.get(trader_id)
+        if bucket is not None:
+            bucket.discard(task)
+            if not bucket:
+                _inflight_trader_cycle_tasks.pop(trader_id, None)
+    _inflight_trader_cycle_process_signals.pop(task, None)
+    _inflight_trader_cycle_start.pop(task, None)
+
+
+def _running_inflight_tasks(trader_id: str) -> list[asyncio.Task]:
+    """Return live in-flight cycle tasks for ``trader_id`` (skipping done)."""
+    if not trader_id:
+        return []
+    bucket = _inflight_trader_cycle_tasks.get(trader_id)
+    if not bucket:
+        return []
+    return [t for t in bucket if not t.done()]
+
+
+def _count_running_signal_cycles(trader_id: str) -> int:
+    """Count running cycles flagged as signal-processing for ``trader_id``."""
+    return sum(
+        1
+        for task in _running_inflight_tasks(trader_id)
+        if _inflight_trader_cycle_process_signals.get(task, False)
+    )
+
+
+def _oldest_running_task(trader_id: str) -> asyncio.Task | None:
+    running = _running_inflight_tasks(trader_id)
+    if not running:
+        return None
+    return min(running, key=lambda t: _inflight_trader_cycle_start.get(t, 0.0))
 
 
 def _merge_trigger_signal_ids_by_source(
@@ -321,9 +355,13 @@ def _handle_trader_cycle_task_done(trader_id: str, task: asyncio.Task) -> None:
     backgrounded = task in _backgrounded_trader_cycle_tasks
     _backgrounded_trader_cycle_tasks.discard(task)
     _clear_inflight_trader_cycle_task(trader_id, task)
-    _inflight_trader_cycle_start.pop(trader_id, None)
-    _skip_log_last_at.pop(trader_id, None)
-    _skip_log_suppressed.pop(trader_id, None)
+    # Skip-log counters are per-trader, not per-task: clear them only
+    # when the trader has no remaining inflight cycles, otherwise we'd
+    # silently drop the suppressed-warning bookkeeping for siblings
+    # that are still running.
+    if trader_id and not _running_inflight_tasks(trader_id):
+        _skip_log_last_at.pop(trader_id, None)
+        _skip_log_suppressed.pop(trader_id, None)
     if backgrounded:
         try:
             task.result()
@@ -791,9 +829,23 @@ _HIGH_FREQUENCY_MAX_SIGNALS_PER_CYCLE = 5000
 _HIGH_FREQUENCY_DEFAULT_MAX_SIGNALS_PER_CYCLE = 2000
 _HIGH_FREQUENCY_DEFAULT_SCAN_BATCH_SIZE = 1000
 _STANDARD_RUNTIME_TRIGGER_SIGNAL_LIMIT = 1
-_HIGH_FREQUENCY_RUNTIME_TRIGGER_SIGNAL_LIMIT = 32
+# Crypto/high-freq trader: keep batch tiny so a cycle never blocks the
+# queue for more than one signal's worth of work.  At ~360ms per signal
+# (telemetry p50: 133ms wake→context + 225ms context→decision), a 32-
+# signal batch took ~11s and pushed emit_to_queue_wake_ms p50 to 4s.
+# With limit=1 each cycle drains in <500ms; overflow signals are re-
+# published to the runtime stream (see overflow handling near :4212)
+# and picked up by the next cycle, so no signals are lost.
+_HIGH_FREQUENCY_RUNTIME_TRIGGER_SIGNAL_LIMIT = 1
 _STANDARD_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 1
-_HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 16
+_HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 1
+# Max concurrent runtime-trigger cycles per trader.  Allowing N parallel
+# cycles trades a small race window on shared trader state (open-position
+# count, occupied markets) for big gains in queue throughput: under a
+# burst of N signals the lane can dispatch all of them rather than
+# queueing N-1.  Position caps still bound over-trading because the
+# cycle re-reads positions from the DB before each decision.
+_RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER = 4
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
 _TRADER_CYCLE_HEARTBEAT_EVENT_INTERVAL_SECONDS = 1
 _trader_cycle_heartbeat_last_emitted: dict[str, datetime] = {}
@@ -7562,111 +7614,119 @@ async def _run_trader_once_with_timeout(
         timeout = max(_MIN_LIVE_PROCESS_SIGNAL_CYCLE_TIMEOUT_SECONDS, timeout)
     trader_id = str(trader.get("id") or "")
     has_runtime_trigger = bool(trigger_signal_ids_by_source) or bool(trigger_signal_snapshots_by_source)
-    existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
-    if existing is not None and not existing.done():
-        # Hard-kill tasks stuck far too long (prevents indefinite DB
-        # connection leaks from abandoned tasks that ignore cancellation).
-        started_at = _inflight_trader_cycle_start.get(trader_id, 0.0)
-        stuck_seconds = time.monotonic() - started_at if started_at else 0.0
-        if started_at and stuck_seconds > _STUCK_TASK_HARD_KILL_SECONDS:
+    is_signal_processing = bool(process_signals and has_runtime_trigger)
+    # Hard-kill any task stuck so long it's leaking DB connections.  We
+    # only force-kill the OLDEST task — concurrent siblings stay alive.
+    oldest = _oldest_running_task(trader_id)
+    if oldest is not None:
+        oldest_started_at = _inflight_trader_cycle_start.get(oldest, 0.0)
+        stuck_seconds = time.monotonic() - oldest_started_at if oldest_started_at else 0.0
+        if oldest_started_at and stuck_seconds > _STUCK_TASK_HARD_KILL_SECONDS:
             logger.error(
                 "Force-killing stuck trader cycle task trader=%s stuck_seconds=%.0f",
                 trader_id,
                 stuck_seconds,
             )
-            existing.cancel()
-            _clear_inflight_trader_cycle_task(trader_id, existing)
-            _inflight_trader_cycle_start.pop(trader_id, None)
+            oldest.cancel()
+            _clear_inflight_trader_cycle_task(trader_id, oldest)
             _skip_log_last_at.pop(trader_id, None)
             _skip_log_suppressed.pop(trader_id, None)
-            # Fall through to start a fresh task below
-        else:
-            existing_process_signals = bool(_inflight_trader_cycle_process_signals.get(trader_id, False))
-            should_preempt_existing = bool(process_signals and has_runtime_trigger and not existing_process_signals)
-            if should_preempt_existing:
-                existing.cancel()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.shield(existing),
-                        timeout=min(1.0, _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS),
-                    )
-                except asyncio.TimeoutError:
-                    _abandoned_trader_cycle_tasks.add(existing)
-                    existing.add_done_callback(_discard_abandoned_trader_cycle)
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                    logger.warning(
-                        "Preempted maintenance-only trader cycle after cancel-grace expiry trader=%s",
-                        trader_id,
-                    )
-                except asyncio.CancelledError:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                except Exception as exc:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                    logger.warning(
-                        "Maintenance-only trader cycle raised during runtime-trigger preemption trader=%s",
-                        trader_id,
-                        exc_info=exc,
-                    )
-                else:
-                    _clear_inflight_trader_cycle_task(trader_id, existing)
-                existing = _inflight_trader_cycle_tasks.get(trader_id) if trader_id else None
-                if existing is not None and not existing.done():
-                    _queue_pending_runtime_cycle(
-                        trader=trader,
-                        control=control,
-                        process_signals=process_signals,
-                        trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                        trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                        timeout_seconds=requested_timeout,
-                    )
-                    return 0, 0, 0
-                # Fall through to start a fresh cycle below
+
+    # Preemption: if a maintenance-only cycle is running and a runtime
+    # signal trigger arrives, preempt the maintenance task so the signal
+    # gets prompt service.  Concurrent signal cycles for the same trader
+    # don't preempt each other — they run side by side.
+    if is_signal_processing:
+        for sibling in list(_running_inflight_tasks(trader_id)):
+            if _inflight_trader_cycle_process_signals.get(sibling, False):
+                continue
+            sibling.cancel()
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(sibling),
+                    timeout=min(1.0, _TRADER_TIMEOUT_CANCEL_GRACE_SECONDS),
+                )
+            except asyncio.TimeoutError:
+                _abandoned_trader_cycle_tasks.add(sibling)
+                sibling.add_done_callback(_discard_abandoned_trader_cycle)
+                _clear_inflight_trader_cycle_task(trader_id, sibling)
+                logger.warning(
+                    "Preempted maintenance-only trader cycle after cancel-grace expiry trader=%s",
+                    trader_id,
+                )
+            except asyncio.CancelledError:
+                _clear_inflight_trader_cycle_task(trader_id, sibling)
+            except Exception as exc:
+                _clear_inflight_trader_cycle_task(trader_id, sibling)
+                logger.warning(
+                    "Maintenance-only trader cycle raised during runtime-trigger preemption trader=%s",
+                    trader_id,
+                    exc_info=exc,
+                )
             else:
-            # Rate-limit the "still finishing" warnings to once per minute per trader
-                now_mono = time.monotonic()
-                last_log = _skip_log_last_at.get(trader_id, 0.0)
-                warning_eligible = stuck_seconds >= _OVERLAP_WARNING_MIN_STUCK_SECONDS
-                if warning_eligible and now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
-                    suppressed = _skip_log_suppressed.get(trader_id, 0)
-                    suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
-                    if process_signals and has_runtime_trigger:
-                        _queue_pending_runtime_cycle(
-                            trader=trader,
-                            control=control,
-                            process_signals=process_signals,
-                            trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                            trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                            timeout_seconds=requested_timeout,
-                        )
-                        logger.warning(
-                            "Queued pending runtime trigger because prior trader run is still finishing for trader=%s stuck=%.0fs%s",
-                            trader_id,
-                            stuck_seconds,
-                            suffix,
-                        )
-                    else:
-                        logger.warning(
-                            "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s stuck=%.0fs%s",
-                            trader_id,
-                            process_signals,
-                            stuck_seconds,
-                            suffix,
-                        )
-                    _skip_log_last_at[trader_id] = now_mono
-                    _skip_log_suppressed[trader_id] = 0
-                else:
-                    if process_signals and has_runtime_trigger:
-                        _queue_pending_runtime_cycle(
-                            trader=trader,
-                            control=control,
-                            process_signals=process_signals,
-                            trigger_signal_ids_by_source=trigger_signal_ids_by_source,
-                            trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
-                            timeout_seconds=requested_timeout,
-                        )
-                    if warning_eligible:
-                        _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
-                return 0, 0, 0
+                _clear_inflight_trader_cycle_task(trader_id, sibling)
+
+    # Concurrency gate.  Signal-processing cycles (the hot path) may run
+    # up to N at once per trader so a burst of signals can fan out.
+    # Maintenance-only cycles stay strictly serial — they're not
+    # latency-sensitive and might do book-keeping that races with itself.
+    running_signal_cycles = _count_running_signal_cycles(trader_id)
+    if is_signal_processing:
+        at_capacity = running_signal_cycles >= _RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER
+    else:
+        at_capacity = bool(_running_inflight_tasks(trader_id))
+
+    if at_capacity:
+        # Same queueing/skip behaviour as before — emit one rate-limited
+        # warning per trader and let the next cycle's done-callback
+        # drain anything we deferred.
+        oldest_started_at = _inflight_trader_cycle_start.get(oldest, 0.0) if oldest is not None else 0.0
+        stuck_seconds = time.monotonic() - oldest_started_at if oldest_started_at else 0.0
+        now_mono = time.monotonic()
+        last_log = _skip_log_last_at.get(trader_id, 0.0)
+        warning_eligible = stuck_seconds >= _OVERLAP_WARNING_MIN_STUCK_SECONDS
+        if warning_eligible and now_mono - last_log >= _SKIP_LOG_INTERVAL_SECONDS:
+            suppressed = _skip_log_suppressed.get(trader_id, 0)
+            suffix = f" (suppressed {suppressed} duplicates)" if suppressed else ""
+            if is_signal_processing:
+                _queue_pending_runtime_cycle(
+                    trader=trader,
+                    control=control,
+                    process_signals=process_signals,
+                    trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                    trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                    timeout_seconds=requested_timeout,
+                )
+                logger.warning(
+                    "Queued pending runtime trigger because trader is at signal-cycle concurrency cap trader=%s running=%d stuck=%.0fs%s",
+                    trader_id,
+                    running_signal_cycles,
+                    stuck_seconds,
+                    suffix,
+                )
+            else:
+                logger.warning(
+                    "Trader cycle skipped because prior run is still finishing for trader=%s process_signals=%s stuck=%.0fs%s",
+                    trader_id,
+                    process_signals,
+                    stuck_seconds,
+                    suffix,
+                )
+            _skip_log_last_at[trader_id] = now_mono
+            _skip_log_suppressed[trader_id] = 0
+        else:
+            if is_signal_processing:
+                _queue_pending_runtime_cycle(
+                    trader=trader,
+                    control=control,
+                    process_signals=process_signals,
+                    trigger_signal_ids_by_source=trigger_signal_ids_by_source,
+                    trigger_signal_snapshots_by_source=trigger_signal_snapshots_by_source,
+                    timeout_seconds=requested_timeout,
+                )
+            if warning_eligible:
+                _skip_log_suppressed[trader_id] = _skip_log_suppressed.get(trader_id, 0) + 1
+        return 0, 0, 0
 
     task = asyncio.create_task(
         _run_trader_once(
@@ -7680,9 +7740,9 @@ async def _run_trader_once_with_timeout(
         name=f"trader-cycle-{trader_id or 'unknown'}",
     )
     if trader_id:
-        _inflight_trader_cycle_tasks[trader_id] = task
-        _inflight_trader_cycle_start[trader_id] = time.monotonic()
-        _inflight_trader_cycle_process_signals[trader_id] = bool(process_signals)
+        _inflight_trader_cycle_tasks.setdefault(trader_id, set()).add(task)
+        _inflight_trader_cycle_start[task] = time.monotonic()
+        _inflight_trader_cycle_process_signals[task] = bool(process_signals)
         task.add_done_callback(
             lambda done_task, current_trader_id=trader_id: _handle_trader_cycle_task_done(
                 current_trader_id,

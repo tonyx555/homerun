@@ -1616,11 +1616,24 @@ async def test_pause_until_next_cycle_sleeps_without_runtime_trigger_wait(monkey
 
 
 @pytest.mark.asyncio
-async def test_run_trader_once_with_timeout_queues_pending_runtime_trigger_when_inflight():
+async def test_run_trader_once_with_timeout_queues_pending_runtime_trigger_when_at_capacity():
+    """At capacity (N signal cycles already running), the next runtime
+    trigger must queue rather than dispatch."""
     trader_id = "trader-queue"
-    existing = asyncio.get_running_loop().create_future()
-    trader_orchestrator_worker._inflight_trader_cycle_tasks[trader_id] = existing
-    trader_orchestrator_worker._inflight_trader_cycle_process_signals[trader_id] = True
+    existing_tasks: list[asyncio.Task] = []
+    bucket: set[asyncio.Task] = set()
+    trader_orchestrator_worker._inflight_trader_cycle_tasks[trader_id] = bucket
+    capacity = trader_orchestrator_worker._RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER
+
+    async def _hold_open() -> None:
+        await asyncio.Future()
+
+    for _ in range(capacity):
+        task = asyncio.create_task(_hold_open())
+        existing_tasks.append(task)
+        bucket.add(task)
+        trader_orchestrator_worker._inflight_trader_cycle_process_signals[task] = True
+        trader_orchestrator_worker._inflight_trader_cycle_start[task] = 0.0
     trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
 
     try:
@@ -1634,8 +1647,12 @@ async def test_run_trader_once_with_timeout_queues_pending_runtime_trigger_when_
         )
     finally:
         trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
-        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
-        existing.cancel()
+        for task in existing_tasks:
+            trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(task, None)
+            trader_orchestrator_worker._inflight_trader_cycle_start.pop(task, None)
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     pending = trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
 
@@ -1645,6 +1662,48 @@ async def test_run_trader_once_with_timeout_queues_pending_runtime_trigger_when_
     assert pending["trigger_signal_snapshots_by_source"]["scanner"]["signal-1"]["id"] == "signal-1"
     assert pending["process_signals"] is True
     assert pending["timeout_seconds"] == 7.0
+
+
+@pytest.mark.asyncio
+async def test_run_trader_once_with_timeout_dispatches_concurrent_signal_cycle_under_cap(monkeypatch):
+    """With one signal cycle already running, the next runtime trigger
+    should dispatch concurrently (up to the per-trader cap)."""
+    trader_id = "trader-concurrent"
+    bucket: set[asyncio.Task] = set()
+    trader_orchestrator_worker._inflight_trader_cycle_tasks[trader_id] = bucket
+
+    async def _hold_open() -> None:
+        await asyncio.Future()
+
+    incumbent = asyncio.create_task(_hold_open())
+    bucket.add(incumbent)
+    trader_orchestrator_worker._inflight_trader_cycle_process_signals[incumbent] = True
+    trader_orchestrator_worker._inflight_trader_cycle_start[incumbent] = 0.0
+    trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
+
+    run_once_mock = AsyncMock(return_value=(1, 2, 3))
+    monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once", run_once_mock)
+
+    try:
+        result = await trader_orchestrator_worker._run_trader_once_with_timeout(
+            {"id": trader_id},
+            {"mode": "shadow"},
+            process_signals=True,
+            trigger_signal_ids_by_source={"scanner": ["signal-1"]},
+            trigger_signal_snapshots_by_source={"scanner": {"signal-1": {"id": "signal-1"}}},
+            timeout_seconds=7.0,
+        )
+    finally:
+        trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
+        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(incumbent, None)
+        trader_orchestrator_worker._inflight_trader_cycle_start.pop(incumbent, None)
+        incumbent.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await incumbent
+        trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
+
+    assert result == (1, 2, 3)
+    run_once_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -1661,8 +1720,9 @@ async def test_run_trader_once_with_timeout_preempts_inflight_maintenance_for_ru
 
     existing = asyncio.create_task(_maintenance_only_cycle())
     await asyncio.sleep(0)
-    trader_orchestrator_worker._inflight_trader_cycle_tasks[trader_id] = existing
-    trader_orchestrator_worker._inflight_trader_cycle_process_signals[trader_id] = False
+    trader_orchestrator_worker._inflight_trader_cycle_tasks[trader_id] = {existing}
+    trader_orchestrator_worker._inflight_trader_cycle_process_signals[existing] = False
+    trader_orchestrator_worker._inflight_trader_cycle_start[existing] = 0.0
     trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
     run_once_mock = AsyncMock(return_value=(2, 3, 4))
     monkeypatch.setattr(trader_orchestrator_worker, "_run_trader_once", run_once_mock)
@@ -1678,7 +1738,8 @@ async def test_run_trader_once_with_timeout_preempts_inflight_maintenance_for_ru
         )
     finally:
         trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
-        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
+        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(existing, None)
+        trader_orchestrator_worker._inflight_trader_cycle_start.pop(existing, None)
         trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
         if not existing.done():
             existing.cancel()
@@ -1720,8 +1781,6 @@ async def test_run_trader_once_with_timeout_leaves_live_signal_cycle_running_aft
     trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
     trader_orchestrator_worker._backgrounded_trader_cycle_tasks.clear()
     trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
-    trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
-    trader_orchestrator_worker._inflight_trader_cycle_start.pop(trader_id, None)
 
     try:
         result = await trader_orchestrator_worker._run_trader_once_with_timeout(
@@ -1732,7 +1791,8 @@ async def test_run_trader_once_with_timeout_leaves_live_signal_cycle_running_aft
             trigger_signal_snapshots_by_source={"scanner": {"signal-1": {"id": "signal-1"}}},
             timeout_seconds=0.01,
         )
-        live_task = trader_orchestrator_worker._inflight_trader_cycle_tasks.get(trader_id)
+        bucket = trader_orchestrator_worker._inflight_trader_cycle_tasks.get(trader_id)
+        live_task = next(iter(bucket)) if bucket else None
 
         assert result == (0, 0, 0)
         assert live_task is not None
@@ -1747,9 +1807,11 @@ async def test_run_trader_once_with_timeout_leaves_live_signal_cycle_running_aft
     finally:
         finish_cycle.set()
         trader_orchestrator_worker._pending_runtime_cycle_specs.pop(trader_id, None)
-        background_task = trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
-        trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(trader_id, None)
-        trader_orchestrator_worker._inflight_trader_cycle_start.pop(trader_id, None)
+        bucket = trader_orchestrator_worker._inflight_trader_cycle_tasks.pop(trader_id, None)
+        background_task = next(iter(bucket)) if bucket else None
+        if background_task is not None:
+            trader_orchestrator_worker._inflight_trader_cycle_process_signals.pop(background_task, None)
+            trader_orchestrator_worker._inflight_trader_cycle_start.pop(background_task, None)
         trader_orchestrator_worker._backgrounded_trader_cycle_tasks.clear()
         if background_task is not None and not background_task.done():
             background_task.cancel()

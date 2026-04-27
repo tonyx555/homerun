@@ -39,6 +39,7 @@ appended so the lineage is auditable.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Iterable
 
@@ -83,6 +84,13 @@ _RESOLVED_STATUSES = (
     "win",
     "loss",
 )
+
+# Cap HTTP-fetch portion of the verifier sweeps separately from the
+# overall session timeout (30s).  Without this, a slow Polymarket
+# pagination consumes the entire budget and the verifier holds its
+# session checked out for ~30s while doing zero DB work — leaving the
+# pool starved for live-path traffic.
+_HTTP_FETCH_TIMEOUT_SECONDS = 12.0
 
 
 def _direction_to_outcome_index(direction: str | None) -> int | None:
@@ -390,9 +398,24 @@ async def verify_orders_against_wallet_trades(
         return {"error": "missing_wallet_address", "examined": 0, "verified": 0, "unmatched": 0}
 
     try:
-        trades_raw = await polymarket_client.get_wallet_trades_paginated(
-            wallet_lower, max_trades=max_trades, page_size=500
+        trades_raw = await asyncio.wait_for(
+            polymarket_client.get_wallet_trades_paginated(
+                wallet_lower, max_trades=max_trades, page_size=500
+            ),
+            timeout=_HTTP_FETCH_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "polymarket_trade_verifier: get_wallet_trades exceeded %.0fs HTTP budget; skipping cycle",
+            _HTTP_FETCH_TIMEOUT_SECONDS,
+            extra={"wallet": wallet_lower},
+        )
+        return {
+            "error": "wallet_trades_fetch_timeout",
+            "examined": 0,
+            "verified": 0,
+            "unmatched": 0,
+        }
     except Exception as exc:
         logger.warning(
             "polymarket_trade_verifier: get_wallet_trades failed",
@@ -893,9 +916,24 @@ async def verify_orders_against_closed_positions(
         return {"error": "missing_wallet_address", "examined": 0, "verified": 0, "unmatched": 0}
 
     try:
-        positions_raw = await polymarket_client.get_closed_positions_paginated(
-            wallet_lower, max_positions=max_positions
+        positions_raw = await asyncio.wait_for(
+            polymarket_client.get_closed_positions_paginated(
+                wallet_lower, max_positions=max_positions
+            ),
+            timeout=_HTTP_FETCH_TIMEOUT_SECONDS,
         )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "polymarket_trade_verifier closed_positions fetch exceeded %.0fs HTTP budget; skipping cycle",
+            _HTTP_FETCH_TIMEOUT_SECONDS,
+            extra={"wallet": wallet_lower},
+        )
+        return {
+            "error": "closed_positions_fetch_timeout",
+            "examined": 0,
+            "verified": 0,
+            "unmatched": 0,
+        }
     except Exception as exc:
         logger.warning(
             "polymarket_trade_verifier closed_positions fetch failed",

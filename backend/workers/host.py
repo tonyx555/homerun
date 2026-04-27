@@ -121,7 +121,30 @@ def _should_suppress_asyncio_exception(message: str, exc: Exception | None) -> b
         return True
     if isinstance(exc, ConnectionError) and "unexpected connection_lost() call" in str(exc):
         return True
-    return isinstance(exc, AttributeError) and "backend_pid" in str(exc)
+    if isinstance(exc, AttributeError) and "backend_pid" in str(exc):
+        return True
+    # Post-cancel cleanup noise from the asyncpg/SQLAlchemy stack.
+    # These surface as "Task exception was never retrieved" from the
+    # session's fire-and-forget drain/invalidate path after a wait_for
+    # timeout cancels a query.  The connection has already been
+    # invalidated by the pool listener — re-logging the cleanup-side
+    # error at ERROR level is just noise.
+    exc_type_name = type(exc).__name__ if exc is not None else ""
+    exc_module = type(exc).__module__ if exc is not None else ""
+    if exc_type_name == "InternalClientError" and exc_module.startswith("asyncpg"):
+        return True
+    if exc_type_name == "ResourceClosedError" and "sqlalchemy" in exc_module:
+        return True
+    if exc_type_name == "InterfaceError" and "sqlalchemy" in exc_module:
+        # rvf5 is the SQLAlchemy stable error code for the
+        # "connection is closed" family surfaced mid-cleanup.  Real
+        # interface errors on user-facing paths are caught and logged
+        # by the calling code; the ones that reach the global handler
+        # come exclusively from drain tasks after cancellation.
+        msg_text = f"{message} {exc}".lower()
+        if "rvf5" in msg_text or "connection is closed" in msg_text:
+            return True
+    return False
 
 
 class _WorkerPlaneLock:

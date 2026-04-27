@@ -28,6 +28,38 @@ def test_should_suppress_asyncio_exception_for_protocol_invalid_state_noise():
     assert host._should_suppress_asyncio_exception("Fatal error: protocol.data_received() call failed.", exc) is True
 
 
+def test_should_suppress_asyncpg_internal_client_error_post_cancel():
+    """asyncpg's protocol-state error from drain task is benign noise."""
+    asyncpg_exc = type(
+        "InternalClientError", (Exception,), {"__module__": "asyncpg.exceptions._base"}
+    )("got result for unknown protocol state 3")
+
+    assert host._should_suppress_asyncio_exception("Task exception was never retrieved", asyncpg_exc) is True
+
+
+def test_should_suppress_sqlalchemy_resource_closed_error():
+    """SQLAlchemy ResourceClosedError from drain task is benign noise."""
+    sa_exc = type(
+        "ResourceClosedError", (Exception,), {"__module__": "sqlalchemy.exc"}
+    )("This transaction is closed")
+
+    assert host._should_suppress_asyncio_exception("Task exception was never retrieved", sa_exc) is True
+
+
+def test_should_suppress_sqlalchemy_interface_error_rvf5():
+    """SQLAlchemy InterfaceError linked to rvf5 (closed connection) is benign."""
+    sa_exc = type(
+        "InterfaceError", (Exception,), {"__module__": "sqlalchemy.exc"}
+    )("(Background on this error at: https://sqlalche.me/e/20/rvf5)")
+
+    assert host._should_suppress_asyncio_exception("Task exception was never retrieved", sa_exc) is True
+
+
+def test_should_not_suppress_arbitrary_runtime_error():
+    """A non-cleanup error must still surface at ERROR level."""
+    assert host._should_suppress_asyncio_exception("Task exception was never retrieved", ValueError("bad")) is False
+
+
 @pytest.mark.asyncio
 async def test_initialize_services_schedules_live_execution_in_background(monkeypatch):
     worker_host = host.WorkerHost("all")
