@@ -107,7 +107,8 @@ class _FakeReferenceRuntime:
             }
         }
 
-    def get_oracle_history(self, asset: str, *, points: int = 80):
+    def get_oracle_history(self, asset: str, *, points: int = 80, max_age_seconds: float | None = None):
+        del max_age_seconds  # fake doesn't filter
         oracle = self.get_oracle_price(asset)
         if oracle is None:
             return []

@@ -160,3 +160,59 @@ def test_get_price_at_or_after_time_returns_first_point_within_delay():
 
     assert feed.get_price_at_or_after_time("BTC", float(now_s), max_delay_seconds=20.0) == 67020.0
     assert feed.get_price_at_or_after_time("BTC", float(now_s), max_delay_seconds=5.0) is None
+
+
+def test_seed_history_then_get_oracle_history_via_reference_runtime_keeps_old_klines():
+    """Time-windowed get_oracle_history must surface backfilled klines even
+    when many recent live ticks exist — count-based last-N would crop them."""
+    from services.reference_runtime import ReferenceRuntime
+    feed = ChainlinkFeed()
+    runtime = ReferenceRuntime.__new__(ReferenceRuntime)  # bypass singleton boot
+    runtime._chainlink_feed = feed
+    now_ms = int(time.time() * 1000)
+
+    # Backfilled klines: minute closes covering minutes -10..-1
+    klines = [(now_ms - i * 60_000, 70_000.0 + i * 5.0) for i in range(10, 0, -1)]
+    feed.seed_history_from_klines("BTC", klines)
+    # Many recent live ticks (last 5 seconds, 10/s) — would dominate a
+    # last-N-by-count slice and erase the backfill from the chart.
+    for i in range(50):
+        feed._history["BTC"].append((now_ms - 5_000 + i * 100, 70_500.0 + i * 0.1))
+
+    # Window 900s, capped at 80 points: must include both kline-era and
+    # tick-era points (not purely the dense recent ticks).
+    history = runtime.get_oracle_history("BTC", points=80, max_age_seconds=900.0)
+    assert len(history) > 1
+    timestamps = [pt["t"] for pt in history]
+    earliest_returned = timestamps[0]
+    latest_returned = timestamps[-1]
+    assert earliest_returned <= now_ms - 8 * 60_000, (
+        f"expected backfilled klines (≤-8min) to survive sampling, got earliest={earliest_returned}"
+    )
+    assert latest_returned >= now_ms - 1_000, (
+        f"latest point must be the live-tick tail, got {latest_returned}"
+    )
+
+
+def test_get_oracle_history_filters_by_max_age_seconds():
+    from services.reference_runtime import ReferenceRuntime
+    feed = ChainlinkFeed()
+    runtime = ReferenceRuntime.__new__(ReferenceRuntime)
+    runtime._chainlink_feed = feed
+    now_ms = int(time.time() * 1000)
+    feed._history["ETH"] = deque(
+        [
+            (now_ms - 7200_000, 3_000.0),  # 2h old
+            (now_ms - 3600_000, 3_100.0),  # 1h old
+            (now_ms - 600_000, 3_200.0),   # 10min old
+            (now_ms - 60_000, 3_250.0),    # 1min old
+            (now_ms - 5_000, 3_260.0),     # 5s old
+        ]
+    )
+    # 15min window must drop the 1h-old and 2h-old points.
+    history = runtime.get_oracle_history("ETH", points=80, max_age_seconds=900.0)
+    timestamps = [pt["t"] for pt in history]
+    assert all(ts >= now_ms - 900_000 for ts in timestamps)
+    # Without max_age, all five points come back.
+    history_full = runtime.get_oracle_history("ETH", points=80)
+    assert len(history_full) == 5
