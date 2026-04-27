@@ -48,8 +48,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import TraderOrder
 from services.polymarket import polymarket_client
 from services.trader_order_verification import (
-    TRADER_ORDER_VERIFICATION_DISPUTED,
-    TRADER_ORDER_VERIFICATION_VENUE_FILL,
     TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
     apply_trader_order_verification,
     append_trader_order_verification_event,
