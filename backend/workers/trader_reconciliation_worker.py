@@ -511,7 +511,6 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
         if not wallet_address:
             return
         from services.polymarket_trade_verifier import (
-            verify_orders_against_wallet_trades,
             verify_orders_against_closed_positions,
             verify_orders_from_bot_lineage,
         )
@@ -583,39 +582,20 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
                 closed_positions_fetched=cp_result.get("closed_positions_fetched"),
                 pnl_delta=round(cp_result.get("pnl_delta", 0.0), 4),
             )
-        # PASS 2: trade matcher second.
-        #
-        # Catches non-resolved positions that the bot exited via SELL
-        # (or any other on-chain wallet activity that touched our
-        # tokens — manual sells, transfers, etc). Skips rows that
-        # closed_positions already wallet_activity-verified.
-        async with AsyncSessionLocal() as verify_session:
-            try:
-                trade_result = await asyncio.wait_for(
-                    verify_orders_against_wallet_trades(
-                        verify_session,
-                        wallet_address=wallet_address,
-                        commit=True,
-                    ),
-                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "polymarket_trade_verifier (trades) timed out after %.1fs",
-                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
-                )
-                return
-        if trade_result.get("verified", 0) > 0 or trade_result.get("examined", 0) > 0:
-            logger.info(
-                "polymarket_trade_verifier sweep (trades)",
-                examined=trade_result.get("examined"),
-                verified=trade_result.get("verified"),
-                unmatched=trade_result.get("unmatched"),
-                wallet_trades_fetched=trade_result.get("wallet_trades_fetched"),
-                pnl_total_before=round(trade_result.get("pnl_total_before", 0.0), 4),
-                pnl_total_after=round(trade_result.get("pnl_total_after", 0.0), 4),
-                pnl_delta=round(trade_result.get("pnl_delta", 0.0), 4),
-            )
+        # NOTE: verify_orders_against_wallet_trades (the FIFO trade
+        # matcher) was deliberately removed from the pipeline. On a
+        # wallet that occasionally has manual user trades alongside
+        # the bot's, FIFO matching by (asset_id, side, timestamp)
+        # systematically misattributes manual SELL trades to bot
+        # orders that happen to share the token — there is no
+        # per-trade order_id linkage from Polymarket's data API to
+        # disambiguate. Sample violation: bot's small SPY entry got
+        # matched to the user's manual sell, attributed +$219.51
+        # phantom win to the bot. Bot-lineage (uses bot's OWN
+        # clob_order_id from pending_live_exit) and closed_positions
+        # (uses bot's OWN cost basis × wallet's deterministic
+        # settlement curPrice) are conflation-immune; trade matcher
+        # is not. We accept lower coverage in exchange for correctness.
     except Exception as exc:
         logger.warning("polymarket_trade_verifier sweep failed", exc_info=exc)
 

@@ -439,6 +439,13 @@ async def verify_orders_against_wallet_trades(
                 hour=0, minute=0, second=0, microsecond=0
             )
         query = query.where(TraderOrder.updated_at >= order_window_start)
+        # Skip already-verified rows at SQL — same rationale as the
+        # other verifier paths: avoids re-scanning verified history and
+        # keeps the loop's per-row work bounded.
+        query = query.where(
+            (TraderOrder.verification_status.is_(None))
+            | (TraderOrder.verification_status != TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY)
+        )
     query = query.order_by(TraderOrder.executed_at.asc(), TraderOrder.created_at.asc())
 
     rows = list((await session.execute(query)).scalars().all())
@@ -665,8 +672,17 @@ async def verify_orders_from_bot_lineage(
     else:
         if order_window_start is None:
             from datetime import timedelta
-            order_window_start = utcnow() - timedelta(days=90)
+            order_window_start = utcnow() - timedelta(days=14)
         query = query.where(TraderOrder.updated_at >= order_window_start)
+        # Skip rows already wallet_activity-verified by a prior cycle.
+        # Without this, the loop re-fetches the entire backlog every
+        # reconciliation tick and re-issues a Polymarket HTTP lookup
+        # per unmatched row (Path B below), holding the session well
+        # past the 30s statement timeout.
+        query = query.where(
+            (TraderOrder.verification_status.is_(None))
+            | (TraderOrder.verification_status != TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY)
+        )
     rows = list((await session.execute(query)).scalars().all())
 
     examined = 0
@@ -696,10 +712,25 @@ async def verify_orders_from_bot_lineage(
         # trades have different clob_order_ids and cannot pollute it.
         sell = _bot_recorded_sell_fill(payload)
         if sell is not None and sell["filled_size"] > 0.0:
-            sell_size = sell["filled_size"]
-            sell_proceeds = sell["filled_notional_usd"]
-            # Pro-rate cost basis to the matched sell size (handles
-            # partial fills cleanly).
+            raw_sell_size = sell["filled_size"]
+            raw_sell_proceeds = sell["filled_notional_usd"]
+            # CRITICAL: pending_live_exit.snapshot can carry the WALLET's
+            # aggregate filled_size for the token (when reconciliation
+            # populated it from the wallet positions API rather than
+            # from the bot's specific clob_order_id status). The bot
+            # could only have sold what it bought — cap sell_size to
+            # bot_size, and pro-rate proceeds at the same avg price.
+            # Without this cap, the bot's small entry gets credited the
+            # wallet's entire close (real example: bot's 11.45-share SPY
+            # entry got credited 267.85 shares of wallet sells at $229
+            # proceeds, attributed +$219 phantom win).
+            if raw_sell_size > bot_size + 1e-9:
+                avg_sell_price = raw_sell_proceeds / raw_sell_size if raw_sell_size > 0 else 0.0
+                sell_size = bot_size
+                sell_proceeds = bot_size * avg_sell_price
+            else:
+                sell_size = raw_sell_size
+                sell_proceeds = raw_sell_proceeds
             allocated_cost = bot_cost * min(1.0, sell_size / bot_size)
             verified_pnl = sell_proceeds - allocated_cost
             verified_sell_fill += 1
@@ -910,8 +941,15 @@ async def verify_orders_against_closed_positions(
     else:
         if order_window_start is None:
             from datetime import timedelta
-            order_window_start = utcnow() - timedelta(days=90)
+            order_window_start = utcnow() - timedelta(days=14)
         query = query.where(TraderOrder.updated_at >= order_window_start)
+        # Skip already-verified rows at SQL — same rationale as the
+        # bot_lineage path: avoids re-scanning the full backlog every
+        # reconciliation cycle and busting the 30s statement timeout.
+        query = query.where(
+            (TraderOrder.verification_status.is_(None))
+            | (TraderOrder.verification_status != TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY)
+        )
 
     rows = list((await session.execute(query)).scalars().all())
 
