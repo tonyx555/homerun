@@ -4499,10 +4499,6 @@ def _serialize_order(
             in ("venue_fill", "wallet_activity")
             else None
         ),
-        "verification_status": row.verification_status,
-        "verification_source": row.verification_source,
-        "verification_tx_hash": row.verification_tx_hash,
-        "verified_at": to_iso(row.verified_at),
         "reason": row.reason,
         "close_trigger": close_trigger or None,
         "close_reason": close_reason or None,
