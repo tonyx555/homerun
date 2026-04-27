@@ -2942,6 +2942,7 @@ class LiveExecutionService:
             await self._sync_trading_transport()
             await self._refresh_signature_type()
             sell_allowance_retry_used = False
+            buy_allowance_retry_used = False
             if side == OrderSide.BUY and not skip_buy_pre_submit_gate:
                 buy_gate_ok, buy_gate_error = await self._enforce_buy_pre_submit_gate(
                     token_id=token_key,
@@ -3059,6 +3060,31 @@ class LiveExecutionService:
                                 )
                                 await asyncio.sleep(0)
                                 continue
+                    if (
+                        side == OrderSide.BUY
+                        and "not enough balance / allowance" in error_text
+                        and not buy_allowance_retry_used
+                    ):
+                        # Polymarket's CLOB caches USDC balance/allowance
+                        # server-side for performance; a fill on a previous
+                        # order that freed collateral, or an on-chain allowance
+                        # bump, doesn't show up until that cache is refreshed.
+                        # Force the venue to re-read the wallet from chain and
+                        # retry once. Mirrors the SELL path (line 3052) — until
+                        # this branch existed, BUY orders that hit a stale cache
+                        # would fail and stay failed (visible as a recurring
+                        # "balance: $X, sum of active orders: $X" rejection
+                        # even when the wallet on-chain has plenty of USDC).
+                        buy_allowance_retry_used = True
+                        if await self.refresh_collateral_balance_allowance():
+                            logger.warning(
+                                "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
+                                attempt=attempt + 1,
+                                token_id=token_key,
+                                error_excerpt=error_text[:200],
+                            )
+                            await asyncio.sleep(0)
+                            continue
                     if (
                         post_only
                         and _is_post_only_cross_reject(error_text)
@@ -3206,6 +3232,29 @@ class LiveExecutionService:
                             )
                             await asyncio.sleep(0)
                             continue
+                if (
+                    side == OrderSide.BUY
+                    and "not enough balance / allowance" in error_message.lower()
+                    and not buy_allowance_retry_used
+                ):
+                    # Same stale-cache root cause as the create_order path
+                    # above — Polymarket's CLOB caches USDC balance/allowance
+                    # server-side and rejects BUY orders against the cached
+                    # view even when the wallet has plenty on-chain. Force a
+                    # cache refresh + one retry. Without this branch BUYs
+                    # against a stale cache fail permanently (the recurring
+                    # "balance: $X, sum of active orders: $X" rejection users
+                    # see despite having ample USDC in the proxy wallet).
+                    buy_allowance_retry_used = True
+                    if await self.refresh_collateral_balance_allowance():
+                        logger.warning(
+                            "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
+                            attempt=attempt + 1,
+                            token_id=token_key,
+                            error_excerpt=error_message[:200],
+                        )
+                        await asyncio.sleep(0)
+                        continue
                 if (
                     post_only
                     and _is_post_only_cross_reject(error_message)
