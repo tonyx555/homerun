@@ -2771,6 +2771,23 @@ def _apply_wallet_position_reopen(
     if wallet_size <= _WALLET_SIZE_EPSILON:
         return wallet_size, wallet_notional, wallet_entry_price, wallet_mark_price, payload
 
+    # Don't reopen rows that polymarket_trade_verifier already closed
+    # and verified against actual on-chain settlement (status=resolved
+    # + verification_status=wallet_activity). Wallet position lingering
+    # after resolution (winning shares pending redemption to USDC) is
+    # normal — the bot used to interpret that as "position is still
+    # open" and reopen it, which downgraded verification_status from
+    # wallet_activity to wallet_position. The DB-layer guard then
+    # NULL'd actual_profit, erasing the verified P&L on every restart.
+    _existing_verification = str(getattr(row, "verification_status", None) or "").strip().lower()
+    _existing_status = str(getattr(row, "status", None) or "").strip().lower()
+    _is_resolved_status = _existing_status in {
+        "resolved", "resolved_win", "resolved_loss",
+        "closed_win", "closed_loss", "win", "loss",
+    }
+    if _existing_verification == "wallet_activity" and _is_resolved_status:
+        return wallet_size, wallet_notional, wallet_entry_price, wallet_mark_price, payload
+
     reopened_size = float(allocated_size) if allocated_size is not None and allocated_size > 0.0 else wallet_size
     reopened_size = min(wallet_size, reopened_size)
     if allocated_notional_usd is not None and allocated_notional_usd > 0.0:
@@ -5054,6 +5071,16 @@ async def reconcile_live_positions(
                 str(canonical_payload.get("provider_clob_order_id") or "").strip(),
             ]
             canonical_clob_ids = sorted({value for value in canonical_clob_ids if value})
+            # Same guard as _apply_wallet_position_reopen — don't
+            # downgrade rows already verified against Polymarket truth.
+            _existing_verification = str(getattr(canonical_row, "verification_status", None) or "").strip().lower()
+            _existing_status = str(getattr(canonical_row, "status", None) or "").strip().lower()
+            _is_resolved_status = _existing_status in {
+                "resolved", "resolved_win", "resolved_loss",
+                "closed_win", "closed_loss", "win", "loss",
+            }
+            if _existing_verification == "wallet_activity" and _is_resolved_status:
+                continue
             if not dry_run:
                 canonical_row.status = "executed"
                 canonical_row.notional_usd = float(wallet_notional)
