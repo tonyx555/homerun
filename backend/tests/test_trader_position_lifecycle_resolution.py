@@ -929,6 +929,7 @@ async def test_reconcile_live_positions_does_not_reopen_verified_wallet_activity
             order = await session.get(TraderOrder, "order-1")
             assert order is not None
             order.actual_profit = -0.5
+            order.verification_status = "wallet_activity"
             await session.commit()
 
             monkeypatch.setattr(position_lifecycle, "_wallet_positions_last_refresh_succeeded", True)
