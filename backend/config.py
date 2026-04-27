@@ -53,7 +53,19 @@ class Settings(BaseSettings):
     CLOB_WS_URL: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     KALSHI_WS_URL: str = "wss://api.elections.kalshi.com/trade-api/ws/v2"
     BINANCE_WS_ENABLED: bool = True
-    BINANCE_WS_URL: str = "wss://stream.binance.com:9443/ws/btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker"
+    # Documented combined-streams endpoint — `/stream?streams=...`.  The
+    # legacy `/ws/<stream>` path only honors the single stream name
+    # immediately after `/ws/` and silently drops anything concatenated
+    # after it, which is why oracle ages spiked to 4–20s with the old URL.
+    # https://developers.binance.com/docs/binance-spot-api-docs/web-socket-streams#websocket-streams-endpoint-for-symbols
+    BINANCE_WS_URL: str = "wss://stream.binance.com:9443/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker/solusdt@bookTicker/xrpusdt@bookTicker"
+    # Force a reconnect if the binance bookTicker stream delivers no
+    # message within this many seconds.  ping/pong covers TCP liveness
+    # only — Binance's edge has been observed to stop pushing data while
+    # still answering pings during failovers, which would otherwise leave
+    # oracle ages stuck at 10–15s before ping-timeout finally kicks in.
+    # Floor enforced at 0.5s in services/binance_feed.py.
+    BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS: float = 3.0
 
     # WebSocket Feed Settings
     WS_FEED_ENABLED: bool = True  # Enable real-time WebSocket price feeds

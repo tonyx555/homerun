@@ -125,6 +125,47 @@ class ChainlinkFeed:
         """
         return dict(self._prices_by_source.get(asset.upper(), {}))
 
+    def seed_history_from_klines(
+        self,
+        asset: str,
+        klines: list[tuple[int, float]],
+    ) -> int:
+        """Insert backfilled (timestamp_ms, price) pairs into the rolling history.
+
+        Used by the crypto worker to seed a market window's worth of
+        oracle history right after startup so the UI sparklines aren't
+        empty until enough live ticks arrive.  Skips points already
+        present at the same timestamp and points older than
+        ``HISTORY_MAX_AGE_MS``; re-sorts the deque after insertion so
+        live ticks appended later remain in chronological order.
+        """
+        asset_upper = str(asset or "").strip().upper()
+        if not asset_upper or not klines:
+            return 0
+        if asset_upper not in self._history:
+            self._history[asset_upper] = deque(maxlen=HISTORY_MAX_ENTRIES)
+        history = self._history[asset_upper]
+        existing_ts = {int(ts) for ts, _ in history}
+        cutoff = int(time.time() * 1000) - HISTORY_MAX_AGE_MS
+        inserted = 0
+        for ts_ms, price in klines:
+            try:
+                ts_int = int(ts_ms)
+                price_f = float(price)
+            except (TypeError, ValueError):
+                continue
+            if ts_int < cutoff or price_f <= 0 or ts_int in existing_ts:
+                continue
+            history.append((ts_int, price_f))
+            existing_ts.add(ts_int)
+            inserted += 1
+        if inserted > 0:
+            ordered = sorted(history, key=lambda pair: int(pair[0]))
+            history.clear()
+            for pair in ordered:
+                history.append(pair)
+        return inserted
+
     def get_price_at_time(self, asset: str, timestamp_s: float) -> Optional[float]:
         """Get the oracle price closest to a given Unix timestamp (seconds).
 

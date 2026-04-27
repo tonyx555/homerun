@@ -576,7 +576,7 @@ def _failed_check_fragments(checks_payload: list[dict[str, Any]], *, max_items: 
     return fragments
 
 
-def _enrich_final_reason(
+def enrich_final_reason(
     *,
     final_decision: str,
     final_reason: str,
@@ -626,6 +626,7 @@ def apply_platform_decision_gates(
     strategy_params: dict[str, Any] | None = None,
     global_runtime: dict[str, Any] | None = None,
     execution_mode: str = "live",
+    demoted_strategy_types: set[str] | None = None,
 ) -> dict[str, Any]:
     final_decision = str(getattr(decision_obj, "decision", "failed") or "failed")
     final_reason = str(getattr(decision_obj, "reason", "") or "")
@@ -648,6 +649,35 @@ def apply_platform_decision_gates(
     market_data_context = _runtime_signal_market_data_context(runtime_signal)
     strict_ws_gate_recorded = False
     live_revalidation_gate_recorded = False
+
+    if final_decision == "selected" and demoted_strategy_types:
+        # Strategy demotion gate — short-circuits before any other check
+        # so demoted strategies cost zero downstream evaluation.
+        # ``demoted_strategy_types`` is a set of strategy_type slugs that
+        # the validation guardrail (or a manual override) has parked.
+        # Signals are still recorded in the runtime queue but never
+        # reach order submission. Override via the orchestrator's
+        # strategy health panel or the Strategies → Health subtab.
+        strategy_type = str(getattr(runtime_signal, "strategy_type", "") or "").strip().lower()
+        if strategy_type and strategy_type in demoted_strategy_types:
+            final_decision = "blocked"
+            final_reason = f"Strategy demoted under validation guardrail (strategy_type={strategy_type})"
+            platform_gates.append(
+                {
+                    "gate": "strategy_demoted",
+                    "status": "blocked",
+                    "detail": final_reason,
+                }
+            )
+            if invoke_hooks and strategy is not None and hasattr(strategy, "on_blocked"):
+                try:
+                    strategy.on_blocked(
+                        runtime_signal,
+                        BlockReason.STRATEGY_DEMOTED,
+                        {"strategy_type": strategy_type},
+                    )
+                except Exception:
+                    pass
 
     if final_decision == "selected":
         # Signal staleness gate — opt-in per strategy via max_signal_age_seconds.
@@ -2269,7 +2299,7 @@ def apply_platform_decision_gates(
             }
         )
 
-    final_reason = _enrich_final_reason(
+    final_reason = enrich_final_reason(
         final_decision=final_decision,
         final_reason=final_reason,
         checks_payload=checks_payload,

@@ -674,3 +674,57 @@ export const clearValidationStrategyOverride = async (strategyType: string): Pro
   const { data } = await api.delete(`/validation/strategy-health/${strategyType}/override`)
   return unwrapApiData(data)
 }
+
+// ── Strategy health (validation guardrail) ──────────────────────────────
+
+export interface StrategyHealthRow {
+  strategy_type: string
+  status: 'active' | 'demoted' | 'untracked' | string
+  manual_override?: boolean
+  manual_override_note?: string | null
+  sample_size?: number
+  directional_accuracy?: number | null
+  mae_roi?: number | null
+  last_reason?: string | null
+  updated_at?: string | null
+}
+
+export const getValidationStrategyHealth = async (): Promise<StrategyHealthRow[]> => {
+  const { data } = await api.get('/validation/strategy-health')
+  const payload = unwrapApiData(data) as Record<string, unknown> | undefined
+  const rows = (payload?.strategy_health || []) as StrategyHealthRow[]
+  return rows
+}
+
+export interface GuardrailConfig {
+  enabled: boolean
+  min_samples: number
+  min_directional_accuracy: number
+  max_mae_roi: number
+  lookback_days: number
+  auto_promote: boolean
+}
+
+export const getValidationGuardrailConfig = async (): Promise<GuardrailConfig> => {
+  const { data } = await api.get('/validation/guardrails/config')
+  return unwrapApiData(data)
+}
+
+export const updateValidationGuardrailConfig = async (
+  patch: Partial<GuardrailConfig>,
+): Promise<GuardrailConfig> => {
+  const { data } = await api.put('/validation/guardrails/config', patch)
+  return unwrapApiData(data)
+}
+
+export interface GuardrailEvalResult {
+  enabled?: boolean
+  updated?: number
+  demoted?: string[]
+  restored?: string[]
+}
+
+export const runValidationGuardrails = async (): Promise<GuardrailEvalResult> => {
+  const { data } = await api.post('/validation/guardrails/evaluate')
+  return unwrapApiData(data)
+}

@@ -36,6 +36,69 @@ def _extract_machine_learning_probability(payload: dict[str, Any], *, direction:
     return probability_yes
 
 
+def _refresh_oracle_fields_live(market_info: dict[str, Any]) -> dict[str, Any]:
+    """Pull oracle_* fields straight from ``ReferenceRuntime`` instead of
+    the cached snapshot row.
+
+    The snapshot path (services/market_runtime.py reactive drain → publish)
+    introduces ~25ms of debounce + ~100ms of broadcast rate-limiting, plus
+    whatever staleness has accumulated between two reactive ticks.  At
+    decision time the orchestrator wants the freshest possible
+    binance_direct / chainlink prices it can get — and those live
+    in-process inside ``ChainlinkFeed._prices_by_source``, written
+    synchronously on every WS callback.  Reading them here gives the
+    orchestrator the same effective freshness as the binance_feed
+    callback that produced them.
+
+    Falls back to whatever was on the snapshot if the reference runtime
+    isn't available (tests, partial bootstraps, etc).
+    """
+    snapshot_pbs = (
+        dict(market_info.get("oracle_prices_by_source"))
+        if isinstance(market_info.get("oracle_prices_by_source"), dict)
+        else {}
+    )
+    snapshot_fields = {
+        "oracle_price": safe_float(market_info.get("oracle_price")),
+        "oracle_source": str(market_info.get("oracle_source") or "").strip().lower() or None,
+        "oracle_age_seconds": safe_float(market_info.get("oracle_age_seconds")),
+        "oracle_updated_at_ms": safe_float(market_info.get("oracle_updated_at_ms")),
+        "oracle_prices_by_source": snapshot_pbs,
+    }
+    asset = str(market_info.get("asset") or "").strip().upper()
+    if not asset:
+        return snapshot_fields
+    try:
+        from services.reference_runtime import get_reference_runtime
+        runtime = get_reference_runtime()
+    except Exception:
+        return snapshot_fields
+    if runtime is None or not getattr(runtime, "started", False):
+        return snapshot_fields
+    try:
+        live_pbs = runtime.get_oracle_prices_by_source(asset) or {}
+        live_oracle = runtime.get_oracle_price(asset)
+    except Exception:
+        return snapshot_fields
+    refreshed = dict(snapshot_fields)
+    if live_pbs:
+        refreshed["oracle_prices_by_source"] = dict(live_pbs)
+    if isinstance(live_oracle, dict):
+        live_price = safe_float(live_oracle.get("price"))
+        if live_price is not None:
+            refreshed["oracle_price"] = live_price
+        live_source = str(live_oracle.get("source") or "").strip().lower()
+        if live_source:
+            refreshed["oracle_source"] = live_source
+        live_age = safe_float(live_oracle.get("age_seconds"))
+        if live_age is not None:
+            refreshed["oracle_age_seconds"] = live_age
+        live_updated_at_ms = safe_float(live_oracle.get("updated_at_ms"))
+        if live_updated_at_ms is not None:
+            refreshed["oracle_updated_at_ms"] = live_updated_at_ms
+    return refreshed
+
+
 def _strict_ws_ttl_seconds_for_source(source: Any) -> float:
     default_ttl = max(0.05, float(getattr(settings, "WS_EXECUTION_PRICE_STALE_SECONDS", 1.0) or 1.0))
     normalized_source = str(source or "").strip().lower()
@@ -754,16 +817,8 @@ def _build_context_from_cached_market_state(
         "spread": safe_float(market_info.get("spread")),
         "model_probability": model_probability,
         "live_edge_percent": live_edge,
-        "oracle_price": safe_float(market_info.get("oracle_price")),
-        "oracle_source": str(market_info.get("oracle_source") or "").strip().lower() or None,
+        **_refresh_oracle_fields_live(market_info),
         "price_to_beat": safe_float(market_info.get("price_to_beat")),
-        "oracle_prices_by_source": (
-            dict(market_info.get("oracle_prices_by_source"))
-            if isinstance(market_info.get("oracle_prices_by_source"), dict)
-            else {}
-        ),
-        "oracle_age_seconds": safe_float(market_info.get("oracle_age_seconds")),
-        "oracle_updated_at_ms": safe_float(market_info.get("oracle_updated_at_ms")),
         "market_end_time": timing.get("end_time"),
         "seconds_left": timing.get("seconds_left"),
         "is_live": timing.get("is_live"),
@@ -1703,16 +1758,8 @@ async def build_live_signal_contexts(
             "spread": safe_float(market_info.get("spread")),
             "model_probability": model_probability,
             "live_edge_percent": live_edge,
-            "oracle_price": safe_float(market_info.get("oracle_price")),
-            "oracle_source": str(market_info.get("oracle_source") or "").strip().lower() or None,
+            **_refresh_oracle_fields_live(market_info),
             "price_to_beat": safe_float(market_info.get("price_to_beat")),
-            "oracle_prices_by_source": (
-                dict(market_info.get("oracle_prices_by_source"))
-                if isinstance(market_info.get("oracle_prices_by_source"), dict)
-                else {}
-            ),
-            "oracle_age_seconds": safe_float(market_info.get("oracle_age_seconds")),
-            "oracle_updated_at_ms": safe_float(market_info.get("oracle_updated_at_ms")),
             "market_end_time": timing.get("end_time"),
             "seconds_left": timing.get("seconds_left"),
             "is_live": timing.get("is_live"),

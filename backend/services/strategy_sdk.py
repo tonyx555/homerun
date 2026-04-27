@@ -493,6 +493,133 @@ class StrategySDK:
         "weeks": 10080,
     }
 
+    # ── Advanced exit-execution helpers ───────────────────────────────────
+    #
+    # These build ``ExitPolicy`` instances that strategies attach to
+    # ``BaseStrategy.exit_policies`` (a ``{trigger: ExitPolicy}`` map) or
+    # ``ExitDecision.exit_policy`` (per-decision override). When attached,
+    # the orchestrator's ``exit_executor`` splits the exit into a ladder of
+    # child orders instead of placing one large sell. See
+    # ``services.trader_orchestrator.exit_executor`` for the runtime details.
+    #
+    # Example use in a strategy:
+    #
+    #     from services.strategy_sdk import StrategySDK
+    #     from services.strategies.base import BaseStrategy
+    #
+    #     class MyStrategy(BaseStrategy):
+    #         strategy_type = "my_strategy"
+    #         name = "My Strategy"
+    #         description = "..."
+    #         exit_policies = {
+    #             "stop_loss": StrategySDK.build_ladder_exit_policy(
+    #                 levels=10,
+    #                 step_ticks=1,
+    #                 chunk_size=2,           # contracts per child order
+    #                 distribution="back_loaded",
+    #                 escalation_after_seconds=5.0,
+    #                 escalation_action="marketable_ioc",
+    #                 reprice_on_mid_drift_bps=80,
+    #             ),
+    #             "take_profit": None,        # legacy single-order path
+    #         }
+
+    @staticmethod
+    def build_ladder_exit_policy(
+        *,
+        levels: int = 5,
+        step_ticks: int = 1,
+        offset_ticks: int = 0,
+        chunk_size: float | None = None,
+        max_chunks: int = 50,
+        distribution: str = "uniform",
+        escalation_after_seconds: float | None = 5.0,
+        escalation_action: str = "marketable_ioc",
+        escalation_widen_bps: float | None = None,
+        max_escalations: int = 1,
+        reprice_on_mid_drift_bps: float | None = None,
+        order_type_mix: list | None = None,
+        min_chunk_notional_usd: float = 1.0,
+        min_reprice_interval_seconds: float = 1.0,
+    ) -> Any:
+        """Construct an ``ExitPolicy`` for a laddered, chunked exit.
+
+        Polymarket-tuned defaults: 1¢ ticks, $1 min notional. Tune
+        ``levels`` × ``step_ticks`` to your expected drawdown speed.
+
+        Pass ``escalation_after_seconds=None`` to disable time-based
+        escalation. Pass ``reprice_on_mid_drift_bps=None`` to disable
+        mid-drift repricing (the ladder will rest at its initial prices).
+
+        Returns:
+            An ``ExitPolicy`` dataclass instance ready to attach to
+            ``BaseStrategy.exit_policies`` or ``ExitDecision.exit_policy``.
+        """
+        from services.strategies.base import (
+            EscalationSpec,
+            ExitPolicy,
+            LadderSpec,
+        )
+
+        ladder = LadderSpec(
+            levels=int(max(1, levels)),
+            step_ticks=int(max(0, step_ticks)),
+            offset_ticks=int(max(0, offset_ticks)),
+            distribution=str(distribution or "uniform"),
+        )
+        escalation = None
+        if escalation_after_seconds is not None and float(escalation_after_seconds) > 0:
+            escalation = EscalationSpec(
+                after_seconds=float(escalation_after_seconds),
+                action=str(escalation_action or "marketable_ioc"),
+                widen_bps=(
+                    float(escalation_widen_bps)
+                    if escalation_widen_bps is not None
+                    else None
+                ),
+                max_escalations=int(max(0, max_escalations)),
+            )
+        return ExitPolicy(
+            ladder=ladder,
+            chunk_size=(float(chunk_size) if chunk_size is not None and chunk_size > 0 else None),
+            max_chunks=int(max(1, max_chunks)),
+            order_type_mix=order_type_mix,
+            escalation=escalation,
+            reprice_on_mid_drift_bps=(
+                float(reprice_on_mid_drift_bps)
+                if reprice_on_mid_drift_bps is not None
+                else None
+            ),
+            min_chunk_notional_usd=float(max(0.01, min_chunk_notional_usd)),
+            min_reprice_interval_seconds=float(max(0.0, min_reprice_interval_seconds)),
+        )
+
+    @staticmethod
+    def build_chunked_exit_policy(
+        *,
+        chunk_size: float,
+        max_chunks: int = 50,
+        escalation_after_seconds: float | None = None,
+        escalation_action: str = "marketable_ioc",
+        min_chunk_notional_usd: float = 1.0,
+    ) -> Any:
+        """Convenience: chunk-only policy (no price laddering).
+
+        Splits the position into ``chunk_size`` contract slices at the
+        trigger price. Useful when book depth is the constraint but the
+        price level is correct.
+        """
+        return StrategySDK.build_ladder_exit_policy(
+            levels=1,
+            step_ticks=0,
+            chunk_size=chunk_size,
+            max_chunks=max_chunks,
+            distribution="uniform",
+            escalation_after_seconds=escalation_after_seconds,
+            escalation_action=escalation_action,
+            min_chunk_notional_usd=min_chunk_notional_usd,
+        )
+
     @staticmethod
     def load_json_from_disk(path: str, default: Any = None) -> Any:
         target = Path(path)

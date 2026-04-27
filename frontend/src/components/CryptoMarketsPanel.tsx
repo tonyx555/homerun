@@ -17,6 +17,7 @@ import { cn } from '../lib/utils'
 import { buildPolymarketMarketUrl } from '../lib/marketUrls'
 import { getCryptoMarkets, CryptoMarket } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
+import { useBinanceDirectFeed } from '../hooks/useBinanceDirectFeed'
 import { Liveline } from 'liveline'
 import type { LivelinePoint, CandlePoint } from 'liveline'
 import { Card } from './ui/card'
@@ -941,10 +942,17 @@ export default function CryptoMarketsPanel({
   const [wsMarkets, setWsMarkets] = useState<CryptoMarket[]>([])
   const [wsMarketsUpdatedAtMs, setWsMarketsUpdatedAtMs] = useState<number | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const isViewerActiveRef = useRef(true)
 
   // Listen for real-time WebSocket pushes
   useEffect(() => {
     if (lastMessage?.type === 'crypto_markets_update' && Array.isArray(lastMessage.data?.markets)) {
+      // Drop high-frequency price updates while the panel is offscreen
+      // or the tab is hidden — the HTTP refetch on re-activation
+      // (enabled: isViewerActive) will repopulate within 1–2s without
+      // burning CPU on re-renders nobody can see.  init/membership
+      // events still flow through below so the seed isn't lost.
+      if (!isViewerActiveRef.current) return
       const incoming = dedupeMarkets(lastMessage.data.markets as CryptoMarket[])
       let membershipChanged = false
       setWsMarkets((current) => {
@@ -1004,12 +1012,12 @@ export default function CryptoMarketsPanel({
   useEffect(() => {
     // 250ms keeps the oracle-age readouts visibly sub-second without
     // forcing the panel to re-render every animation frame. Pause the
-    // tick when the document is hidden so background tabs don't burn
-    // CPU on age math nobody can see.
-    if (!isDocumentVisible) return
+    // tick when the document is hidden OR the panel is scrolled out of
+    // view so we never burn CPU on age math nobody can see.
+    if (!isDocumentVisible || !isPanelInViewport) return
     const iv = setInterval(() => setNowMs(Date.now()), 250)
     return () => clearInterval(iv)
-  }, [isDocumentVisible])
+  }, [isDocumentVisible, isPanelInViewport])
 
   useEffect(() => {
     const onVisibilityChange = () => {
@@ -1039,6 +1047,16 @@ export default function CryptoMarketsPanel({
   }, [])
 
   const isViewerActive = isDocumentVisible && isPanelInViewport
+  useEffect(() => {
+    isViewerActiveRef.current = isViewerActive
+  }, [isViewerActive])
+
+  // Browser-direct Binance bookTicker subscription.  The displayed
+  // binance_direct row is overlaid from this ref on every nowMs tick,
+  // bypassing the backend snapshot pipeline (debounce + rate-limit + WS
+  // broadcast).  Backend keeps its own connection for orchestrator
+  // execution gates.
+  const binanceDirectRef = useBinanceDirectFeed(isViewerActive)
 
   const hasFreshWsMarkets =
     wsMarkets.length > 0 &&
@@ -1093,6 +1111,36 @@ export default function CryptoMarketsPanel({
     if (timeframeFilter === 'all') return allMarkets
     return allMarkets.filter((market) => normalizeTimeframe(market.timeframe) === timeframeFilter)
   }, [timeframeFilter, allMarkets])
+
+  // Overlay the freshest browser-direct Binance price into each market's
+  // oracle_prices_by_source.binance_direct row.  Re-evaluated on every
+  // nowMs tick (250ms when active) so the displayed age and the
+  // binance-direct-vs-chainlink delta both track wall-clock truth.
+  const liveMarkets = useMemo(() => {
+    const overrides = binanceDirectRef.current
+    if (!overrides || Object.keys(overrides).length === 0) return filteredMarkets
+    return filteredMarkets.map((market) => {
+      const asset = String(market.asset || '').trim().toUpperCase()
+      const local = overrides[asset]
+      if (!local) return market
+      const base = market.oracle_prices_by_source ?? {}
+      return {
+        ...market,
+        oracle_prices_by_source: {
+          ...base,
+          binance_direct: {
+            source: 'binance_direct',
+            price: local.price,
+            updated_at_ms: local.updatedAtMs,
+            age_seconds: null,
+          },
+        },
+      }
+    })
+  // nowMs drives re-evaluation; binanceDirectRef is a ref and intentionally
+  // not in the dep list (reading .current at evaluation time is the point).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filteredMarkets, nowMs])
 
   // Stats from series data
   const stats = useMemo(() => {
@@ -1270,7 +1318,7 @@ export default function CryptoMarketsPanel({
         />
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-          {filteredMarkets.map((market) => (
+          {liveMarkets.map((market) => (
             <CryptoMarketCard key={market.id} market={market} themeMode={themeMode} nowMs={nowMs} />
           ))}
         </div>

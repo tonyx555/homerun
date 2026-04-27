@@ -61,12 +61,19 @@ class StrategyDecision:
 
 @dataclass
 class ExitDecision:
-    """Result of should_exit() — whether to close a position."""
+    """Result of should_exit() — whether to close a position.
+
+    ``exit_policy`` is the optional advanced-execution policy. When ``None``
+    (the default), the orchestrator places a single sell order, preserving
+    legacy behavior. When set, the orchestrator's exit executor splits the
+    exit into a ladder of child orders per the policy.
+    """
 
     action: str  # "close" | "hold" | "reduce"
     reason: str
     close_price: float = None
     reduce_fraction: float = None  # For partial exits (0-1)
+    exit_policy: "ExitPolicy | None" = None
     payload: dict = field(default_factory=dict)
 
 
@@ -83,6 +90,68 @@ class ScaleOutConfig:
     near_resolution_exit: bool = True
     near_resolution_hours: float = 24.0
     near_resolution_spread_widen_bps: float = 50.0
+
+
+@dataclass
+class LadderSpec:
+    """Price-ladder parameters for an advanced exit.
+
+    Generates ``levels`` resting child orders stepped away from the trigger
+    price. For SELL exits levels descend from the trigger by
+    ``offset_ticks + i * step_ticks``; for BUY exits they ascend.
+
+    ``offset_ticks`` is the gap between the trigger and the inside-most
+    rung. Set it > 0 to ensure the ladder crosses the spread and is
+    immediately marketable — chris's "trigger at $0.50, ladder starts at
+    $0.47" pattern uses ``offset_ticks=3`` (3¢).
+
+    The total target size is split across levels per ``distribution``.
+    """
+
+    levels: int = 5
+    step_ticks: int = 1
+    offset_ticks: int = 0
+    distribution: str = "uniform"  # "uniform" | "front_loaded" | "back_loaded"
+
+
+@dataclass
+class EscalationSpec:
+    """Time-based escalation when a child order rests unfilled.
+
+    After ``after_seconds`` of resting at the same price without a fill, take
+    ``action``. ``marketable_ioc`` cancels the resting order and resubmits as
+    an IOC at live mid; ``widen_bps`` repeats the same limit but ``widen_bps``
+    closer to the inside; ``abort`` cancels the child and stops trying.
+    """
+
+    after_seconds: float = 5.0
+    action: str = "marketable_ioc"  # "marketable_ioc" | "widen_bps" | "abort"
+    widen_bps: float | None = None
+    max_escalations: int = 1
+
+
+@dataclass
+class ExitPolicy:
+    """Declarative recipe for breaking a position exit into child orders.
+
+    A policy is attached either:
+      * per-trigger via ``BaseStrategy.exit_policies`` (e.g., a stop_loss
+        policy distinct from the take_profit policy), or
+      * per-decision via ``ExitDecision.exit_policy`` when the strategy needs
+        to choose at runtime based on book depth or volatility.
+
+    All fields are optional. A bare ``ExitPolicy()`` is a no-op (executor
+    falls back to a single order). Set fields to opt into specific behaviors.
+    """
+
+    ladder: LadderSpec | None = None
+    chunk_size: float | None = None  # contracts per child order
+    max_chunks: int = 50  # safety cap; planner will not exceed this
+    order_type_mix: list | None = None  # e.g. [("IOC", 0.3), ("GTC", 0.7)]
+    escalation: EscalationSpec | None = None
+    reprice_on_mid_drift_bps: float | None = None
+    min_chunk_notional_usd: float = 1.0  # min per child to clear venue floor
+    min_reprice_interval_seconds: float = 1.0  # cancel-storm guard
 
 
 @dataclass
@@ -397,6 +466,15 @@ class BaseStrategy(ABC):
     scoring_weights: ScoringWeights | None = None
     sizing_config: SizingConfig | None = None
     scale_out_config: Optional[ScaleOutConfig] = None
+
+    # Per-trigger exit-execution policies. Keys are close_trigger strings
+    # ("stop_loss", "take_profit", "trailing_stop", "max_hold",
+    # "market_inactive") or the wildcard "*" used as a fallback. A value of
+    # ``None`` means the strategy declares no advanced policy for that
+    # trigger and the orchestrator places a single order (legacy behavior).
+    # Strategies can also override per-decision by setting
+    # ``ExitDecision.exit_policy`` directly in ``should_exit()``.
+    exit_policies: Optional[dict] = None
 
     # Strategy-specific fallback defaults for pipeline params.
     # These are used when the param is not provided by the orchestrator.
@@ -902,6 +980,32 @@ class BaseStrategy(ABC):
             Return None to use default behavior (same as ExitDecision("hold", ...))
         """
         return self.default_exit_check(position, market_state)
+
+    def resolve_exit_policy(
+        self,
+        decision: "ExitDecision",
+        close_trigger: str,
+    ) -> "ExitPolicy | None":
+        """Pick the ExitPolicy that should govern this exit submission.
+
+        Resolution order: per-decision override > per-trigger map entry
+        > wildcard ``"*"`` entry > ``None`` (legacy single-order path).
+
+        Called by the orchestrator after the strategy returns its
+        ``ExitDecision`` and the close_trigger has been derived. Strategies
+        usually do not override this — declaring ``exit_policies`` is enough.
+        """
+        if decision is not None and getattr(decision, "exit_policy", None) is not None:
+            return decision.exit_policy
+        policies = self.exit_policies
+        if not isinstance(policies, dict) or not policies:
+            return None
+        trigger_key = (close_trigger or "").strip().lower()
+        if trigger_key and trigger_key in policies:
+            return policies[trigger_key]
+        if "*" in policies:
+            return policies["*"]
+        return None
 
     @staticmethod
     def _coerce_seconds_left(value: Any) -> float | None:

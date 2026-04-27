@@ -131,6 +131,7 @@ function UnifiedDocs({ docs }: { docs: Record<string, any> }) {
   const detectPhase = docs.detect_phase as Record<string, any> | undefined
   const evaluatePhase = docs.evaluate_phase as Record<string, any> | undefined
   const exitPhase = docs.exit_phase as Record<string, any> | undefined
+  const advancedExits = docs.advanced_exits as Record<string, any> | undefined
   const composableEvaluate = docs.composable_evaluate as Record<string, any> | undefined
   const eventSubscriptions = docs.event_subscriptions as Record<string, any> | undefined
   const qualityFilter = docs.quality_filter as Record<string, any> | undefined
@@ -331,6 +332,118 @@ function UnifiedDocs({ docs }: { docs: Record<string, any> }) {
                     </p>
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        </Section>
+      )}
+
+      {/* Advanced Exits (laddered/chunked) */}
+      {advancedExits && (
+        <Section title="Advanced Exit Execution" icon={LayoutGrid} iconColor="text-fuchsia-400">
+          <div className="space-y-3 pt-2">
+            {advancedExits.summary && (
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                {advancedExits.summary as string}
+              </p>
+            )}
+
+            {advancedExits.imports && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                  Imports
+                </div>
+                <CodeBlock code={advancedExits.imports as string} />
+              </div>
+            )}
+
+            {advancedExits.how_to_attach && (
+              <div className="space-y-2">
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">
+                  How to attach a policy
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {(advancedExits.how_to_attach as Record<string, string>).description}
+                </p>
+                <div>
+                  <div className="text-[10px] text-emerald-400/80 mb-0.5">
+                    Class attribute (per-trigger)
+                  </div>
+                  <CodeBlock
+                    code={(advancedExits.how_to_attach as Record<string, string>).class_attribute_example}
+                  />
+                </div>
+                <div>
+                  <div className="text-[10px] text-emerald-400/80 mb-0.5">
+                    Per-decision override (runtime)
+                  </div>
+                  <CodeBlock
+                    code={(advancedExits.how_to_attach as Record<string, string>).per_decision_override_example}
+                  />
+                </div>
+                <p className="text-[10px] text-amber-400/80">
+                  {(advancedExits.how_to_attach as Record<string, string>).trigger_keys}
+                </p>
+              </div>
+            )}
+
+            {advancedExits.exit_policy_fields && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                  ExitPolicy fields
+                </div>
+                <FieldTable
+                  fields={advancedExits.exit_policy_fields as Record<string, string>}
+                />
+              </div>
+            )}
+
+            {advancedExits.sdk_helpers && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                  StrategySDK helpers
+                </div>
+                <FieldTable
+                  fields={advancedExits.sdk_helpers as Record<string, string>}
+                />
+              </div>
+            )}
+
+            {advancedExits.child_order_lifecycle && (
+              <div>
+                <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-1">
+                  Child order lifecycle
+                </div>
+                <p className="text-[10px] text-muted-foreground mb-1">
+                  {(advancedExits.child_order_lifecycle as Record<string, string>).summary}
+                </p>
+                <FieldTable
+                  fields={
+                    (advancedExits.child_order_lifecycle as Record<string, Record<string, string>>).states
+                  }
+                />
+              </div>
+            )}
+
+            {advancedExits.polymarket_notes && (
+              <div className="border border-amber-400/20 bg-amber-400/5 rounded-md p-2">
+                <div className="text-[10px] font-medium text-amber-400/90 uppercase tracking-wider mb-1">
+                  Polymarket constraints
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {advancedExits.polymarket_notes as string}
+                </p>
+              </div>
+            )}
+
+            {advancedExits.tip && (
+              <div className="border border-emerald-400/20 bg-emerald-400/5 rounded-md p-2">
+                <div className="text-[10px] font-medium text-emerald-400/90 uppercase tracking-wider mb-1">
+                  Suggested starting point
+                </div>
+                <p className="text-[10px] text-muted-foreground">
+                  {advancedExits.tip as string}
+                </p>
               </div>
             )}
           </div>

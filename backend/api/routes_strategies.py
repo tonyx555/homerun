@@ -695,7 +695,10 @@ async def get_unified_docs():
             },
             "return_value": {
                 "type": "ExitDecision",
-                "constructor": "ExitDecision(action, reason, close_price=None, reduce_fraction=None, payload={})",
+                "constructor": (
+                    "ExitDecision(action, reason, close_price=None, reduce_fraction=None, "
+                    "exit_policy=None, payload={})"
+                ),
                 "action_values": {
                     "close": "Close the entire position at close_price",
                     "hold": "Keep the position open",
@@ -703,9 +706,156 @@ async def get_unified_docs():
                 },
                 "tip": (
                     "Call self.default_exit_check(position, market_state) as a fallback "
-                    "after your custom checks. It handles TP/SL/trailing/max-hold/resolution."
+                    "after your custom checks. It handles TP/SL/trailing/max-hold/resolution. "
+                    "Set exit_policy on the ExitDecision (or declare exit_policies on the "
+                    "class) to break the exit into a ladder of child orders — see the "
+                    "Advanced Exit Execution section below."
                 ),
             },
+        },
+        # ── Section 5a: Advanced Exit Execution (laddered/chunked) ───
+        "advanced_exits": {
+            "summary": (
+                "Beyond a single sell at the close_price, strategies can request a "
+                "laddered exit: the orchestrator splits the position into many small "
+                "child orders across several price levels, escalates resting orders "
+                "to marketable IOC if they don't fill in time, and reprices on mid "
+                "drift. Use this for fast-drawdown stop-losses where one large sell "
+                "would walk the book unfavorably. The system stays backwards-compatible: "
+                "strategies that don't declare a policy keep the legacy single-order path."
+            ),
+            "how_to_attach": {
+                "description": (
+                    "Two ways to attach a policy. Class-level ``exit_policies`` is the "
+                    "common case; per-decision override is for runtime adaptation."
+                ),
+                "class_attribute_example": (
+                    "from services.strategy_sdk import StrategySDK\n"
+                    "from services.strategies.base import BaseStrategy\n\n"
+                    "class MyStrategy(BaseStrategy):\n"
+                    "    strategy_type = 'my_strategy'\n"
+                    "    exit_policies = {\n"
+                    "        'stop_loss': StrategySDK.build_ladder_exit_policy(\n"
+                    "            levels=10, step_ticks=1, offset_ticks=3,\n"
+                    "            chunk_size=2, distribution='back_loaded',\n"
+                    "            escalation_after_seconds=5,\n"
+                    "            escalation_action='marketable_ioc',\n"
+                    "            reprice_on_mid_drift_bps=80,\n"
+                    "        ),\n"
+                    "        'take_profit': None,  # legacy single-order\n"
+                    "        '*': StrategySDK.build_chunked_exit_policy(chunk_size=5),\n"
+                    "    }\n"
+                ),
+                "per_decision_override_example": (
+                    "def should_exit(self, position, market_state):\n"
+                    "    if rapid_drop_detected(position):\n"
+                    "        policy = StrategySDK.build_ladder_exit_policy(\n"
+                    "            levels=10, step_ticks=1, offset_ticks=3, chunk_size=2,\n"
+                    "        )\n"
+                    "        return ExitDecision('close', 'rapid drop',\n"
+                    "                            close_price=position.current_price,\n"
+                    "                            exit_policy=policy)\n"
+                    "    return self.default_exit_check(position, market_state)\n"
+                ),
+                "trigger_keys": (
+                    "Keys in the exit_policies dict are matched against the close_trigger "
+                    "the orchestrator emits: 'stop_loss', 'take_profit', 'trailing_stop', "
+                    "'max_hold', 'market_inactive'. Use '*' as a wildcard fallback. The "
+                    "per-decision exit_policy override always wins."
+                ),
+            },
+            "exit_policy_fields": {
+                "ladder": (
+                    "LadderSpec(levels, step_ticks, offset_ticks, distribution) — describes "
+                    "the price ladder. levels = number of rungs; step_ticks = ticks between "
+                    "rungs (1 = 1¢ on Polymarket); offset_ticks = ticks between trigger and "
+                    "the inside-most rung (set > 0 to make the ladder marketable on submit); "
+                    "distribution = 'uniform' | 'front_loaded' (more size at inside) | "
+                    "'back_loaded' (more size at outside, chris's pattern)."
+                ),
+                "chunk_size": (
+                    "float | None — contracts per child order. When set, the position is "
+                    "split into ``ceil(target / chunk_size)`` chunks; the planner auto-bumps "
+                    "the per-chunk size at low-priced rungs to satisfy the $1 min-notional "
+                    "floor. Without a chunk_size, the planner emits one child per ladder rung."
+                ),
+                "max_chunks": (
+                    "int = 50 — safety cap on the total number of child orders for a single "
+                    "exit. Prevents runaway plans on tiny chunk_size values."
+                ),
+                "order_type_mix": (
+                    "list[(tif, weight)] | None — e.g. [('IOC', 0.3), ('GTC', 0.7)] sends "
+                    "30% of children as IOC takers (no slippage tolerance, but instant), "
+                    "70% as resting GTC limits. The planner places aggressive types on the "
+                    "inside-most rungs."
+                ),
+                "escalation": (
+                    "EscalationSpec(after_seconds, action, widen_bps, max_escalations) — "
+                    "if a child rests unfilled for ``after_seconds``, take ``action``. "
+                    "marketable_ioc = cancel and resubmit as IOC at live mid; widen_bps = "
+                    "move the limit ``widen_bps`` toward the inside; abort = cancel."
+                ),
+                "reprice_on_mid_drift_bps": (
+                    "float | None — when |child.price - current_mid| / current_mid * 10000 "
+                    "exceeds this value, cancel and re-quote the child to keep the ladder "
+                    "aligned with the book. Honors min_reprice_interval_seconds for a "
+                    "cancel-storm guard."
+                ),
+                "min_chunk_notional_usd": (
+                    "float = 1.0 — Polymarket's $1 min notional. The planner enforces this "
+                    "and auto-bumps chunk size on low-priced rungs to stay venue-legal."
+                ),
+                "min_reprice_interval_seconds": (
+                    "float = 1.0 — minimum wall-clock gap between cancel/replace cycles on "
+                    "a single child. Prevents reprice storms when the mid is jittering."
+                ),
+            },
+            "sdk_helpers": {
+                "build_ladder_exit_policy": (
+                    "StrategySDK.build_ladder_exit_policy(levels=5, step_ticks=1, "
+                    "offset_ticks=0, chunk_size=None, distribution='uniform', "
+                    "escalation_after_seconds=5.0, escalation_action='marketable_ioc', "
+                    "reprice_on_mid_drift_bps=None, order_type_mix=None, ...) -> ExitPolicy"
+                ),
+                "build_chunked_exit_policy": (
+                    "StrategySDK.build_chunked_exit_policy(chunk_size, max_chunks=50, "
+                    "escalation_after_seconds=None, ...) -> ExitPolicy   # chunk-only, "
+                    "no laddering — useful when book depth is the constraint but the price "
+                    "level is correct."
+                ),
+            },
+            "imports": (
+                "from services.strategies.base import ExitPolicy, LadderSpec, EscalationSpec\n"
+                "from services.strategy_sdk import StrategySDK"
+            ),
+            "child_order_lifecycle": {
+                "summary": (
+                    "Each child order has an independent lifecycle. The orchestrator "
+                    "tracks fills, escalations, and reprices in pending_live_exit['children'] "
+                    "on the row payload."
+                ),
+                "states": {
+                    "planned": "Created by the planner; not yet submitted to the venue.",
+                    "submitted": "Resting on the venue (provider order id assigned).",
+                    "partial": "Partially filled — still working.",
+                    "filled": "Terminal — fully filled.",
+                    "cancelled": "Terminal — cancelled (e.g., abort escalation).",
+                    "failed": "Terminal — venue rejected; not retried.",
+                    "escalated": "Cancelled and rebuilt under the escalation action.",
+                },
+            },
+            "polymarket_notes": (
+                "Tick = 1¢ ($0.01). Min notional = $1. Ladders below $0.10 are heavily "
+                "constrained — at $0.05 a single $1 chunk is 20 contracts, so ladders "
+                "with many rungs collapse. The planner is conservative: when no laddered "
+                "plan satisfies min-notional, it falls back to a single sell at the trigger."
+            ),
+            "tip": (
+                "Start with the chris pattern for stop-losses on prediction markets that "
+                "can drop several cents in seconds: levels=10, step_ticks=1, offset_ticks=3, "
+                "chunk_size=2, distribution='back_loaded', escalation_after_seconds=5 "
+                "to marketable_ioc. Leave take_profit on the legacy single-order path."
+            ),
         },
         # ── Section 5b: Composable Evaluate Pipeline ────────────────
         "composable_evaluate": {
@@ -1101,7 +1251,10 @@ async def get_unified_docs():
             ),
             "app_modules": {
                 "models": "Market, Event, Opportunity — core data types (ArbitrageOpportunity is removed)",
-                "services.strategies.base": "BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck",
+                "services.strategies.base": (
+                    "BaseStrategy, StrategyDecision, ExitDecision, DecisionCheck, "
+                    "ExitPolicy, LadderSpec, EscalationSpec, ScaleOutConfig, ScaleOutTarget"
+                ),
                 "services.ai": "LLM integration — call AI models from your strategy",
                 "services.news": "News analysis services",
                 "services.weather": "Weather signal engine",

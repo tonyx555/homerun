@@ -50,6 +50,73 @@ def _get_shared_sync_client() -> httpx.Client:
         _shared_sync_client = httpx.Client(timeout=_GAMMA_FETCH_TIMEOUT_SECONDS)
     return _shared_sync_client
 
+
+_BINANCE_KLINE_SYMBOL_BY_ASSET: dict[str, str] = {
+    "BTC": "BTCUSDT",
+    "ETH": "ETHUSDT",
+    "SOL": "SOLUSDT",
+    "XRP": "XRPUSDT",
+}
+
+
+async def fetch_binance_klines(
+    asset: str,
+    *,
+    lookback_seconds: int,
+    interval: str = "1m",
+    timeout_seconds: float = _GAMMA_FETCH_TIMEOUT_SECONDS,
+) -> list[tuple[int, float]]:
+    """Fetch Binance close-time klines for an asset.
+
+    Returns ``[(close_time_ms, close_price), ...]`` sorted by time.  Used
+    to seed ``chainlink_feed._history[asset]`` so the crypto opportunity
+    card sparklines have data covering the full market window even right
+    after a backend restart, before live WS ticks have time to fill the
+    buffer.
+
+    Returns ``[]`` on any HTTP / parse failure — caller treats absence
+    as "no backfill, fall back to live ticks only".
+    """
+    symbol = _BINANCE_KLINE_SYMBOL_BY_ASSET.get(str(asset or "").strip().upper())
+    if not symbol:
+        return []
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - max(60, int(lookback_seconds)) * 1000
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            resp = await client.get(
+                _BINANCE_KLINES_API_URL,
+                params={
+                    "symbol": symbol,
+                    "interval": interval,
+                    "startTime": start_ms,
+                    "endTime": end_ms,
+                    "limit": 1000,
+                },
+            )
+    except Exception:
+        return []
+    if resp.status_code != 200:
+        return []
+    try:
+        data = resp.json()
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    points: list[tuple[int, float]] = []
+    for k in data:
+        if not isinstance(k, list) or len(k) < 7:
+            continue
+        try:
+            close_time_ms = int(k[6])
+            close_price = float(k[4])
+        except (TypeError, ValueError):
+            continue
+        if close_price > 0:
+            points.append((close_time_ms, close_price))
+    return points
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------

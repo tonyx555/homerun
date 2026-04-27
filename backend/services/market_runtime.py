@@ -468,6 +468,7 @@ class MarketRuntime:
                 await self._feed_manager.start()
             self._feed_manager.cache.add_on_update_callback(self._on_ws_price_update)
             self._schedule_event_catalog_refresh(force=True)
+            await self._backfill_oracle_history_from_binance()
             await self._refresh_crypto_markets(trigger="startup", full_source_sweep=True)
             self._started = True
             self._main_task = asyncio.create_task(self._run_loop(), name="market-runtime")
@@ -1205,6 +1206,7 @@ class MarketRuntime:
         fetch_elapsed = time.monotonic() - step_started
         step_started = time.monotonic()
         payload = self._build_crypto_market_payload(markets or [])
+        await self._attach_polymarket_price_history(payload)
         await self._queue_ml_pipeline_refresh(payload, allow_record=True)
         ml_queue_elapsed = time.monotonic() - step_started
         step_started = time.monotonic()
@@ -1269,6 +1271,77 @@ class MarketRuntime:
         )
         if active_tokens:
             await feed_manager.polymarket_feed.subscribe(active_tokens)
+
+    async def _backfill_oracle_history_from_binance(self) -> None:
+        """Seed ``chainlink_feed._history`` from Binance klines on startup.
+
+        Fixes the "chart starts empty after backend restart" gap on the
+        crypto opportunity cards: live WS ticks would otherwise need
+        minutes to fill the rolling buffer that drives the sparkline.
+        Fetches 1m klines for the last 4 hours per supported asset
+        (covering 5m / 15m / 1h / 4h windows in one shot) in parallel,
+        merges into the rolling history via ``seed_history_from_klines``,
+        and tolerates per-asset failures silently.
+
+        Idempotent — re-running just merges any new closes; existing
+        same-timestamp points are skipped.  Safe to call from start()
+        before the first crypto refresh so the first published snapshot
+        already carries a populated ``oracle_history`` array.
+        """
+        try:
+            from services.chainlink_feed import get_chainlink_feed
+            from services.crypto_service import fetch_binance_klines
+        except Exception as exc:
+            logger.debug("Oracle-history backfill skipped (imports unavailable)", exc_info=exc)
+            return
+        feed = get_chainlink_feed()
+        assets = ("BTC", "ETH", "SOL", "XRP")
+        lookback_seconds = 4 * 60 * 60  # 4h covers every active timeframe
+        results = await asyncio.gather(
+            *(
+                fetch_binance_klines(asset, lookback_seconds=lookback_seconds, interval="1m")
+                for asset in assets
+            ),
+            return_exceptions=True,
+        )
+        seeded_total = 0
+        for asset, result in zip(assets, results):
+            if isinstance(result, BaseException) or not isinstance(result, list):
+                continue
+            try:
+                seeded_total += feed.seed_history_from_klines(asset, result)
+            except Exception:
+                continue
+        if seeded_total > 0:
+            logger.info("Oracle-history backfill seeded %d kline points across %d assets", seeded_total, len(assets))
+
+    async def _attach_polymarket_price_history(self, payload: list[dict[str, Any]]) -> None:
+        """Attach scanner-managed Polymarket up/down price history to crypto rows.
+
+        Reuses the shared sparkline backfill infrastructure
+        (services/scanner.py::attach_price_history_to_markets) so each
+        crypto card gets the same multi-hour up/down evolution that
+        Opportunities, News, Weather, and Trader panels already render.
+
+        Non-blocking: hydrates from the persisted ``scanner_market_history``
+        table on the hot path and queues async Polymarket backfill for any
+        market whose history isn't cached yet.
+        """
+        if not payload:
+            return
+        try:
+            from services.scanner import scanner as market_scanner
+        except Exception as exc:
+            logger.debug("Crypto price-history attach skipped (scanner unavailable)", exc_info=exc)
+            return
+        try:
+            await market_scanner.attach_price_history_to_markets(
+                payload,
+                timeout_seconds=0.0,
+                block_for_backfill=False,
+            )
+        except Exception as exc:
+            logger.debug("Crypto price-history attach failed", exc_info=exc)
 
     async def _publish_crypto_snapshot(
         self,
@@ -1441,11 +1514,18 @@ class MarketRuntime:
         self._last_crypto_refresh_at = utcnow().isoformat().replace("+00:00", "Z")
         trigger = "reference_ws" if assets and not tokens else "crypto_ws" if tokens and not assets else "crypto_reference_ws"
         self._last_crypto_trigger = trigger
-        # Publish a lightweight payload for reactive WS pushes: strip
-        # oracle_history (80-point arrays) to cut payload size on sub-second
-        # ticks.  Full history is included in the periodic scan payload.
+        # Publish a lightweight payload for reactive WS pushes: strip the
+        # large history arrays (oracle_history ~80pts, price_history up to
+        # ~720pts) to cut payload size on sub-second ticks.  These don't
+        # meaningfully change between adjacent reactive ticks; the full
+        # arrays ride on the next periodic scan payload, and the frontend
+        # merger preserves them across reactive updates.
         lightweight_rows = [
-            {k: v for k, v in row.items() if k not in ("oracle_history", "history_tail")}
+            {
+                k: v
+                for k, v in row.items()
+                if k not in ("oracle_history", "history_tail", "price_history")
+            }
             for row in refreshed_rows
         ]
         await self._publish_crypto_snapshot(lightweight_rows, trigger=trigger)

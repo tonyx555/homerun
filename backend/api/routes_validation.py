@@ -113,6 +113,36 @@ class CodeBacktestOptimizeRequest(BaseModel):
     top_k: int = Field(default=10, ge=1, le=200)
 
 
+class ExecutionBacktestRequest(BaseModel):
+    """Request for the production-grade backtest engine.
+
+    Runs full L2 order-book replay against ``MarketMicrostructureSnapshot``,
+    enforces venue rules (TIF, post-only, tick, min-notional), models
+    submit/cancel latency as log-normal quantiles, drives any laddered
+    exits through ``exit_executor.plan_children``, and reports headline
+    metrics with bootstrap 95% confidence intervals.
+    """
+
+    source_code: str = Field(min_length=10)
+    slug: str = Field(default="_backtest_exec", min_length=1, max_length=128)
+    config: Optional[dict[str, Any]] = None
+    token_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Token universe (Polymarket CLOB token ids). Auto-selects top-5 most-active tokens in the window when omitted.",
+    )
+    lookback_hours: int = Field(default=24, ge=1, le=720)
+    initial_capital_usd: float = Field(default=1000.0, gt=0.0, le=10_000_000.0)
+    max_intents: int = Field(default=1000, ge=1, le=20_000)
+    submit_latency_p50_ms: float = Field(default=350.0, ge=1.0, le=10_000.0)
+    submit_latency_p95_ms: float = Field(default=900.0, ge=2.0, le=20_000.0)
+    cancel_latency_p50_ms: float = Field(default=200.0, ge=1.0, le=10_000.0)
+    cancel_latency_p95_ms: float = Field(default=600.0, ge=2.0, le=20_000.0)
+    seed: int = Field(default=42, ge=0, le=2_147_483_647)
+    fills_sample_size: int = Field(default=200, ge=10, le=5000)
+    equity_sample_size: int = Field(default=500, ge=10, le=5000)
+    bootstrap_resamples: int = Field(default=2000, ge=200, le=20_000)
+
+
 _LIVE_TRUTH_EXPORT_ARTIFACTS = {
     "summary_json",
     "report_jsonl",
@@ -376,6 +406,43 @@ async def run_code_backtest_optimize(req: CodeBacktestOptimizeRequest):
         param_grid=req.param_grid,
         train_ratio=req.train_ratio,
         top_k=req.top_k,
+    )
+    return result.to_dict()
+
+
+@router.post("/code-backtest/execution")
+async def run_code_backtest_execution(req: ExecutionBacktestRequest):
+    """Execution-realistic backtest with full L2 replay and bootstrap CIs.
+
+    See ``ExecutionBacktestRequest`` for all parameters. The endpoint runs
+    the strategy through the production matching engine (``services.backtest``)
+    against real ``MarketMicrostructureSnapshot`` data, including any
+    laddered/chunked/escalating exits the strategy declares via
+    ``exit_policies``. Returns headline + risk-adjusted metrics with
+    bootstrap 95% CIs plus a sampled fills/equity ledger for the UI.
+    """
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    from services.strategy_backtester import run_execution_backtest
+
+    end_dt = _dt.now(_tz.utc)
+    start_dt = end_dt - _td(hours=int(req.lookback_hours))
+    result = await run_execution_backtest(
+        source_code=req.source_code,
+        slug=req.slug,
+        config=req.config,
+        token_ids=req.token_ids,
+        start=start_dt,
+        end=end_dt,
+        initial_capital_usd=req.initial_capital_usd,
+        max_intents=req.max_intents,
+        submit_latency_p50_ms=req.submit_latency_p50_ms,
+        submit_latency_p95_ms=req.submit_latency_p95_ms,
+        cancel_latency_p50_ms=req.cancel_latency_p50_ms,
+        cancel_latency_p95_ms=req.cancel_latency_p95_ms,
+        seed=req.seed,
+        fills_sample_size=req.fills_sample_size,
+        equity_sample_size=req.equity_sample_size,
+        bootstrap_resamples=req.bootstrap_resamples,
     )
     return result.to_dict()
 

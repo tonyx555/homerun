@@ -151,7 +151,12 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
             ).scalar_one()
 
         assert decision.decision == "skipped"
-        assert decision.reason == "shared fast filters not met"
+        # Generic "filters not met" reasons get enriched with the specific
+        # failed-check detail so the bot trader terminal shows operators
+        # which filter rejected the signal, mirroring the slow-tier path.
+        assert decision.reason == (
+            "shared fast filters not met | failed checks: Generic gate: Rejected by shared infrastructure test."
+        )
         assert decision.strategy_key == "generic-fast-strategy"
         assert decision.payload_json["fast_tier"] is True
         assert decision.payload_json["evaluated_size_usd"] == 3.5
@@ -160,6 +165,65 @@ async def test_fast_trader_records_skipped_decision_and_consumption(monkeypatch)
         assert consumption.outcome == "skipped"
     finally:
         await engine.dispose()
+
+
+def test_fast_trader_enriches_generic_skip_reason_with_failed_checks():
+    # Regression: fast tier bypasses apply_platform_decision_gates for
+    # latency, but it must still surface which strategy filter rejected
+    # the signal — otherwise the bot trader terminal shows opaque
+    # "Crypto worker filters not met" without the specific gate.
+    runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), asyncio.Event())
+
+    decision = SimpleNamespace(
+        decision="skipped",
+        reason="Crypto worker filters not met",
+        score=0.5,
+        size_usd=10.0,
+        checks=[
+            SimpleNamespace(key="source", label="Crypto source", passed=True, score=None, detail="ok", payload={}),
+            SimpleNamespace(
+                key="oracle_freshness",
+                label="Oracle readiness",
+                passed=False,
+                score=12000,
+                detail="age=12s > max=5s",
+                payload={},
+            ),
+            SimpleNamespace(
+                key="spread",
+                label="Maximum spread",
+                passed=False,
+                score=0.04,
+                detail="spread=0.04 > max=0.02",
+                payload={},
+            ),
+        ],
+    )
+
+    enriched = runner._enriched_strategy_reason(decision, decision.reason, "skipped")
+    assert enriched.startswith("Crypto worker filters not met")
+    assert "Oracle readiness: age=12s > max=5s" in enriched
+    assert "Maximum spread: spread=0.04 > max=0.02" in enriched
+
+
+def test_fast_trader_keeps_specific_skip_reason_unchanged():
+    # When the strategy already provides a specific reason (not in the
+    # generic-token allow list), the enrichment is a no-op: the base
+    # reason is descriptive enough on its own.
+    runner = fast_trader_runtime._FastTraderTask(_fast_trader_config(), asyncio.Event())
+
+    decision = SimpleNamespace(
+        decision="skipped",
+        reason="Spread too narrow (0.001 < 0.005)",
+        score=0.5,
+        size_usd=10.0,
+        checks=[
+            SimpleNamespace(key="spread", label="Maximum spread", passed=False, score=0.001, detail="0.001 < 0.005", payload={}),
+        ],
+    )
+
+    enriched = runner._enriched_strategy_reason(decision, decision.reason, "skipped")
+    assert enriched == "Spread too narrow (0.001 < 0.005)"
 
 
 @pytest.mark.asyncio

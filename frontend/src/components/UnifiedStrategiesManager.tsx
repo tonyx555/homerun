@@ -8,11 +8,10 @@ import {
   Check,
   CheckCircle2,
   ChevronDown,
-  ChevronRight,
   Code2,
   Copy,
-  FlaskConical,
   Loader2,
+  MoreHorizontal,
   Plus,
   RefreshCw,
   Save,
@@ -29,6 +28,7 @@ import { Button } from './ui/button'
 import { Input } from './ui/input'
 import { Label } from './ui/label'
 import { ScrollArea } from './ui/scroll-area'
+import { Popover, PopoverContent, PopoverTrigger } from './ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select'
 import { Switch } from './ui/switch'
 import { cn } from '../lib/utils'
@@ -55,7 +55,9 @@ import {
   AIModifyStrategyCodeResponse,
 } from '../services/api'
 import StrategyApiDocsFlyout from './StrategyApiDocsFlyout'
-import StrategyBacktestFlyout from './StrategyBacktestFlyout'
+// Backtesting was moved out of the strategy editor into Strategies →
+// Research where it lives alongside the code-evolution autoresearcher.
+// The flyout component is no longer mounted from here.
 
 // ==================== Helpers ====================
 
@@ -184,6 +186,66 @@ function inferClassName(sourceCode: string): string | null {
     match = classPattern.exec(sourceCode)
   }
   return null
+}
+
+function CalibrationSparkline({
+  trend,
+}: {
+  trend: Array<{ bucket_start: string; sample_size: number; mae_roi: number; directional_accuracy: number }>
+}) {
+  if (trend.length < 2) return null
+  const w = 600
+  const h = 60
+  const acc = trend.map((t) => Math.max(0, Math.min(1, t.directional_accuracy || 0)))
+  const mae = trend.map((t) => Math.max(0, t.mae_roi || 0))
+  const maeMax = Math.max(...mae, 1)
+  const stepX = w / Math.max(1, trend.length - 1)
+  const accPath = acc.map((v, i) => {
+    const x = i * stepX
+    const y = h - v * (h - 4) - 2
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+  }).join(' ')
+  const maePath = mae.map((v, i) => {
+    const x = i * stepX
+    const y = h - (v / maeMax) * (h - 4) - 2
+    return `${i === 0 ? 'M' : 'L'} ${x.toFixed(1)} ${y.toFixed(1)}`
+  }).join(' ')
+  const lastAcc = acc[acc.length - 1]
+  const lastMae = mae[mae.length - 1]
+  const firstBucket = trend[0]?.bucket_start?.slice(0, 10) || ''
+  const lastBucket = trend[trend.length - 1]?.bucket_start?.slice(0, 10) || ''
+  return (
+    <div className="rounded-md border border-border/40 bg-card/30 p-2 space-y-1">
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full h-14" preserveAspectRatio="none">
+        {/* 50% reference line for accuracy */}
+        <line
+          x1="0"
+          x2={w}
+          y1={h / 2}
+          y2={h / 2}
+          stroke="rgba(148,163,184,0.25)"
+          strokeDasharray="2 3"
+          strokeWidth="0.5"
+        />
+        <path d={maePath} stroke="rgb(248 113 113)" strokeWidth="1.2" fill="none" opacity="0.6" />
+        <path d={accPath} stroke="rgb(34 211 238)" strokeWidth="1.4" fill="none" />
+      </svg>
+      <div className="flex items-center justify-between text-[9px] font-mono text-muted-foreground">
+        <span>{firstBucket}</span>
+        <span className="flex items-center gap-3">
+          <span>
+            <span className="inline-block w-2 h-2 rounded-full bg-cyan-400 mr-1 align-middle" />
+            acc {(lastAcc * 100).toFixed(1)}%
+          </span>
+          <span>
+            <span className="inline-block w-2 h-2 rounded-full bg-red-400 mr-1 align-middle opacity-60" />
+            mae {lastMae.toFixed(2)}
+          </span>
+        </span>
+        <span>{lastBucket}</span>
+      </div>
+    </div>
+  )
 }
 
 function parseAliases(csv: string): string[] {
@@ -398,13 +460,28 @@ export default function UnifiedStrategiesManager({
   const queryClient = useQueryClient()
 
   // UI toggles
-  const [showSettings, setShowSettings] = useState(false)
-  const [showConfig, setShowConfig] = useState(false)
-  const [showHealth, setShowHealth] = useState(false)
-  const [showAutoresearch, setShowAutoresearch] = useState(false)
+  // Editor body subtab — replaces 4 separate collapsible booleans with
+  // one horizontal tab strip. Source Code is the default since editing
+  // strategy code is the primary task.
+  // Autoresearch is its own subview under Strategies → Research now;
+  // the editor doesn't need a tab for it anymore.
+  type EditorTab = 'code' | 'settings' | 'config' | 'health'
+  const [editorTab, setEditorTab] = useState<EditorTab>('code')
+  const showSettings = editorTab === 'settings'
+  const showConfig = editorTab === 'config'
+  const showHealth = editorTab === 'health'
+  // Setter shim for the few existing call-sites that toggled the
+  // settings collapsible from outside the editor body (e.g. the deep-link
+  // in setShowSettings(true) below). Other tab navigation now goes
+  // through ``setEditorTab`` directly via the horizontal tab strip.
+  const setShowSettings = (next: boolean | ((prev: boolean) => boolean)) => {
+    const v = typeof next === 'function' ? next(showSettings) : next
+    if (v) setEditorTab('settings')
+  }
   const [showRawJson, setShowRawJson] = useState(false)
   const [showApiDocs, setShowApiDocs] = useState(false)
-  const [showBacktest, setShowBacktest] = useState(false)
+  // Backtest flyout removed; backtesting now lives only in Strategies →
+  // Research alongside the code-evolution autoresearcher.
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [showModifyModal, setShowModifyModal] = useState(false)
 
@@ -621,14 +698,28 @@ export default function UnifiedStrategiesManager({
   const flatFiltered = useMemo(() => Object.values(grouped).flat(), [grouped])
 
   const strategyPerformance = useMemo(() => {
+    type ModeBucket = {
+      total: number
+      terminalCount: number | null
+      realizedPnl: number | null
+    }
     const out: Record<
       string,
       {
         roi: number | null
         winRate: number | null
         sampleCount: number | null
+        // Aggregated (live + shadow) — kept for back-compat with older
+        // callers / lists. The Health subtab now reads ``modes.live``
+        // and ``modes.shadow`` separately so users can tell real
+        // venue trades apart from simulated/paper rows.
         realizedPnl: number | null
         terminalCount: number | null
+        modes: {
+          live: ModeBucket | null
+          shadow: ModeBucket | null
+          other: ModeBucket | null
+        }
       }
     > = {}
     const strategyAccuracy = strategyTrackerQuery.data?.strategy_accuracy
@@ -647,6 +738,7 @@ export default function UnifiedStrategiesManager({
           sampleCount: Number.isFinite(resolved) ? resolved : null,
           realizedPnl: null,
           terminalCount: null,
+          modes: { live: null, shadow: null, other: null },
         }
       }
     }
@@ -668,6 +760,7 @@ export default function UnifiedStrategiesManager({
           sampleCount: Number.isFinite(sampleSize) ? sampleSize : existing?.sampleCount ?? null,
           realizedPnl: existing?.realizedPnl ?? null,
           terminalCount: existing?.terminalCount ?? null,
+          modes: existing?.modes ?? { live: null, shadow: null, other: null },
         }
       }
     }
@@ -683,6 +776,40 @@ export default function UnifiedStrategiesManager({
 
         const realizedPnl = Number(row.realized_pnl_total)
         const terminalCount = Number(row.terminal)
+
+        // Pull the per-mode breakdown so live and shadow rows stay
+        // separate. ``modes`` is a dict keyed by mode label ("live",
+        // "shadow", possibly "unknown"); each value carries its own
+        // terminal/realized_pnl_total counters.
+        const modesRaw = row.modes
+        const modeBuckets: { live: ModeBucket | null; shadow: ModeBucket | null; other: ModeBucket | null } = {
+          live: null,
+          shadow: null,
+          other: null,
+        }
+        if (modesRaw && typeof modesRaw === 'object' && !Array.isArray(modesRaw)) {
+          for (const [modeKey, modeVal] of Object.entries(modesRaw as Record<string, unknown>)) {
+            if (!modeVal || typeof modeVal !== 'object' || Array.isArray(modeVal)) continue
+            const modeRow = modeVal as Record<string, unknown>
+            const total = Number(modeRow.total)
+            const terminal = Number(modeRow.terminal)
+            const pnl = Number(modeRow.realized_pnl_total)
+            const bucket: ModeBucket = {
+              total: Number.isFinite(total) ? total : 0,
+              terminalCount: Number.isFinite(terminal) ? terminal : null,
+              realizedPnl: Number.isFinite(pnl) ? pnl : null,
+            }
+            const normalized = String(modeKey || '').trim().toLowerCase()
+            if (normalized === 'live') {
+              modeBuckets.live = bucket
+            } else if (normalized === 'shadow' || normalized === 'simulated' || normalized === 'paper') {
+              modeBuckets.shadow = bucket
+            } else {
+              modeBuckets.other = bucket
+            }
+          }
+        }
+
         const existing = out[key]
         out[key] = {
           roi: existing?.roi ?? null,
@@ -692,6 +819,7 @@ export default function UnifiedStrategiesManager({
             (Number.isFinite(terminalCount) ? terminalCount : null),
           realizedPnl: Number.isFinite(realizedPnl) ? realizedPnl : existing?.realizedPnl ?? null,
           terminalCount: Number.isFinite(terminalCount) ? terminalCount : existing?.terminalCount ?? null,
+          modes: modeBuckets,
         }
       }
     }
@@ -752,6 +880,71 @@ export default function UnifiedStrategiesManager({
     }
     return null
   }, [selectedStrategy, strategyHealthByKey])
+
+  // Per-strategy performance aggregates pulled from the validation
+  // overview (strategy_accuracy + calibration_90d.by_strategy +
+  // trader_orchestrator_execution_30d.by_strategy).
+  const selectedStrategyPerformance = useMemo(() => {
+    if (!selectedStrategy) return null
+    const keys = uniqueStrings([
+      normalizeMetricKey(selectedStrategy.slug),
+      normalizeMetricKey(selectedStrategy.class_name),
+      ...(selectedStrategy.aliases || []).map((alias) => normalizeMetricKey(alias)),
+    ])
+    for (const key of keys) {
+      const perf = strategyPerformance[key]
+      if (perf) return perf
+    }
+    return null
+  }, [selectedStrategy, strategyPerformance])
+
+  // Raw strategy_accuracy row for the totals (total / resolved /
+  // profitable / unprofitable). Lives next to ``strategy_accuracy`` on
+  // the validation overview.
+  const selectedStrategyAccuracy = useMemo(() => {
+    if (!selectedStrategy) return null
+    const accuracyMap = strategyTrackerQuery.data?.strategy_accuracy
+    if (!accuracyMap || typeof accuracyMap !== 'object' || Array.isArray(accuracyMap)) return null
+    const keys = uniqueStrings([
+      normalizeMetricKey(selectedStrategy.slug),
+      normalizeMetricKey(selectedStrategy.class_name),
+      ...(selectedStrategy.aliases || []).map((alias) => normalizeMetricKey(alias)),
+    ])
+    for (const key of keys) {
+      const row = (accuracyMap as Record<string, unknown>)[key]
+      if (row && typeof row === 'object' && !Array.isArray(row)) {
+        return row as Record<string, unknown>
+      }
+    }
+    return null
+  }, [selectedStrategy, strategyTrackerQuery.data?.strategy_accuracy])
+
+  // Calibration rolling history specific to this strategy — used to draw
+  // a small accuracy + MAE sparkline so operators can see whether health
+  // is trending toward demotion or recovery.
+  const selectedStrategyCalibrationTrend = useMemo(() => {
+    if (!selectedStrategy) return [] as Array<{ bucket_start: string; sample_size: number; mae_roi: number; directional_accuracy: number; strategy_type?: string }>
+    const trend = (strategyTrackerQuery.data as Record<string, unknown> | undefined)?.calibration_trend_90d
+    if (!Array.isArray(trend)) return []
+    const keys = uniqueStrings([
+      normalizeMetricKey(selectedStrategy.slug),
+      normalizeMetricKey(selectedStrategy.class_name),
+      ...(selectedStrategy.aliases || []).map((alias) => normalizeMetricKey(alias)),
+    ])
+    return (trend as Array<Record<string, unknown>>)
+      .filter((row) => {
+        const t = normalizeMetricKey((row as any).strategy_type)
+        return t && keys.includes(t)
+      })
+      .map((row) => ({
+        bucket_start: String((row as any).bucket_start || ''),
+        sample_size: Number((row as any).sample_size || 0),
+        mae_roi: Number((row as any).mae_roi || 0),
+        directional_accuracy: Number((row as any).directional_accuracy || 0),
+        strategy_type: String((row as any).strategy_type || ''),
+      }))
+      .sort((a, b) => a.bucket_start.localeCompare(b.bucket_start))
+  }, [selectedStrategy, strategyTrackerQuery.data])
 
   const inferredClassName = useMemo(() => inferClassName(editorCode), [editorCode])
 
@@ -1376,9 +1569,25 @@ export default function UnifiedStrategiesManager({
                       .map((metricKey) => strategyHealthByKey[metricKey])
                       .find((row) => row != null)
                     const roi = tracker?.roi ?? null
-                    const winRate = tracker?.winRate ?? null
                     const sampleCount = tracker?.sampleCount ?? null
-                    const realizedPnl = tracker?.realizedPnl ?? null
+                    // Prefer live (real venue) P&L for the pill so the
+                    // headline number is unambiguous. Fall back to
+                    // shadow when only paper rows exist; in that case
+                    // we tag the pill as ``sim`` so the user can tell
+                    // it apart from real trades.
+                    const liveBucket = tracker?.modes?.live ?? null
+                    const shadowBucket = tracker?.modes?.shadow ?? null
+                    const pnlBucket = liveBucket && liveBucket.realizedPnl != null
+                      ? liveBucket
+                      : shadowBucket && shadowBucket.realizedPnl != null
+                        ? shadowBucket
+                        : null
+                    const realizedPnl = pnlBucket?.realizedPnl ?? tracker?.realizedPnl ?? null
+                    const realizedPnlMode: 'live' | 'sim' | 'mixed' | null = pnlBucket
+                      ? (pnlBucket === liveBucket ? 'live' : 'sim')
+                      : tracker?.realizedPnl != null
+                        ? 'mixed'
+                        : null
                     const healthAccuracy = Number(health?.directional_accuracy)
                     const healthMae = Number(health?.mae_roi)
                     return (
@@ -1423,8 +1632,24 @@ export default function UnifiedStrategiesManager({
                               : realizedPnl >= 0
                                 ? 'text-emerald-400'
                                 : 'text-red-400'
-                          )}>
+                          )}
+                            title={
+                              realizedPnlMode === 'live'
+                                ? 'Live trades only — submitted to Polymarket'
+                                : realizedPnlMode === 'sim'
+                                  ? 'Simulated/shadow trades only — no live rows yet'
+                                  : realizedPnlMode === 'mixed'
+                                    ? 'Aggregate of live + simulated trades'
+                                    : undefined
+                            }
+                          >
                             P&L {realizedPnl == null ? '--' : `${realizedPnl >= 0 ? '+' : ''}$${realizedPnl.toFixed(2)}`}
+                            {realizedPnlMode === 'sim' && (
+                              <span className="ml-1 text-[8px] uppercase tracking-wider text-sky-400/80 font-semibold">sim</span>
+                            )}
+                            {realizedPnlMode === 'mixed' && (
+                              <span className="ml-1 text-[8px] uppercase tracking-wider text-muted-foreground/80 font-semibold">mix</span>
+                            )}
                           </span>
                           <span className={cn(
                             'font-mono',
@@ -1436,9 +1661,14 @@ export default function UnifiedStrategiesManager({
                           )}>
                             ROI {roi == null ? '--' : `${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%`}
                           </span>
-                          <span className="text-muted-foreground/75">
-                            Win {winRate == null ? '--' : `${winRate.toFixed(0)}%`}
-                          </span>
+                          {/* "Win %" pill removed — derived from
+                              ``OpportunityHistory.was_profitable`` which
+                              is unreliable for several strategies (it
+                              requires ``actual_payout > total_cost``
+                              which doesn't fit every payout shape) and
+                              shows 0% for strategies that are actually
+                              net-positive. The "Acc" pill below is the
+                              meaningful directional-accuracy signal. */}
                           <span className="text-muted-foreground/75">
                             N {sampleCount == null ? '--' : Math.round(sampleCount)}
                           </span>
@@ -1481,103 +1711,125 @@ export default function UnifiedStrategiesManager({
           </div>
         ) : (
           <>
-            {/* ── Editor toolbar ── */}
-            <div className="shrink-0 px-4 py-2.5 border-b border-border/50 flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <div className="flex items-center gap-2 min-w-0">
-                  <Code2 className="w-4 h-4 text-violet-400 shrink-0" />
-                  <span className="text-sm font-medium truncate">
-                    {editorName || 'Untitled Strategy'}
-                  </span>
-                </div>
-                <Badge variant="outline" className={cn('text-[10px] shrink-0 border', statusColor)}>
-                  {displayStatus}
-                </Badge>
-                {selectedStrategy?.is_system && (
-                  <Badge variant="secondary" className="text-[10px] shrink-0">System</Badge>
-                )}
+            {/* ── Editor toolbar (reimagined: compact + grouped) ──
+                Left: name + a single "meta" pill summarizing version /
+                latest / loaded / system, click to expand a popover with
+                version restore, enable toggle, and ID details.
+                Right: Validate (pre-save gate) · AI Modify · Save
+                (primary) · More popover (Research deep-link, API Docs,
+                Reload, Delete). Backtesting is no longer reachable from
+                the editor — it lives under Strategies → Research. */}
+            <div className="shrink-0 px-4 py-2 border-b border-border/50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 min-w-0">
+                <Code2 className="w-4 h-4 text-violet-400 shrink-0" />
+                <span className="text-sm font-medium truncate">
+                  {editorName || 'Untitled Strategy'}
+                </span>
+                {/* Single compact meta pill — replaces the row of separate
+                    badges. Click to manage version / enabled / system. */}
                 {selectedStrategy && (
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <span className="text-[10px] font-mono text-muted-foreground">v{selectedStrategy.version}</span>
-                    {latestVersionRow && latestVersionRow.version === selectedStrategy.version ? (
-                      <Badge variant="outline" className="h-4 px-1.5 text-[9px] border-emerald-500/30 text-emerald-300 bg-emerald-500/10">
-                        Latest
-                      </Badge>
-                    ) : null}
-                  </div>
+                  <Popover>
+                    <PopoverTrigger asChild>
+                      <button
+                        type="button"
+                        className={cn(
+                          'flex items-center gap-1.5 rounded-md border px-2 py-0.5 text-[10px] font-mono transition-colors',
+                          editorEnabled
+                            ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300 hover:bg-emerald-500/10'
+                            : 'border-zinc-500/30 bg-zinc-500/5 text-muted-foreground hover:bg-zinc-500/10',
+                        )}
+                      >
+                        <span className={cn(
+                          'inline-block w-1.5 h-1.5 rounded-full',
+                          editorEnabled ? 'bg-emerald-400' : 'bg-zinc-500',
+                        )} />
+                        v{selectedStrategy.version}
+                        {latestVersionRow && latestVersionRow.version === selectedStrategy.version && (
+                          <span className="opacity-60">· latest</span>
+                        )}
+                        {selectedStrategy.is_system && (
+                          <span className="opacity-60">· system</span>
+                        )}
+                        <span className="opacity-60">· {displayStatus}</span>
+                        <ChevronDown className="w-3 h-3 opacity-60" />
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent align="start" className="w-72 p-3 space-y-3">
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground">Status</Label>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Badge variant="outline" className={cn('text-[10px] border', statusColor)}>
+                            {displayStatus}
+                          </Badge>
+                          {selectedStrategy.is_system && (
+                            <Badge variant="secondary" className="text-[10px]">System</Badge>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground">Enabled</Label>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Switch
+                            checked={editorEnabled}
+                            onCheckedChange={setEditorEnabled}
+                            className="scale-75"
+                          />
+                          <span className="text-[11px] text-muted-foreground">
+                            {editorEnabled ? 'Strategy is active' : 'Disabled — will not run'}
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <Label className="text-[10px] text-muted-foreground">Version</Label>
+                        <div className="flex items-center gap-1.5 mt-1">
+                          <Select
+                            value={selectedVersionForRestore || String(selectedStrategy.version || '')}
+                            onValueChange={setSelectedVersionForRestore}
+                            disabled={busy || strategyVersions.length === 0}
+                          >
+                            <SelectTrigger className="h-7 flex-1 text-[10px] font-mono">
+                              <SelectValue placeholder="Select version" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {strategyVersions.map((versionRow) => (
+                                <SelectItem key={versionRow.id} value={String(versionRow.version)} className="font-mono">
+                                  {`v${versionRow.version}${
+                                    versionRow.is_latest ? ' • latest' : ''
+                                  }${
+                                    Number(versionRow.version) === Number(selectedStrategy.version || 0) ? ' • current' : ''
+                                  }`}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="h-7 gap-1 px-2 text-[10px]"
+                            onClick={() => restoreVersionMutation.mutate()}
+                            disabled={busy || !selectedRestoreVersionValid || restoreVersionIsCurrent}
+                          >
+                            {restoreVersionMutation.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3 h-3" />
+                            )}
+                            Restore
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="text-[10px] font-mono text-muted-foreground border-t border-border/30 pt-2">
+                        <div>ID: <span className="text-foreground/80">{selectedStrategy.id.slice(0, 12)}</span></div>
+                        <div>Slug: <span className="text-foreground/80">{selectedStrategy.slug}</span></div>
+                      </div>
+                    </PopoverContent>
+                  </Popover>
                 )}
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
-                {selectedStrategy && (
-                  <div className="flex items-center gap-1.5 mr-2 pr-2 border-r border-border/50">
-                    <span className="text-[10px] text-muted-foreground">Version</span>
-                    <Select
-                      value={selectedVersionForRestore || String(selectedStrategy.version || '')}
-                      onValueChange={setSelectedVersionForRestore}
-                      disabled={busy || strategyVersions.length === 0}
-                    >
-                      <SelectTrigger className="h-7 w-[138px] text-[10px] font-mono">
-                        <SelectValue placeholder="Select version" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {strategyVersions.map((versionRow) => (
-                          <SelectItem key={versionRow.id} value={String(versionRow.version)} className="font-mono">
-                            {`v${versionRow.version}${
-                              versionRow.is_latest ? ' • latest' : ''
-                            }${
-                              Number(versionRow.version) === Number(selectedStrategy.version || 0) ? ' • current' : ''
-                            }`}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-7 gap-1 px-2 text-[11px]"
-                      onClick={() => restoreVersionMutation.mutate()}
-                      disabled={busy || !selectedRestoreVersionValid || restoreVersionIsCurrent}
-                    >
-                      {restoreVersionMutation.isPending ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <RefreshCw className="w-3 h-3" />
-                      )}
-                      Restore
-                    </Button>
-                  </div>
-                )}
-                <div className="flex items-center gap-2 mr-2 pr-2 border-r border-border/50">
-                  <span className="text-[10px] text-muted-foreground">Enabled</span>
-                  <Switch
-                    checked={editorEnabled}
-                    onCheckedChange={setEditorEnabled}
-                    className="scale-75"
-                  />
-                </div>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-[11px]"
-                  onClick={() => setShowBacktest(true)}
-                  disabled={!editorCode.trim()}
-                >
-                  <FlaskConical className="w-3 h-3" />
-                  Backtest
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-[11px]"
-                  onClick={() => setShowApiDocs(true)}
-                >
-                  <BookOpen className="w-3 h-3" />
-                  API Docs
-                </Button>
+                {/* Validate stays prominent — it's the pre-save gate. */}
                 <Button
                   type="button"
                   variant="outline"
@@ -1593,21 +1845,65 @@ export default function UnifiedStrategiesManager({
                   )}
                   Validate
                 </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  className="h-7 gap-1 px-2 text-[11px]"
-                  onClick={() => reloadMutation.mutate()}
-                  disabled={busy || !selectedStrategy}
-                >
-                  {reloadMutation.isPending ? (
-                    <Loader2 className="w-3 h-3 animate-spin" />
-                  ) : (
-                    <Zap className="w-3 h-3" />
-                  )}
-                  Reload
-                </Button>
+
+                {/* Consolidated "More" dropdown — Backtest is intentionally
+                    NOT here; backtesting lives under Strategies → Research
+                    so the strategy editor doesn't double as a research UI. */}
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-7 gap-1 px-2 text-[11px]"
+                      disabled={!editorCode.trim() && !selectedStrategy}
+                    >
+                      <MoreHorizontal className="w-3 h-3" />
+                      More
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align="end" className="w-56 p-1">
+                    <div className="flex flex-col">
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 px-2 py-1.5 text-[11px] rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed text-left text-violet-300"
+                        onClick={() => {
+                          if (editorSlug) {
+                            sessionStorage.setItem('homerun:research:strategy', editorSlug)
+                          }
+                          sessionStorage.setItem('homerun:research:open', '1')
+                          window.dispatchEvent(new CustomEvent('homerun:research:open'))
+                        }}
+                        disabled={!editorSlug}
+                      >
+                        <Sparkles className="w-3.5 h-3.5" />
+                        Open in Research
+                        <span className="ml-auto text-[10px] text-muted-foreground">backtest + code evo</span>
+                      </button>
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 px-2 py-1.5 text-[11px] rounded hover:bg-muted text-left"
+                        onClick={() => setShowApiDocs(true)}
+                      >
+                        <BookOpen className="w-3.5 h-3.5 text-cyan-400" />
+                        API Docs
+                      </button>
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 px-2 py-1.5 text-[11px] rounded hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed text-left"
+                        onClick={() => reloadMutation.mutate()}
+                        disabled={busy || !selectedStrategy}
+                      >
+                        {reloadMutation.isPending ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <Zap className="w-3.5 h-3.5 text-amber-400" />
+                        )}
+                        Reload
+                      </button>
+                    </div>
+                  </PopoverContent>
+                </Popover>
                 <Button
                   type="button"
                   variant="outline"
@@ -1718,25 +2014,39 @@ export default function UnifiedStrategiesManager({
 
             {/* ── Main editor content ── */}
             <div className="flex-1 min-h-0 flex flex-col">
-              {/* Collapsible Settings */}
-              <div className="shrink-0 border-b border-border/50">
-                <button
-                  type="button"
-                  onClick={() => setShowSettings((prev) => !prev)}
-                  className="w-full px-4 py-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showSettings ? (
-                    <ChevronDown className="w-3 h-3" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3" />
-                  )}
-                  <Settings2 className="w-3 h-3" />
-                  <span>Settings</span>
-                  <span className="ml-auto font-mono text-[10px] opacity-60">
-                    {editorSlug || 'no-key'}
-                  </span>
-                </button>
+              {/* Horizontal subtab strip — replaces the 5 vertical
+                  collapsible headers. Source Code is the default. */}
+              <div className="shrink-0 flex items-center gap-0.5 border-b border-border/50 px-3 overflow-x-auto">
+                {([
+                  { key: 'code' as const, label: 'Source Code', icon: Code2, color: 'text-violet-400', sub: 'Python' },
+                  { key: 'settings' as const, label: 'Settings', icon: Settings2, color: 'text-cyan-400', sub: editorSlug || 'no-key' },
+                  { key: 'config' as const, label: 'Runtime Config', icon: Settings2, color: 'text-blue-400', sub: undefined },
+                  { key: 'health' as const, label: 'Health', icon: AlertTriangle, color: 'text-amber-400', sub: selectedStrategyHealth?.status || 'untracked' },
+                ]).map((tab) => (
+                  <button
+                    key={tab.key}
+                    type="button"
+                    onClick={() => setEditorTab(tab.key)}
+                    className={cn(
+                      'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium border-b-2 -mb-px transition-colors whitespace-nowrap',
+                      editorTab === tab.key
+                        ? 'border-violet-500 text-foreground'
+                        : 'border-transparent text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <tab.icon className={cn('w-3 h-3', editorTab === tab.key ? tab.color : '')} />
+                    {tab.label}
+                    {tab.sub && (
+                      <span className="ml-1 text-[9px] font-mono opacity-60">{tab.sub}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
 
+              {/* Settings panel — flex-1 + overflow-y-auto when active so
+                  long forms scroll inside the editor pane. ``shrink-0``
+                  when inactive so the wrapper stays out of the layout. */}
+              <div className={cn(showSettings ? 'flex-1 min-h-0 overflow-y-auto' : 'shrink-0')}>
                 {showSettings && (
                   <div className="px-4 pb-3 space-y-3 animate-in fade-in duration-200">
                     <div className="grid gap-3 grid-cols-2 xl:grid-cols-4">
@@ -1809,28 +2119,33 @@ export default function UnifiedStrategiesManager({
                 )}
               </div>
 
-              {/* Collapsible Runtime Config section */}
-              <div className="shrink-0 border-b border-border/50">
-                <button
-                  type="button"
-                  onClick={() => setShowConfig((prev) => !prev)}
-                  className="w-full px-4 py-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showConfig ? (
-                    <ChevronDown className="w-3 h-3" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3" />
-                  )}
-                  <Settings2 className="w-3 h-3" />
-                  <span>Runtime Config</span>
-                  {configSchemaFields.length > 0 && (
-                    <Badge variant="secondary" className="text-[9px] px-1.5 py-0 h-4 ml-1">
-                      {configSchemaFields.length} fields
-                    </Badge>
-                  )}
-                </button>
+              {/* Runtime Config panel — header was the old collapsible
+                  button; replaced by the horizontal tab strip above.
+                  ``flex-1 min-h-0 overflow-y-auto`` while active so
+                  long config forms or raw JSON editors scroll inside
+                  the editor pane instead of getting clipped. */}
+              <div className={cn(showConfig ? 'flex-1 min-h-0 overflow-y-auto' : 'shrink-0')}>
                 {showConfig && (
-                  <div className="px-3 pb-3 animate-in fade-in duration-200 space-y-3">
+                  <div className="px-3 pt-3 pb-3 animate-in fade-in duration-200 space-y-3">
+                    {/* Explain the override cascade so users know what they're
+                        editing here vs in the per-bot Tune tab. */}
+                    <div className="rounded-md border border-cyan-500/30 bg-cyan-500/5 px-3 py-2 text-[11px] leading-snug text-muted-foreground">
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Settings2 className="w-3 h-3 text-cyan-400" />
+                        <span className="text-foreground font-medium text-[11px]">
+                          Strategy-level defaults
+                        </span>
+                      </div>
+                      Edits here update <code className="text-cyan-300">Strategy.config</code> — the
+                      <span className="text-foreground"> defaults every bot inherits</span> when they run this
+                      strategy. The runtime cascade is{' '}
+                      <code className="text-foreground">source <code className="text-muted-foreground/80">default_config</code></code>{' '}→{' '}
+                      <code className="text-foreground">Runtime Config (here)</code>{' '}→{' '}
+                      <code className="text-foreground">Bot Tune <code className="text-muted-foreground/80">strategy_params</code></code>;
+                      each layer overrides the previous. Per-bot tweaks live in{' '}
+                      <span className="font-medium">Bots → Tune → Parameters</span>.
+                    </div>
+
                     {/* Dynamic config form when schema has param_fields */}
                     {configSchemaFields.length > 0 && !showRawJson && (
                       <>
@@ -1900,167 +2215,423 @@ export default function UnifiedStrategiesManager({
                 )}
               </div>
 
-              {/* Collapsible Health */}
-              <div className="shrink-0 border-b border-border/50">
-                <button
-                  type="button"
-                  onClick={() => setShowHealth((prev) => !prev)}
-                  className="w-full px-4 py-2 flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  {showHealth ? (
-                    <ChevronDown className="w-3 h-3" />
-                  ) : (
-                    <ChevronRight className="w-3 h-3" />
-                  )}
-                  <Settings2 className="w-3 h-3" />
-                  <span>Health</span>
-                  <span className="ml-auto font-mono text-[10px] opacity-60">
-                    {selectedStrategyHealth?.status || 'untracked'}
-                  </span>
-                </button>
+              {/* Health panel — header replaced by horizontal tab strip.
+                  ``flex-1 min-h-0 overflow-y-auto`` while active so the
+                  status hero, signal volume, trading-outcome cards,
+                  calibration trend, and override controls all scroll
+                  together inside the editor pane. */}
+              <div className={cn(showHealth ? 'flex-1 min-h-0 overflow-y-auto' : 'shrink-0')}>
                 {showHealth && (
-                  <div className="px-4 pb-3 space-y-3 animate-in fade-in duration-200">
+                  <div className="px-4 py-3 animate-in fade-in duration-200">
                     {selectedStrategyHealth ? (
-                      <>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <Badge variant="outline" className={cn('text-[10px] border', healthStatusClass(selectedStrategyHealth.status))}>
-                            {selectedStrategyHealth.status}
-                          </Badge>
-                          <span className="text-[10px] text-muted-foreground font-mono">
-                            N {selectedStrategyHealth.sample_size}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            Acc {Number.isFinite(Number(selectedStrategyHealth.directional_accuracy))
-                              ? `${(Number(selectedStrategyHealth.directional_accuracy) * 100).toFixed(1)}%`
-                              : '--'}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            MAE {Number.isFinite(Number(selectedStrategyHealth.mae_roi))
-                              ? Number(selectedStrategyHealth.mae_roi).toFixed(2)
-                              : '--'}
-                          </span>
-                          {selectedStrategyHealth.manual_override && (
-                            <Badge variant="outline" className="text-[10px] border-cyan-500/30 bg-cyan-500/10 text-cyan-300">
-                              Manual override
-                            </Badge>
+                      <div className="space-y-3">
+                        {/* Status hero — explains what this status means */}
+                        <div className={cn(
+                          'rounded-lg border p-3 space-y-1',
+                          selectedStrategyHealth.status === 'active'
+                            ? 'border-emerald-500/30 bg-emerald-500/5'
+                            : selectedStrategyHealth.status === 'demoted'
+                              ? 'border-red-500/30 bg-red-500/5'
+                              : 'border-amber-500/30 bg-amber-500/5',
+                        )}>
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              'inline-block w-2 h-2 rounded-full',
+                              selectedStrategyHealth.status === 'active'
+                                ? 'bg-emerald-400'
+                                : selectedStrategyHealth.status === 'demoted'
+                                  ? 'bg-red-400'
+                                  : 'bg-amber-400',
+                            )} />
+                            <span className="text-sm font-semibold capitalize">
+                              {selectedStrategyHealth.status}
+                            </span>
+                            {selectedStrategyHealth.manual_override && (
+                              <Badge variant="outline" className="text-[10px] border-cyan-500/30 bg-cyan-500/10 text-cyan-300">
+                                Manual override
+                              </Badge>
+                            )}
+                            <span className="ml-auto text-[10px] text-muted-foreground font-mono">
+                              {selectedStrategyHealth.strategy_type}
+                            </span>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground leading-snug">
+                            {selectedStrategyHealth.status === 'active'
+                              ? 'Strategy is participating in trading. Signals are being acted on.'
+                              : selectedStrategyHealth.status === 'demoted'
+                                ? 'Strategy is parked — signals are still recorded but not acted on. Investigate accuracy / MAE before reactivating.'
+                                : 'Strategy hasn\'t accumulated enough data yet to be promoted or demoted.'}
+                          </p>
+                          {selectedStrategyHealth.last_reason && (
+                            <p className="text-[10px] text-muted-foreground italic">
+                              <span className="text-muted-foreground/70">Last reason:</span>{' '}
+                              {selectedStrategyHealth.last_reason}
+                            </p>
                           )}
                         </div>
 
-                        <div className="flex flex-wrap items-center gap-1">
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-[11px]"
-                            disabled={healthBusy || selectedStrategyHealth.status === 'active'}
-                            onClick={() =>
-                              overrideStrategyMutation.mutate({
-                                strategyType: selectedStrategyHealth.strategy_type,
-                                status: 'active',
-                              })
-                            }
-                          >
-                            Activate
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-[11px]"
-                            disabled={healthBusy || selectedStrategyHealth.status === 'demoted'}
-                            onClick={() =>
-                              overrideStrategyMutation.mutate({
-                                strategyType: selectedStrategyHealth.strategy_type,
-                                status: 'demoted',
-                              })
-                            }
-                          >
-                            Demote
-                          </Button>
-                          <Button
-                            type="button"
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 px-2 text-[11px]"
-                            disabled={healthBusy || !selectedStrategyHealth.manual_override}
-                            onClick={() => clearOverrideMutation.mutate(selectedStrategyHealth.strategy_type)}
-                          >
-                            Clear
-                          </Button>
+                        {/* Guardrail metrics — what the auto-demotion engine
+                            actually evaluates against. */}
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                            Guardrail signals
+                          </p>
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Sample size</p>
+                              <p className="text-base font-mono font-bold mt-0.5">
+                                {Number(selectedStrategyHealth.sample_size || 0).toLocaleString()}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground/70">opportunities tracked</p>
+                            </div>
+                            <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Directional accuracy</p>
+                              <p className="text-base font-mono font-bold mt-0.5">
+                                {Number.isFinite(Number(selectedStrategyHealth.directional_accuracy))
+                                  ? `${(Number(selectedStrategyHealth.directional_accuracy) * 100).toFixed(1)}%`
+                                  : '—'}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground/70">predicted side correct</p>
+                            </div>
+                            <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+                              <p className="text-[10px] uppercase tracking-wider text-muted-foreground">MAE (ROI)</p>
+                              <p className="text-base font-mono font-bold mt-0.5">
+                                {Number.isFinite(Number(selectedStrategyHealth.mae_roi))
+                                  ? Number(selectedStrategyHealth.mae_roi).toFixed(2)
+                                  : '—'}
+                              </p>
+                              <p className="text-[10px] text-muted-foreground/70">mean abs ROI error</p>
+                            </div>
+                          </div>
                         </div>
 
-                        {selectedStrategyHealth.last_reason && (
-                          <p className="text-[10px] text-muted-foreground">{selectedStrategyHealth.last_reason}</p>
+                        {/* Signal-level metrics — counts of opportunities
+                            DETECTED by this strategy, regardless of whether
+                            any bot traded them. Pulled from
+                            ``OpportunityHistory`` via the validation overview.
+                            We surface totals only here; the
+                            ``was_profitable`` flag from this table is
+                            unreliable for several strategies (it requires
+                            ``actual_payout > total_cost`` which doesn't fit
+                            every strategy's payout shape) so we don't show
+                            a "X profitable" or "win rate" line from it. */}
+                        {selectedStrategyAccuracy && (
+                          <div>
+                            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                              Signal volume (lifetime)
+                            </p>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+                                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Detected</p>
+                                <p className="text-base font-mono font-bold mt-0.5">
+                                  {Number(selectedStrategyAccuracy.total || 0).toLocaleString()}
+                                </p>
+                                <p className="text-[10px] text-muted-foreground/70">
+                                  opportunities the strategy emitted
+                                </p>
+                              </div>
+                              <div className="rounded-md border border-border/40 bg-card/30 p-2.5">
+                                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">Resolved</p>
+                                <p className="text-base font-mono font-bold mt-0.5">
+                                  {Number(selectedStrategyAccuracy.resolved || 0).toLocaleString()}
+                                </p>
+                                <p className="text-[10px] text-muted-foreground/70">
+                                  markets settled with an outcome
+                                </p>
+                              </div>
+                            </div>
+                          </div>
                         )}
-                      </>
+
+                        {/* Position-level metrics — what the orchestrator
+                            executed. Split by mode (live = real venue,
+                            shadow = paper) when the validation
+                            overview returns the per-mode breakdown.
+                            Falls back to a single "All trades" card
+                            when only the aggregate counters are
+                            available (older backend response). */}
+                        {selectedStrategyPerformance && (
+                          selectedStrategyPerformance.modes.live
+                          || selectedStrategyPerformance.modes.shadow
+                          || selectedStrategyPerformance.modes.other
+                          || selectedStrategyPerformance.realizedPnl != null
+                          || selectedStrategyPerformance.terminalCount != null
+                        ) && (() => {
+                          const hasModeBreakdown = Boolean(
+                            selectedStrategyPerformance.modes.live
+                            || selectedStrategyPerformance.modes.shadow
+                            || selectedStrategyPerformance.modes.other,
+                          )
+                          type RenderableBucket = {
+                            kind: 'live' | 'shadow' | 'other' | 'aggregate'
+                            total: number
+                            terminalCount: number | null
+                            realizedPnl: number | null
+                          }
+                          const buckets: RenderableBucket[] = []
+                          if (hasModeBreakdown) {
+                            for (const modeKey of ['live', 'shadow', 'other'] as const) {
+                              const bucket = selectedStrategyPerformance.modes[modeKey]
+                              if (!bucket || bucket.total <= 0) continue
+                              buckets.push({
+                                kind: modeKey,
+                                total: bucket.total,
+                                terminalCount: bucket.terminalCount,
+                                realizedPnl: bucket.realizedPnl,
+                              })
+                            }
+                          } else {
+                            buckets.push({
+                              kind: 'aggregate',
+                              total: selectedStrategyPerformance.terminalCount ?? 0,
+                              terminalCount: selectedStrategyPerformance.terminalCount,
+                              realizedPnl: selectedStrategyPerformance.realizedPnl,
+                            })
+                          }
+                          return (
+                            <div>
+                              <div className="flex items-center justify-between mb-1">
+                                <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                                  Trading outcome (30d, all bots)
+                                </p>
+                                {hasModeBreakdown && (
+                                  <p className="text-[9px] text-muted-foreground/60">
+                                    Live = real venue · Simulated = paper / shadow
+                                  </p>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 gap-2">
+                                {buckets.map((bucket) => {
+                                  const isLive = bucket.kind === 'live'
+                                  const isShadow = bucket.kind === 'shadow'
+                                  const isAggregate = bucket.kind === 'aggregate'
+                                  const label = isLive
+                                    ? 'Live trades'
+                                    : isShadow
+                                      ? 'Simulated trades'
+                                      : isAggregate
+                                        ? 'All trades'
+                                        : 'Other trades'
+                                  const sublabel = isLive
+                                    ? 'Submitted to Polymarket'
+                                    : isShadow
+                                      ? 'Paper / shadow rows'
+                                      : isAggregate
+                                        ? 'Live + simulated combined'
+                                        : 'Mode not classified'
+                                  const badgeText = isLive
+                                    ? 'Live'
+                                    : isShadow
+                                      ? 'Simulated'
+                                      : isAggregate
+                                        ? 'All'
+                                        : 'Other'
+                                  const badgeClasses = isLive
+                                    ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+                                    : isShadow
+                                      ? 'bg-sky-500/15 text-sky-700 dark:text-sky-300 border-sky-500/30'
+                                      : 'bg-muted/40 text-muted-foreground border-border/40'
+                                  const pnlValue = bucket.realizedPnl
+                                  const pnlClasses = pnlValue != null && pnlValue > 0
+                                    ? 'text-emerald-500 dark:text-emerald-300'
+                                    : pnlValue != null && pnlValue < 0
+                                      ? 'text-red-500 dark:text-red-300'
+                                      : ''
+                                  return (
+                                    <div
+                                      key={bucket.kind}
+                                      className="rounded-md border border-border/40 bg-card/30 p-2.5 space-y-1.5"
+                                    >
+                                      <div className="flex items-center justify-between gap-1.5">
+                                        <span
+                                          className={cn(
+                                            'inline-flex items-center px-1.5 py-0.5 rounded-sm border text-[9px] uppercase tracking-wider font-semibold',
+                                            badgeClasses,
+                                          )}
+                                        >
+                                          {badgeText}
+                                        </span>
+                                        <span className="text-[9px] text-muted-foreground/70">{sublabel}</span>
+                                      </div>
+                                      <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{label}</p>
+                                      <div className="grid grid-cols-2 gap-1.5">
+                                        <div>
+                                          <p className="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+                                            Closed
+                                          </p>
+                                          <p className="text-sm font-mono font-bold">
+                                            {bucket.terminalCount != null
+                                              ? Number(bucket.terminalCount).toLocaleString()
+                                              : '—'}
+                                          </p>
+                                          {bucket.total > 0 && (
+                                            <p className="text-[9px] text-muted-foreground/60">
+                                              of {Number(bucket.total).toLocaleString()} total
+                                            </p>
+                                          )}
+                                        </div>
+                                        <div>
+                                          <p className="text-[9px] uppercase tracking-wider text-muted-foreground/70">
+                                            P&amp;L
+                                          </p>
+                                          <p className={cn('text-sm font-mono font-bold', pnlClasses)}>
+                                            {pnlValue != null
+                                              ? `${pnlValue >= 0 ? '+' : ''}$${pnlValue.toFixed(2)}`
+                                              : '—'}
+                                          </p>
+                                          <p className="text-[9px] text-muted-foreground/60">net of fees</p>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )
+                        })()}
+
+                        {/* Calibration trend sparkline. Empty state is
+                            explicit (rather than silently hiding) so the
+                            user can tell whether the strategy lacks
+                            telemetry or the chart is broken. */}
+                        <div>
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1">
+                            Calibration trend (90d)
+                          </p>
+                          {selectedStrategyCalibrationTrend.length >= 2 ? (
+                            <CalibrationSparkline trend={selectedStrategyCalibrationTrend} />
+                          ) : (
+                            <div className="rounded-md border border-border/30 bg-card/20 px-3 py-3 text-[10px] text-muted-foreground">
+                              No weekly calibration buckets are available for this strategy yet.
+                              The trend appears once the validation engine has accumulated
+                              at least two completed 7-day windows of resolved opportunities.
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Real action buttons — proper variants, icons, tooltips */}
+                        <div className="rounded-md border border-border/40 bg-background/40 p-2 space-y-1.5">
+                          <p className="text-[10px] uppercase tracking-wider text-muted-foreground">
+                            Manual status override
+                          </p>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className={cn(
+                                'h-7 gap-1 px-2.5 text-[11px]',
+                                selectedStrategyHealth.status === 'active'
+                                  ? ''
+                                  : 'border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10',
+                              )}
+                              disabled={healthBusy || selectedStrategyHealth.status === 'active'}
+                              onClick={() =>
+                                overrideStrategyMutation.mutate({
+                                  strategyType: selectedStrategyHealth.strategy_type,
+                                  status: 'active',
+                                })
+                              }
+                              title="Force this strategy to participate in trading regardless of telemetry"
+                            >
+                              {overrideStrategyMutation.isPending ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="w-3 h-3" />
+                              )}
+                              Activate
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className={cn(
+                                'h-7 gap-1 px-2.5 text-[11px]',
+                                selectedStrategyHealth.status === 'demoted'
+                                  ? ''
+                                  : 'border-red-500/30 text-red-300 hover:bg-red-500/10',
+                              )}
+                              disabled={healthBusy || selectedStrategyHealth.status === 'demoted'}
+                              onClick={() =>
+                                overrideStrategyMutation.mutate({
+                                  strategyType: selectedStrategyHealth.strategy_type,
+                                  status: 'demoted',
+                                })
+                              }
+                              title="Park this strategy — signals still recorded, but not acted on"
+                            >
+                              {overrideStrategyMutation.isPending ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <AlertTriangle className="w-3 h-3" />
+                              )}
+                              Demote
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              className="h-7 gap-1 px-2.5 text-[11px]"
+                              disabled={healthBusy || !selectedStrategyHealth.manual_override}
+                              onClick={() => clearOverrideMutation.mutate(selectedStrategyHealth.strategy_type)}
+                              title={selectedStrategyHealth.manual_override
+                                ? 'Drop the manual override and let the auto-status engine drive it again'
+                                : 'No manual override active'}
+                            >
+                              {clearOverrideMutation.isPending ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <X className="w-3 h-3" />
+                              )}
+                              Clear override
+                            </Button>
+                          </div>
+                          <p className="text-[10px] text-muted-foreground/70">
+                            Auto-status uses the metrics above plus configured guardrails. Manual overrides
+                            stick until you clear them.
+                          </p>
+                        </div>
+                      </div>
                     ) : (
-                      <p className="text-[10px] text-muted-foreground">
-                        No health telemetry exists yet for key <span className="font-mono">{selectedStrategy?.slug || editorSlug || 'unknown'}</span>.
-                      </p>
+                      <div className="rounded-lg border border-border/40 bg-card/30 p-6 text-center space-y-2">
+                        <AlertTriangle className="w-6 h-6 mx-auto text-muted-foreground/40" />
+                        <p className="text-[11px] text-muted-foreground">
+                          No health telemetry yet for{' '}
+                          <span className="font-mono text-foreground">{selectedStrategy?.slug || editorSlug || 'this strategy'}</span>.
+                        </p>
+                        <p className="text-[10px] text-muted-foreground/70 max-w-md mx-auto">
+                          Telemetry accumulates as opportunities flow through detect → evaluate → exit. Run a
+                          backtest in <span className="font-medium">Research</span> or wait for live signals
+                          to populate the metrics.
+                        </p>
+                      </div>
                     )}
                   </div>
                 )}
               </div>
 
-              {/* Autoresearch — code evolution */}
-              <div className="border-b border-border/40">
-                <button
-                  type="button"
-                  className="w-full flex items-center gap-2 px-4 py-2 hover:bg-muted/30 transition-colors"
-                  onClick={() => setShowAutoresearch(!showAutoresearch)}
-                >
-                  {showAutoresearch ? <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" /> : <ChevronRight className="w-3.5 h-3.5 text-muted-foreground" />}
-                  <FlaskConical className="w-3.5 h-3.5 text-purple-400" />
-                  <span className="text-xs font-medium">Autoresearch</span>
-                  <Badge variant="outline" className="text-[9px] h-4 px-1.5">code evolution</Badge>
-                </button>
-                {showAutoresearch && selectedStrategy && (
-                  <div className="px-4 pb-3 space-y-2">
-                    <p className="text-[10px] text-muted-foreground">
-                      Continuously evolve this strategy's source code using an LLM agent. Each iteration proposes code changes, validates via AST, backtests against market data, and keeps improvements.
-                    </p>
-                    <p className="text-[10px] text-muted-foreground">
-                      Open the <span className="font-medium text-foreground">Bots &rarr; Tune</span> tab, switch mode to <span className="font-medium text-purple-400">Code</span>, and select this strategy to start a code evolution experiment.
-                    </p>
-                    <div className="flex items-center gap-2 text-[10px]">
-                      <span className="text-muted-foreground">Strategy:</span>
-                      <span className="font-mono text-foreground">{selectedStrategy.slug}</span>
-                      <span className="text-muted-foreground">|</span>
-                      <span className="text-muted-foreground">ID:</span>
-                      <span className="font-mono text-foreground/80">{selectedStrategy.id.slice(0, 8)}</span>
-                      <span className="text-muted-foreground">|</span>
-                      <span className="text-muted-foreground">Version:</span>
-                      <span className="font-mono text-foreground">{selectedStrategy.version ?? 1}</span>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* Code editor — takes remaining space */}
-              <div className="flex-1 min-h-0 flex flex-col">
-                <div className="px-4 py-2 flex items-center justify-between shrink-0">
-                  <div className="flex items-center gap-2">
-                    <Code2 className="w-3.5 h-3.5 text-violet-400" />
-                    <span className="text-xs font-medium">Source Code</span>
-                    <span className="text-[10px] text-muted-foreground font-mono">Python</span>
-                  </div>
+              {/* Code editor — takes remaining space when its tab is active. */}
+              {editorTab === 'code' && (
+                <div className="flex-1 min-h-0 flex flex-col">
                   {inferredClassName && (
-                    <span className="text-[10px] font-mono text-muted-foreground">
-                      class {inferredClassName}
-                    </span>
+                    <div className="px-4 py-1.5 flex items-center justify-end shrink-0">
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        class {inferredClassName}
+                      </span>
+                    </div>
                   )}
+                  <div className="flex-1 min-h-0 px-3 pb-2">
+                    <CodeEditor
+                      value={editorCode}
+                      onChange={setEditorCode}
+                      language="python"
+                      className="h-full"
+                      minHeight="100%"
+                      placeholder="Write your strategy source code here..."
+                    />
+                  </div>
                 </div>
-                <div className="flex-1 min-h-0 px-3 pb-2">
-                  <CodeEditor
-                    value={editorCode}
-                    onChange={setEditorCode}
-                    language="python"
-                    className="h-full"
-                    minHeight="100%"
-                    placeholder="Write your strategy source code here..."
-                  />
-                </div>
-              </div>
+              )}
             </div>
           </>
         )}
@@ -2511,14 +3082,6 @@ export default function UnifiedStrategiesManager({
       )}
 
       <StrategyApiDocsFlyout open={showApiDocs} onOpenChange={setShowApiDocs} variant={flyoutVariant} />
-      <StrategyBacktestFlyout
-        open={showBacktest}
-        onOpenChange={setShowBacktest}
-        sourceCode={editorCode}
-        slug={editorSlug || '_backtest_preview'}
-        config={(() => { try { return JSON.parse(editorConfigJson || '{}') } catch { return {} } })()}
-        variant={flyoutVariant}
-      />
     </div>
   )
 }

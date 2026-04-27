@@ -1846,6 +1846,80 @@ export async function stopAutoresearchExperiment(traderId: string): Promise<{ st
   return data
 }
 
+// ── Strategy-scoped autoresearch (code evolution against backtest data plane) ──
+
+export async function getStrategyAutoresearchStatus(strategyId: string): Promise<AutoresearchExperimentStatus> {
+  const { data } = await api.get(`/autoresearch/strategy/${strategyId}/status`)
+  return data
+}
+
+export async function getStrategyAutoresearchHistory(
+  strategyId: string,
+  limit = 50,
+): Promise<{ iterations: AutoresearchIteration[] }> {
+  const { data } = await api.get(`/autoresearch/strategy/${strategyId}/history`, { params: { limit } })
+  return data
+}
+
+export async function stopStrategyAutoresearchExperiment(
+  strategyId: string,
+): Promise<{ stopped: boolean; experiment_id: string | null }> {
+  const { data } = await api.post(`/autoresearch/strategy/${strategyId}/stop`)
+  return data
+}
+
+export function streamStrategyAutoresearchExperiment(
+  strategyId: string,
+  onEvent: (event: ChatStreamEvent) => void,
+  onDone: () => void,
+  onError: (error: string) => void,
+  signal?: AbortSignal,
+  body?: { model?: string; max_iterations?: number; mandate?: string },
+): void {
+  fetch(`/api/autoresearch/strategy/${strategyId}/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+    signal,
+  }).then(response => {
+    if (!response.ok) {
+      response.text().then(text => onError(text || `HTTP ${response.status}`))
+      return
+    }
+    const reader = response.body?.getReader()
+    const decoder = new TextDecoder()
+    if (!reader) { onError('No response body'); return }
+
+    let buffer = ''
+    const read = (): void => {
+      reader.read().then(({ done, value }) => {
+        if (done) { onDone(); return }
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const parsed = JSON.parse(line.slice(6))
+              onEvent({ event: parsed.type, data: parsed.data || {} })
+              if (parsed.type === 'done' || parsed.type === 'error') {
+                onDone()
+                return
+              }
+            } catch { /* skip malformed */ }
+          }
+        }
+        read()
+      }).catch(err => {
+        if (err.name !== 'AbortError') onError(String(err))
+      })
+    }
+    read()
+  }).catch(err => {
+    if (err.name !== 'AbortError') onError(String(err))
+  })
+}
+
 export async function createAbExperimentFromAutoresearch(experimentId: string): Promise<{ ab_experiment_id: string; control_version: number; candidate_version: number; strategy_slug: string }> {
   const { data } = await api.post(`/autoresearch/create-ab-experiment/${experimentId}`)
   return data

@@ -95,6 +95,57 @@ def test_handle_message_parses_payload_list_and_respects_source_priority():
     ]
 
 
+def test_seed_history_from_klines_inserts_and_keeps_chronological_order():
+    """Backfill must merge older klines without breaking later live-tick order."""
+    feed = ChainlinkFeed()
+    now_ms = int(time.time() * 1000)
+
+    # Pre-existing live tick (recent)
+    feed._history["BTC"] = deque([(now_ms - 60_000, 70_500.0)])
+
+    # Backfill 5 older klines (representing minute closes)
+    klines = [
+        (now_ms - 360_000, 70_100.0),
+        (now_ms - 300_000, 70_150.0),
+        (now_ms - 240_000, 70_200.0),
+        (now_ms - 180_000, 70_300.0),
+        (now_ms - 120_000, 70_400.0),
+    ]
+    inserted = feed.seed_history_from_klines("BTC", klines)
+    assert inserted == 5
+
+    history = list(feed._history["BTC"])
+    timestamps = [ts for ts, _ in history]
+    assert timestamps == sorted(timestamps), "Backfilled history must be chronological"
+    assert history[0] == (now_ms - 360_000, 70_100.0)
+    assert history[-1] == (now_ms - 60_000, 70_500.0)
+
+
+def test_seed_history_from_klines_skips_duplicates_and_stale_points():
+    feed = ChainlinkFeed()
+    now_ms = int(time.time() * 1000)
+    feed._history["ETH"] = deque([(now_ms - 30_000, 3_200.0)])
+
+    # Duplicate timestamp + one stale (>3h old) + one new
+    klines = [
+        (now_ms - 30_000, 3_200.5),  # duplicate ts → skipped
+        (now_ms - 4 * 60 * 60 * 1000, 3_100.0),  # 4h old → outside cutoff
+        (now_ms - 90_000, 3_180.0),  # new
+    ]
+    inserted = feed.seed_history_from_klines("ETH", klines)
+    assert inserted == 1
+    assert len(feed._history["ETH"]) == 2
+
+
+def test_seed_history_from_klines_creates_history_for_new_asset():
+    feed = ChainlinkFeed()
+    now_ms = int(time.time() * 1000)
+    inserted = feed.seed_history_from_klines("SOL", [(now_ms - 60_000, 87.5), (now_ms - 30_000, 87.6)])
+    assert inserted == 2
+    assert "SOL" in feed._history
+    assert list(feed._history["SOL"]) == [(now_ms - 60_000, 87.5), (now_ms - 30_000, 87.6)]
+
+
 def test_get_price_at_or_after_time_returns_first_point_within_delay():
     feed = ChainlinkFeed()
     now_s = int(time.time())

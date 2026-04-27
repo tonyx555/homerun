@@ -1555,3 +1555,372 @@ async def run_exit_backtest(
 
     result.total_time_ms = (time.monotonic() - total_start) * 1000
     return result
+
+
+# ---------------------------------------------------------------------------
+# Execution-realistic backtest (services.backtest engine)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExecutionBacktestResult:
+    """Result of an execution-realistic backtest using the production engine."""
+
+    success: bool = False
+    strategy_slug: str = ""
+    strategy_name: str = ""
+    class_name: str = ""
+    initial_capital_usd: float = 0.0
+    start_iso: str = ""
+    end_iso: str = ""
+    n_intents: int = 0
+    n_snapshots: int = 0
+    final_equity_usd: float = 0.0
+    total_return_pct: float = 0.0
+    annualized_return_pct: float = 0.0
+    sharpe: dict[str, Any] = field(default_factory=dict)
+    sortino: dict[str, Any] = field(default_factory=dict)
+    calmar: dict[str, Any] = field(default_factory=dict)
+    max_drawdown_pct: float = 0.0
+    max_drawdown_usd: float = 0.0
+    drawdown_duration_seconds: float = 0.0
+    hit_rate: dict[str, Any] = field(default_factory=dict)
+    profit_factor: dict[str, Any] = field(default_factory=dict)
+    expectancy_usd: dict[str, Any] = field(default_factory=dict)
+    avg_win_usd: float = 0.0
+    avg_loss_usd: float = 0.0
+    trade_count: int = 0
+    fees_paid_usd: float = 0.0
+    fees_per_fill_usd: float = 0.0
+    fees_resolution_usd: float = 0.0
+    total_fills: int = 0
+    rejected_orders: int = 0
+    cancelled_orders: int = 0
+    closed_position_count: int = 0
+    open_position_count: int = 0
+    correlation_pairs: list[dict[str, Any]] = field(default_factory=list)
+    fills_sample: list[dict[str, Any]] = field(default_factory=list)
+    equity_curve_sample: list[dict[str, Any]] = field(default_factory=list)
+    load_time_ms: float = 0.0
+    data_fetch_time_ms: float = 0.0
+    run_time_ms: float = 0.0
+    total_time_ms: float = 0.0
+    validation_errors: list[str] = field(default_factory=list)
+    validation_warnings: list[str] = field(default_factory=list)
+    runtime_error: Optional[str] = None
+    runtime_traceback: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _exec_ci_to_dict(metric: Any) -> dict[str, Any]:
+    return {
+        "value": float(getattr(metric, "value", 0.0) or 0.0),
+        "ci_low": (
+            float(getattr(metric, "ci_low", None))
+            if getattr(metric, "ci_low", None) is not None
+            else None
+        ),
+        "ci_high": (
+            float(getattr(metric, "ci_high", None))
+            if getattr(metric, "ci_high", None) is not None
+            else None
+        ),
+    }
+
+
+async def run_execution_backtest(
+    source_code: str,
+    slug: str = "_backtest_exec",
+    config: Optional[dict[str, Any]] = None,
+    *,
+    token_ids: Optional[list[str]] = None,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    initial_capital_usd: float = 1000.0,
+    max_intents: int = 1000,
+    submit_latency_p50_ms: float = 350.0,
+    submit_latency_p95_ms: float = 900.0,
+    cancel_latency_p50_ms: float = 200.0,
+    cancel_latency_p95_ms: float = 600.0,
+    seed: int = 42,
+    fills_sample_size: int = 200,
+    equity_sample_size: int = 500,
+    bootstrap_resamples: int = 2000,
+) -> ExecutionBacktestResult:
+    """Execution-realistic backtest using full L2 replay + bootstrap CIs.
+
+    Loads the strategy, fetches book snapshots from
+    ``MarketMicrostructureSnapshot``, generates trade intents from
+    historical opportunities, runs the production matching engine, and
+    reports headline + risk-adjusted metrics with bootstrap CIs.
+    """
+    from datetime import timedelta as _td
+    from services.backtest import (
+        BacktestConfig,
+        BacktestEngine,
+        BookReplay,
+        LatencyModel,
+        LatencyProfile,
+        PortfolioConfig,
+        TradeIntent,
+    )
+    from services.backtest.matching_engine import FeeModel
+    from sqlalchemy import select, func as sa_func
+    from models.database import (
+        AsyncSessionLocal,
+        MarketMicrostructureSnapshot,
+        Opportunity,
+    )
+
+    result = ExecutionBacktestResult(
+        strategy_slug=slug,
+        initial_capital_usd=float(initial_capital_usd),
+    )
+    total_start = time.monotonic()
+
+    validation = validate_strategy_source(source_code)
+    result.validation_errors = validation.get("errors", [])
+    result.validation_warnings = validation.get("warnings", [])
+    result.class_name = validation.get("class_name") or ""
+    if not validation["valid"]:
+        result.total_time_ms = (time.monotonic() - total_start) * 1000
+        return result
+
+    loader = StrategyLoader()
+    bt_slug = f"_bt_exec_{slug}_{int(time.time())}"
+    load_start = time.monotonic()
+    try:
+        loaded = loader.load(bt_slug, source_code, config)
+        strategy = loaded.instance
+        result.strategy_name = getattr(strategy, "name", bt_slug)
+    except Exception as e:
+        result.runtime_error = f"Failed to load strategy: {e}"
+        result.runtime_traceback = traceback.format_exc()
+        result.total_time_ms = (time.monotonic() - total_start) * 1000
+        return result
+    finally:
+        result.load_time_ms = (time.monotonic() - load_start) * 1000
+
+    end_dt = end or datetime.now(timezone.utc)
+    start_dt = start or (end_dt - _td(hours=24))
+    if end_dt.tzinfo is None:
+        end_dt = end_dt.replace(tzinfo=timezone.utc)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.replace(tzinfo=timezone.utc)
+    result.start_iso = start_dt.isoformat()
+    result.end_iso = end_dt.isoformat()
+
+    data_start = time.monotonic()
+    intents: list[TradeIntent] = []
+    tokens: list[str] = []
+    try:
+        async with AsyncSessionLocal() as session:
+            tokens = list(token_ids or [])
+            if not tokens:
+                stmt = (
+                    select(
+                        MarketMicrostructureSnapshot.token_id,
+                        sa_func.count(MarketMicrostructureSnapshot.id).label("c"),
+                    )
+                    .where(
+                        MarketMicrostructureSnapshot.observed_at >= start_dt,
+                        MarketMicrostructureSnapshot.observed_at <= end_dt,
+                        MarketMicrostructureSnapshot.snapshot_type == "book",
+                    )
+                    .group_by(MarketMicrostructureSnapshot.token_id)
+                    .order_by(sa_func.count(MarketMicrostructureSnapshot.id).desc())
+                    .limit(5)
+                )
+                rows = (await session.execute(stmt)).all()
+                tokens = [str(r[0]) for r in rows if r[0]]
+
+            if not tokens:
+                result.runtime_error = (
+                    "No microstructure snapshots in the requested window. "
+                    "Pass token_ids explicitly or expand the time range."
+                )
+                result.total_time_ms = (time.monotonic() - total_start) * 1000
+                return result
+
+            try:
+                opp_stmt = (
+                    select(Opportunity)
+                    .where(
+                        Opportunity.detected_at >= start_dt,
+                        Opportunity.detected_at <= end_dt,
+                    )
+                    .order_by(Opportunity.detected_at.asc())
+                    .limit(int(max_intents))
+                )
+                opps = (await session.execute(opp_stmt)).scalars().all()
+            except Exception:
+                opps = []
+
+            for opp in opps or []:
+                positions_to_take = getattr(opp, "positions_to_take", None) or []
+                if not isinstance(positions_to_take, list):
+                    continue
+                for idx, pos in enumerate(positions_to_take):
+                    if not isinstance(pos, dict):
+                        continue
+                    tok = str(pos.get("token_id") or "")
+                    if not tok or tok not in tokens:
+                        continue
+                    detected = getattr(opp, "detected_at", None)
+                    if detected is None:
+                        continue
+                    if detected.tzinfo is None:
+                        detected = detected.replace(tzinfo=timezone.utc)
+                    side = str(pos.get("action") or pos.get("side") or "BUY").upper()
+                    if side not in {"BUY", "SELL"}:
+                        side = "BUY"
+                    price = float(pos.get("price") or 0.5)
+                    size_usd = float(pos.get("notional_usd") or 50.0)
+                    size = size_usd / max(0.01, price)
+                    intents.append(
+                        TradeIntent(
+                            intent_id=f"opp_{opp.id}_{idx}",
+                            emitted_at=detected,
+                            token_id=tok,
+                            side=side,
+                            size=size,
+                            limit_price=price,
+                            tif="IOC",
+                            post_only=False,
+                            strategy_slug=str(getattr(opp, "strategy", "") or slug),
+                            meta={"source": "opportunity", "opportunity_id": str(opp.id)},
+                        )
+                    )
+
+            if not intents and tokens:
+                intents.append(
+                    TradeIntent(
+                        intent_id=f"seed_{tokens[0]}",
+                        emitted_at=start_dt,
+                        token_id=tokens[0],
+                        side="BUY",
+                        size=10.0,
+                        limit_price=0.50,
+                        tif="IOC",
+                        post_only=False,
+                        strategy_slug=slug,
+                        meta={"source": "seed"},
+                    )
+                )
+                result.validation_warnings.append(
+                    "No historical opportunities matched window/tokens; ran a "
+                    "single seed intent."
+                )
+            result.n_intents = len(intents)
+    except Exception as e:
+        result.runtime_error = f"Failed to fetch data: {e}"
+        result.runtime_traceback = traceback.format_exc()
+        result.total_time_ms = (time.monotonic() - total_start) * 1000
+        return result
+    finally:
+        result.data_fetch_time_ms = (time.monotonic() - data_start) * 1000
+
+    engine_config = BacktestConfig(
+        portfolio=PortfolioConfig(initial_capital_usd=float(initial_capital_usd)),
+        latency=LatencyModel(
+            submit=LatencyProfile.from_quantiles(
+                p50_ms=submit_latency_p50_ms, p95_ms=submit_latency_p95_ms
+            ),
+            cancel=LatencyProfile.from_quantiles(
+                p50_ms=cancel_latency_p50_ms, p95_ms=cancel_latency_p95_ms
+            ),
+            seed=seed,
+        ),
+        fees=FeeModel(),
+        seed=seed,
+    )
+    engine = BacktestEngine(config=engine_config, strategy=strategy)
+
+    run_start = time.monotonic()
+    try:
+        async with AsyncSessionLocal() as run_session:
+            replay_for_run = BookReplay(
+                session=run_session,
+                token_ids=tokens,
+                start=start_dt,
+                end=end_dt,
+                snapshot_type="book",
+            )
+            bt_result = await engine.run(book_source=replay_for_run, trade_intents=intents)
+    except Exception as e:
+        result.runtime_error = f"Backtest engine error: {e}"
+        result.runtime_traceback = traceback.format_exc()
+        result.run_time_ms = (time.monotonic() - run_start) * 1000
+        result.total_time_ms = (time.monotonic() - total_start) * 1000
+        return result
+    finally:
+        result.run_time_ms = (time.monotonic() - run_start) * 1000
+
+    m = bt_result.metrics
+    result.success = True
+    result.n_snapshots = int(bt_result.notes.get("snapshots_processed", 0) or 0)
+    result.final_equity_usd = float(bt_result.final_equity_usd)
+    result.total_return_pct = float(m.total_return_pct)
+    result.annualized_return_pct = float(m.annualized_return_pct)
+    result.sharpe = _exec_ci_to_dict(m.sharpe)
+    result.sortino = _exec_ci_to_dict(m.sortino)
+    result.calmar = _exec_ci_to_dict(m.calmar)
+    result.max_drawdown_pct = float(m.max_drawdown_pct)
+    result.max_drawdown_usd = float(m.max_drawdown_usd)
+    result.drawdown_duration_seconds = float(m.drawdown_duration_seconds)
+    result.hit_rate = _exec_ci_to_dict(m.hit_rate)
+    result.profit_factor = _exec_ci_to_dict(m.profit_factor)
+    result.expectancy_usd = _exec_ci_to_dict(m.expectancy_usd)
+    result.avg_win_usd = float(m.avg_win_usd)
+    result.avg_loss_usd = float(m.avg_loss_usd)
+    result.trade_count = int(m.trade_count)
+    result.fees_paid_usd = float(m.fees_paid_usd)
+    result.fees_per_fill_usd = float(getattr(bt_result, "fees_per_fill_usd", 0.0) or 0.0)
+    result.fees_resolution_usd = float(getattr(bt_result, "fees_resolution_usd", 0.0) or 0.0)
+    result.total_fills = int(bt_result.total_fills)
+    result.rejected_orders = int(bt_result.rejected_orders)
+    result.cancelled_orders = int(bt_result.cancelled_orders)
+    result.closed_position_count = int(bt_result.closed_position_count)
+    result.open_position_count = int(bt_result.open_position_count)
+    result.correlation_pairs = [
+        {"token_a": a, "token_b": b, "correlation": rho}
+        for (a, b), rho in (bt_result.correlation_matrix or {}).items()
+    ]
+
+    fills = list(bt_result.fills or [])
+    if fills_sample_size and len(fills) > fills_sample_size:
+        head = fills[:50]
+        tail = fills[-max(0, fills_sample_size - 50) :]
+        fills = head + tail
+    result.fills_sample = [
+        {
+            "order_id": f.order_id,
+            "token_id": f.token_id,
+            "side": f.side,
+            "price": float(f.price),
+            "size": float(f.size),
+            "fee_usd": float(f.fee_usd),
+            "occurred_at": f.occurred_at.isoformat(),
+            "fill_index": int(f.fill_index),
+            "is_maker": bool((f.notes or {}).get("maker", False)),
+        }
+        for f in fills
+    ]
+
+    eq = list(bt_result.equity_history or [])
+    if equity_sample_size and len(eq) > equity_sample_size:
+        step = max(1, len(eq) // equity_sample_size)
+        eq = eq[::step]
+    result.equity_curve_sample = [
+        {"at": ts.isoformat(), "equity_usd": float(value)} for ts, value in eq
+    ]
+
+    try:
+        loader.unload(bt_slug)
+    except Exception:
+        pass
+
+    result.total_time_ms = (time.monotonic() - total_start) * 1000
+    return result

@@ -4484,6 +4484,16 @@ async def _run_trader_once(
         )
         control_settings = dict(control.get("settings") or {})
         global_runtime_settings = dict(control_settings.get("global_runtime") or {})
+        # Fetch the demoted-strategy set once per cycle. Signals from a
+        # demoted strategy short-circuit at the first decision gate and
+        # never reach evaluate/order placement. The set comes from
+        # ``StrategyValidationProfile.status``, populated either by the
+        # auto-demotion guardrail or a manual operator override.
+        try:
+            from services.validation_service import validation_service as _validation_service
+            demoted_strategy_types = await _validation_service.get_demoted_strategy_types()
+        except Exception:
+            demoted_strategy_types = set()
         pending_live_exit_guard_settings = dict(global_runtime_settings.get("pending_live_exit_guard") or {})
         pending_live_exit_max_allowed = max(
             0,
@@ -6404,6 +6414,7 @@ async def _run_trader_once(
                             strategy_params=strategy_params,
                             global_runtime=global_runtime_settings,
                             execution_mode=run_mode,
+                            demoted_strategy_types=demoted_strategy_types,
                         )
                     final_decision = gate_result["final_decision"]
                     final_reason = gate_result["final_reason"]

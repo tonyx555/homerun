@@ -26,8 +26,9 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-RECONNECT_BASE_MS = 500
+RECONNECT_BASE_MS = 200
 RECONNECT_MAX_MS = 30_000
+RECONNECT_AFTER_STALE_MS = 200
 
 _BINANCE_SYMBOL_MAP = {
     "btcusdt": "BTC",
@@ -35,6 +36,13 @@ _BINANCE_SYMBOL_MAP = {
     "solusdt": "SOL",
     "xrpusdt": "XRP",
 }
+
+
+def _stale_data_timeout_s() -> float:
+    raw = float(getattr(settings, "BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS", 3.0) or 3.0)
+    # Floor at 0.5s to avoid pathologically short windows that would
+    # treat any normal tick gap as "stale" and reconnect-storm.
+    return max(0.5, raw)
 
 
 class BinanceFeed:
@@ -59,6 +67,11 @@ class BinanceFeed:
         self._stopped = False
         self._on_update: Optional[Callable] = None
         self._last_update_ms: int = 0
+        # Per-asset last-message timestamp so we can spot one stream
+        # going silent while the others tick (e.g. wrong URL format
+        # silently subscribing to only the first symbol).
+        self._last_update_ms_by_asset: dict[str, int] = {}
+        self._message_count_by_asset: dict[str, int] = {}
 
     @property
     def started(self) -> bool:
@@ -67,6 +80,23 @@ class BinanceFeed:
     @property
     def last_update_ms(self) -> int:
         return self._last_update_ms
+
+    def get_per_asset_status(self) -> dict[str, dict[str, int]]:
+        """Snapshot of per-asset last-update + message count.
+
+        Diagnostic only — used by status endpoints / tests to verify
+        each subscribed stream is delivering, not just whichever symbol
+        Binance picked off the URL.
+        """
+        now_ms = int(time.time() * 1000)
+        out: dict[str, dict[str, int]] = {}
+        for asset, last_ms in self._last_update_ms_by_asset.items():
+            out[asset] = {
+                "last_update_ms": int(last_ms),
+                "age_ms": int(now_ms - last_ms) if last_ms > 0 else -1,
+                "message_count": int(self._message_count_by_asset.get(asset, 0)),
+            }
+        return out
 
     def on_update(self, callback: Callable) -> None:
         """Register a callback for price updates.
@@ -94,10 +124,27 @@ class BinanceFeed:
         logger.info("BinanceFeed: stopped")
 
     async def _run_loop(self) -> None:
-        """Reconnecting WebSocket loop with exponential backoff."""
+        """Reconnecting WebSocket loop with exponential backoff.
+
+        Two liveness layers:
+          * ``ping_interval`` / ``ping_timeout`` keep the TCP connection
+            healthy at the protocol level.
+          * Per-message ``wait_for(recv, timeout=stale)`` detects when
+            Binance silently stops streaming even though pings still
+            answer (their edge has been observed to do this during
+            failover events).  On stale-timeout we tear the socket down
+            and reconnect immediately — exponential backoff is reserved
+            for true connection failures.
+
+        Backoff resets on the first *message* received (not on connect)
+        so a "false-success" socket that closes before delivering data
+        keeps growing the backoff instead of resetting it.
+        """
         reconnect_ms = RECONNECT_BASE_MS
 
         while not self._stopped:
+            stale_reconnect = False
+            received_any = False
             try:
                 async with websockets.connect(
                     self._ws_url,
@@ -105,12 +152,22 @@ class BinanceFeed:
                     ping_timeout=10,
                     close_timeout=5,
                 ) as ws:
-                    reconnect_ms = RECONNECT_BASE_MS
                     logger.info("BinanceFeed: connected to bookTicker stream")
-
-                    async for raw in ws:
-                        if self._stopped:
+                    stale_timeout = _stale_data_timeout_s()
+                    while not self._stopped:
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=stale_timeout)
+                        except asyncio.TimeoutError:
+                            logger.warning(
+                                "BinanceFeed: no bookTicker data for %.1fs — forcing reconnect (per-asset: %s)",
+                                stale_timeout,
+                                self.get_per_asset_status(),
+                            )
+                            stale_reconnect = True
                             break
+                        if not received_any:
+                            received_any = True
+                            reconnect_ms = RECONNECT_BASE_MS
                         self._handle_message(raw)
 
             except asyncio.CancelledError:
@@ -119,8 +176,23 @@ class BinanceFeed:
                 if self._stopped:
                     break
                 logger.debug("BinanceFeed: connection error: %s", e)
-                await asyncio.sleep(reconnect_ms / 1000.0)
+
+            if self._stopped:
+                break
+
+            if stale_reconnect:
+                # Connection was healthy enough to accept us — only the
+                # data feed went silent.  Reconnect promptly without
+                # exponential penalty and reset the backoff window.
+                reconnect_ms = RECONNECT_BASE_MS
+                await asyncio.sleep(RECONNECT_AFTER_STALE_MS / 1000.0)
+                continue
+
+            await asyncio.sleep(reconnect_ms / 1000.0)
+            if not received_any:
                 reconnect_ms = min(int(reconnect_ms * 1.5), RECONNECT_MAX_MS)
+            else:
+                reconnect_ms = RECONNECT_BASE_MS
 
     def _handle_message(self, raw: str | bytes) -> None:
         """Parse a Binance bookTicker message and fire callback."""
@@ -158,6 +230,8 @@ class BinanceFeed:
         mid = (bid + ask) / 2.0
         now_ms = int(time.time() * 1000)
         self._last_update_ms = now_ms
+        self._last_update_ms_by_asset[asset] = now_ms
+        self._message_count_by_asset[asset] = self._message_count_by_asset.get(asset, 0) + 1
 
         if self._on_update:
             try:

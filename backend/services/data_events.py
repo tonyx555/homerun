@@ -213,3 +213,9 @@ class BlockReason:
 
     DEDUPLICATION = "deduplication"
     """Duplicate signal collapsed with a higher-priority one."""
+
+    STRATEGY_DEMOTED = "strategy_demoted"
+    """Strategy is parked under the validation guardrail (manual override
+    or auto-demoted on accuracy/MAE thresholds). Signals are still
+    recorded but not acted on. Override via the orchestrator's strategy
+    health panel or the Strategies → Health subtab."""

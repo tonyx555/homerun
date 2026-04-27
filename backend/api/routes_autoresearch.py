@@ -139,6 +139,89 @@ async def stop_autoresearch_experiment(trader_id: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Strategy-scoped routes — code evolution against the backtest data plane.
+# These mirror the trader-scoped status/history/stream/stop endpoints but
+# don't require a bot context. Code experiments operate on the strategy's
+# source code only and the kept versions land on the Strategy record.
+# ---------------------------------------------------------------------------
+
+
+class StrategyAutoresearchStartRequest(BaseModel):
+    model: Optional[str] = None
+    max_iterations: Optional[int] = Field(default=None, ge=1, le=500)
+    mandate: Optional[str] = None
+
+
+@router.get("/strategy/{strategy_id}/status")
+async def get_strategy_autoresearch_status(strategy_id: str) -> dict:
+    """Latest code-evolution experiment status for a strategy."""
+    from services.autoresearch_service import autoresearch_service
+    return await autoresearch_service.get_strategy_experiment_status(strategy_id)
+
+
+@router.get("/strategy/{strategy_id}/history")
+async def get_strategy_autoresearch_history(
+    strategy_id: str,
+    experiment_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict:
+    """Iteration log for a strategy's code-evolution experiment."""
+    from services.autoresearch_service import autoresearch_service
+    iterations = await autoresearch_service.get_strategy_experiment_history(
+        strategy_id, experiment_id=experiment_id, limit=limit
+    )
+    return {"iterations": iterations}
+
+
+@router.post("/strategy/{strategy_id}/stream")
+async def stream_strategy_autoresearch_experiment(
+    strategy_id: str,
+    request: Optional[StrategyAutoresearchStartRequest] = None,
+):
+    """Start a strategy-scoped code-evolution experiment with SSE.
+
+    No trader/bot is involved — the experiment evolves the strategy's
+    source code against the backtest data plane, validates with AST,
+    and persists kept versions on the Strategy record.
+    """
+    from services.autoresearch_service import autoresearch_service
+
+    settings_override: dict = {}
+    if request:
+        if request.model is not None:
+            settings_override["model"] = request.model
+        if request.max_iterations is not None:
+            settings_override["max_iterations"] = request.max_iterations
+        if request.mandate is not None:
+            settings_override["mandate"] = request.mandate
+
+    async def event_stream():
+        try:
+            async for event_dict in autoresearch_service.run_code_evolution_stream(
+                trader_id=None,
+                strategy_id=strategy_id,
+                settings_override=settings_override or None,
+            ):
+                event_type = event_dict.get("event", "progress")
+                data = event_dict.get("data", {})
+                payload = json.dumps({"type": event_type, "data": data}, default=str)
+                yield f"event: {event_type}\ndata: {payload}\n\n"
+        except Exception as exc:
+            logger.exception("Strategy autoresearch stream error: %s", exc)
+            error_payload = json.dumps({"type": "error", "data": {"error": str(exc)}})
+            yield f"event: error\ndata: {error_payload}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/strategy/{strategy_id}/stop")
+async def stop_strategy_autoresearch_experiment(strategy_id: str) -> dict:
+    """Stop a running strategy-scoped code experiment."""
+    from services.autoresearch_service import autoresearch_service
+    return await autoresearch_service.stop_strategy_experiment(strategy_id)
+
+
+# ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
 

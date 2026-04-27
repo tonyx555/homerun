@@ -326,6 +326,11 @@ class ReferenceRuntime:
                     if last_binance_ms > 0
                     else None
                 ),
+                "per_asset": (
+                    self._binance_feed.get_per_asset_status()
+                    if hasattr(self._binance_feed, "get_per_asset_status")
+                    else {}
+                ),
             },
         }
 

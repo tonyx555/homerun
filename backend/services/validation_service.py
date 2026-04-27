@@ -1177,6 +1177,11 @@ class ValidationService:
                     "terminal": 0,
                     "notional_total_usd": 0.0,
                     "realized_pnl_total": 0.0,
+                    # Per-mode split so the frontend can present "real
+                    # venue trades" separately from "simulated/shadow
+                    # paper trades". Both lenses live in the same dict
+                    # under ``modes`` -> { live: {...}, shadow: {...} }.
+                    "modes": {},
                 },
             )
             strategy_row["total"] += 1
@@ -1187,6 +1192,29 @@ class ValidationService:
             strategy_row["terminal"] += int(is_terminal)
             strategy_row["notional_total_usd"] += notional_value
             strategy_row["realized_pnl_total"] += pnl_value
+
+            mode_bucket = strategy_row["modes"].setdefault(
+                mode_key,
+                {
+                    "mode": mode_key,
+                    "total": 0,
+                    "failed": 0,
+                    "executed_or_open": 0,
+                    "closed": 0,
+                    "resolved": 0,
+                    "terminal": 0,
+                    "notional_total_usd": 0.0,
+                    "realized_pnl_total": 0.0,
+                },
+            )
+            mode_bucket["total"] += 1
+            mode_bucket["failed"] += int(is_failed)
+            mode_bucket["executed_or_open"] += int(is_executed_or_open)
+            mode_bucket["closed"] += int(is_closed)
+            mode_bucket["resolved"] += int(is_resolved)
+            mode_bucket["terminal"] += int(is_terminal)
+            mode_bucket["notional_total_usd"] += notional_value
+            mode_bucket["realized_pnl_total"] += pnl_value
 
             signal_key = str(signal_id or "").strip()
             direction_key = str(direction or "").strip().lower()

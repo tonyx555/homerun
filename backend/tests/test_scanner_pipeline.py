@@ -1487,6 +1487,38 @@ class TestSharedPriceHistoryAttach:
         assert len(opp.markets[0]["price_history"]) == 2
 
     @pytest.mark.asyncio
+    async def test_attach_price_history_to_markets_uses_shared_backfill(self):
+        """The flat-markets entry point reuses the same backfill plumbing."""
+        scanner = _build_scanner(strategies=[])
+        yes_token = "123456789012345678901"
+        no_token = "123456789012345678902"
+        markets = [
+            {
+                "id": "m_crypto_1",
+                "platform": "polymarket",
+                "clob_token_ids": [yes_token, no_token],
+                "yes_price": 0.45,
+                "no_price": 0.55,
+            }
+        ]
+
+        scanner._backfill_market_history_for_opportunities = AsyncMock(return_value=None)
+        scanner.get_market_history_for_opportunities = MagicMock(
+            return_value={
+                "m_crypto_1": [
+                    {"t": 1.0, "yes": 0.41, "no": 0.59},
+                    {"t": 2.0, "yes": 0.43, "no": 0.57},
+                ]
+            }
+        )
+
+        attached = await scanner.attach_price_history_to_markets(markets, timeout_seconds=None)
+
+        assert attached == 1
+        assert markets[0]["price_history"][0]["yes"] == 0.41
+        assert len(markets[0]["price_history"]) == 2
+
+    @pytest.mark.asyncio
     async def test_attach_price_history_uses_market_id_aliases(self):
         scanner = _build_scanner(strategies=[])
         scanner._market_price_history = {

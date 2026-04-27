@@ -651,12 +651,20 @@ class AutoresearchService:
 
     async def stop_experiment(self, trader_id: str) -> dict[str, Any]:
         """Signal a running experiment to stop."""
-        stop_event = self._stop_flags.get(trader_id)
+        return await self._stop_session(trader_id)
+
+    async def _stop_session(self, session_key: str) -> dict[str, Any]:
+        """Stop the experiment registered under ``session_key``.
+
+        ``session_key`` is either a trader id (legacy bot-scoped path)
+        or ``strategy:<id>`` (new strategy-scoped path). Both forms
+        resolve to the same active-experiment + stop-flag dictionaries.
+        """
+        stop_event = self._stop_flags.get(session_key)
         if stop_event:
             stop_event.set()
 
-        # Also mark the DB row as paused
-        exp_id = self._active_experiments.pop(trader_id, None)
+        exp_id = self._active_experiments.pop(session_key, None)
         if exp_id:
             async with AsyncSessionLocal() as session:
                 await session.execute(
@@ -666,8 +674,120 @@ class AutoresearchService:
                 )
                 await session.commit()
 
-        self._stop_flags.pop(trader_id, None)
+        self._stop_flags.pop(session_key, None)
         return {"stopped": True, "experiment_id": exp_id}
+
+    # ── Strategy-scoped helpers ────────────────────────────────────────
+    # These mirror the trader-scoped status/history/list/stop methods
+    # but key off ``strategy_id`` instead. Code experiments live here
+    # because they evolve a strategy's source against the backtest data
+    # plane and don't need a bot context at all.
+
+    async def get_strategy_experiment_status(self, strategy_id: str) -> dict[str, Any]:
+        """Get the latest experiment status for a strategy (code-only)."""
+        session_key = f"strategy:{strategy_id}"
+        async with AsyncSessionLocal() as session:
+            row = (
+                await session.execute(
+                    select(AutoresearchExperiment)
+                    .where(
+                        AutoresearchExperiment.strategy_id == strategy_id,
+                        AutoresearchExperiment.mode == "code",
+                    )
+                    .order_by(desc(AutoresearchExperiment.created_at))
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+        if row is None:
+            return {
+                "experiment_id": None,
+                "strategy_id": strategy_id,
+                "status": "idle",
+                "mode": "code",
+                "iteration_count": 0,
+                "best_score": 0.0,
+                "baseline_score": 0.0,
+                "kept_count": 0,
+                "reverted_count": 0,
+                "started_at": None,
+                "name": None,
+            }
+
+        return {
+            "experiment_id": row.id,
+            "strategy_id": row.strategy_id,
+            "trader_id": row.trader_id,
+            "name": row.name,
+            "status": "running" if session_key in self._active_experiments else row.status,
+            "mode": getattr(row, "mode", "code") or "code",
+            "best_version": getattr(row, "best_version", None),
+            "iteration_count": row.iteration_count,
+            "best_score": row.best_score,
+            "baseline_score": row.baseline_score,
+            "kept_count": row.kept_count,
+            "reverted_count": row.reverted_count,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+            "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+            "settings": row.settings_json,
+        }
+
+    async def get_strategy_experiment_history(
+        self,
+        strategy_id: str,
+        experiment_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Iteration log rows for a strategy's code experiment."""
+        async with AsyncSessionLocal() as session:
+            if experiment_id:
+                exp_id = experiment_id
+            else:
+                exp_row = (
+                    await session.execute(
+                        select(AutoresearchExperiment)
+                        .where(
+                            AutoresearchExperiment.strategy_id == strategy_id,
+                            AutoresearchExperiment.mode == "code",
+                        )
+                        .order_by(desc(AutoresearchExperiment.created_at))
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if exp_row is None:
+                    return []
+                exp_id = exp_row.id
+
+            rows = (
+                await session.execute(
+                    select(AutoresearchIteration)
+                    .where(AutoresearchIteration.experiment_id == exp_id)
+                    .order_by(desc(AutoresearchIteration.iteration_number))
+                    .limit(limit)
+                )
+            ).scalars().all()
+
+        return [
+            {
+                "iteration_number": r.iteration_number,
+                "decision": r.decision,
+                "new_score": r.new_score,
+                "score_delta": r.score_delta,
+                "duration_seconds": r.duration_seconds,
+                "reasoning": r.reasoning,
+                "changed_params": r.changed_params_json,
+                "validation_passed": r.validation_passed,
+                "validation_result": r.validation_result_json,
+                "backtest_result": r.backtest_result_json,
+                "source_diff": r.source_diff,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+
+    async def stop_strategy_experiment(self, strategy_id: str) -> dict[str, Any]:
+        """Stop the strategy-scoped code experiment, if any."""
+        return await self._stop_session(f"strategy:{strategy_id}")
 
     # ------------------------------------------------------------------
     # Core autoresearch loop (async generator for SSE streaming)
@@ -1069,18 +1189,31 @@ class AutoresearchService:
 
     async def run_code_evolution_stream(
         self,
-        trader_id: str,
+        trader_id: str | None,
         strategy_id: str,
         settings_override: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """Run strategy code evolution loop, yielding SSE events."""
+        """Run strategy code evolution loop, yielding SSE events.
+
+        ``trader_id`` is optional. When omitted, the experiment is
+        strategy-scoped — it operates purely on the backtest data plane
+        and the active-experiments lock is keyed by ``strategy:<id>``
+        instead of the trader id. Trader-scoped runs preserve legacy
+        behavior so the existing per-bot Tune flows are unaffected.
+        """
         from services.strategy_backtester import run_strategy_backtest
         from services.strategy_loader import validate_strategy_source, ALLOWED_IMPORT_PREFIXES
         from services.strategy_versioning import create_strategy_version_snapshot
         from services.strategy_runtime import bump_strategy_runtime_revisions
 
-        if trader_id in self._active_experiments:
-            yield {"event": "error", "data": {"error": "An experiment is already running for this trader"}}
+        # Session key — either the trader id (legacy) or a strategy
+        # pseudo-key (new path). Used for the active-experiments and
+        # stop-flag dictionaries.
+        session_key = trader_id or f"strategy:{strategy_id}"
+
+        if session_key in self._active_experiments:
+            scope = "trader" if trader_id else "strategy"
+            yield {"event": "error", "data": {"error": f"An experiment is already running for this {scope}"}}
             return
 
         settings = await load_autoresearch_settings()
@@ -1111,12 +1244,14 @@ class AutoresearchService:
             yield {"event": "error", "data": {"error": "Strategy has no source code"}}
             return
 
-        # Validate trader
-        async with AsyncSessionLocal() as session:
-            trader_row = await session.get(Trader, trader_id)
-            if trader_row is None:
-                yield {"event": "error", "data": {"error": f"Trader '{trader_id}' not found"}}
-                return
+        # Validate trader if provided (legacy bot-scoped path).
+        # Strategy-scoped runs skip this entirely.
+        if trader_id is not None:
+            async with AsyncSessionLocal() as session:
+                trader_row = await session.get(Trader, trader_id)
+                if trader_row is None:
+                    yield {"event": "error", "data": {"error": f"Trader '{trader_id}' not found"}}
+                    return
 
         # Baseline backtest
         try:
@@ -1151,9 +1286,9 @@ class AutoresearchService:
             ))
             await session.commit()
 
-        self._active_experiments[trader_id] = experiment_id
+        self._active_experiments[session_key] = experiment_id
         stop_event = asyncio.Event()
-        self._stop_flags[trader_id] = stop_event
+        self._stop_flags[session_key] = stop_event
 
         yield {
             "event": "experiment_start",
@@ -1165,6 +1300,7 @@ class AutoresearchService:
                 "baseline_score": baseline_score,
                 "baseline_version": baseline_version_num,
                 "max_iterations": max_iterations,
+                "scope": "trader" if trader_id else "strategy",
             },
         }
 
@@ -1188,10 +1324,14 @@ class AutoresearchService:
                     "data": {"iteration": iteration_num, "total": max_iterations, "baseline_score": best_score},
                 }
 
-                # Build context
+                # Build context. Strategy-scoped runs have no trader, so
+                # we skip the per-bot context fetch.
                 try:
-                    trader_context = await _tool_get_trader_context({"trader_id": trader_id})
-                    trader_summary = _summarize_trader_context(trader_context)
+                    if trader_id:
+                        trader_context = await _tool_get_trader_context({"trader_id": trader_id})
+                        trader_summary = _summarize_trader_context(trader_context)
+                    else:
+                        trader_summary = {}
                 except Exception:
                     trader_summary = {}
 
@@ -1431,8 +1571,8 @@ class AutoresearchService:
                     .values(status=final_status, finished_at=utcnow(), updated_at=utcnow())
                 )
                 await session.commit()
-            self._active_experiments.pop(trader_id, None)
-            self._stop_flags.pop(trader_id, None)
+            self._active_experiments.pop(session_key, None)
+            self._stop_flags.pop(session_key, None)
 
         yield {
             "event": "done",
@@ -1518,8 +1658,16 @@ def _code_evolution_score(result) -> float:
 _code_proposal_store: dict[str, dict] = {}
 
 
-def _build_code_evolution_tools(trader_id: str, experiment_id: str, strategy_id: str) -> list[AgentTool]:
-    """Build tool set for the code evolution proposal agent."""
+def _build_code_evolution_tools(
+    trader_id: str | None, experiment_id: str, strategy_id: str
+) -> list[AgentTool]:
+    """Build tool set for the code evolution proposal agent.
+
+    ``trader_id`` is optional — strategy-scoped code experiments don't
+    have a bot context. The tools defined here only consult the strategy
+    and the iteration history, never the trader, so passing ``None`` is
+    safe.
+    """
 
     async def _get_strategy_source(_args: dict) -> dict:
         async with AsyncSessionLocal() as session:

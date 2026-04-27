@@ -71,6 +71,21 @@ interface AutoresearchViewProps {
   tuneSaveError: string | null
   tuneRevertError: string | null
   formatTimestamp: (iso: string) => string
+  /**
+   * Pin the view to a specific subtab. When provided, the in-component
+   * Parameters/Autoresearch toggle is hidden — TradingPanel keeps both
+   * (omits this prop) so users can switch between the manual Parameter
+   * Workspace and the params-mode autoresearcher; Strategies → Research
+   * pins to "autoresearch" (no manual workspace there — that's per-bot).
+   */
+  forceTopTab?: 'parameters' | 'autoresearch'
+  /**
+   * Pin the autoresearcher's inner Parameters/Code toggle to one mode.
+   * The Tune tab pins to "params" because the autoresearcher there
+   * adjusts the same live bot parameters a human can edit. The Research
+   * subview pins to "code" because that's where strategy source
+   * evolution belongs (alongside the backtest suite).
+   */
   forceArMode?: 'params' | 'code'
 }
 
@@ -108,16 +123,32 @@ export default function AutoresearchView({
   tuneSaveError,
   tuneRevertError,
   formatTimestamp,
+  forceTopTab,
   forceArMode,
 }: AutoresearchViewProps) {
   const queryClient = useQueryClient()
   const abortRef = useRef<AbortController | null>(null)
 
-  // Top-level subtab: "parameters" or "autoresearch"
-  const [topTab, setTopTab] = useState<'parameters' | 'autoresearch'>('parameters')
+  // Top-level subtab: "parameters" or "autoresearch".
+  // ``forceTopTab`` (when provided by the caller) hides the toggle and
+  // pins the view to one half — used to physically separate the live
+  // parameter editor (TradingPanel/Tune) from the autoresearcher
+  // (Strategies/Research).
+  const [topTab, setTopTab] = useState<'parameters' | 'autoresearch'>(forceTopTab || 'parameters')
+  useEffect(() => {
+    if (forceTopTab && forceTopTab !== topTab) {
+      setTopTab(forceTopTab)
+    }
+  }, [forceTopTab, topTab])
 
-  // Autoresearch inner mode: "params" or "code"
-  const [arMode, setArMode] = useState<'params' | 'code'>(forceArMode ?? 'params')
+  // Autoresearch inner mode: "params" or "code".
+  // ``forceArMode`` (when set) hides the inner toggle and pins the mode.
+  const [arMode, setArMode] = useState<'params' | 'code'>(forceArMode || 'params')
+  useEffect(() => {
+    if (forceArMode && forceArMode !== arMode) {
+      setArMode(forceArMode)
+    }
+  }, [forceArMode, arMode])
 
   // Streaming state — streamingMode tracks which mode started the experiment
   const [isStreaming, setIsStreaming] = useState(false)
@@ -371,31 +402,36 @@ export default function AutoresearchView({
   return (
     <div className="h-full min-h-0 overflow-hidden px-1">
       <div className="h-full min-h-0 flex flex-col rounded-md border border-border/50 bg-muted/10">
-        {/* ===== Top-level subtabs: Parameters | Autoresearch ===== */}
-        <div className="shrink-0 flex items-center gap-0.5 border-b border-border/50 px-2 pt-1">
-          <button
-            onClick={() => setTopTab('parameters')}
-            className={cn(
-              'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium border-b-2 -mb-px transition-colors',
-              topTab === 'parameters'
-                ? 'border-cyan-500 text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            )}
-          >
-            <SlidersHorizontal className="w-3 h-3" /> Parameters
-          </button>
-          <button
-            onClick={() => setTopTab('autoresearch')}
-            className={cn(
-              'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium border-b-2 -mb-px transition-colors',
-              topTab === 'autoresearch'
-                ? 'border-purple-500 text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            )}
-          >
-            <FlaskConical className="w-3 h-3" /> Autoresearch
-          </button>
-        </div>
+        {/* ===== Top-level subtabs: Parameters | Autoresearch =====
+            Hidden when ``forceTopTab`` is set so callers can pin the view
+            to a single subtab (TradingPanel/Tune → parameters,
+            Strategies/Research → autoresearch). */}
+        {!forceTopTab && (
+          <div className="shrink-0 flex items-center gap-0.5 border-b border-border/50 px-2 pt-1">
+            <button
+              onClick={() => setTopTab('parameters')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium border-b-2 -mb-px transition-colors',
+                topTab === 'parameters'
+                  ? 'border-cyan-500 text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              )}
+            >
+              <SlidersHorizontal className="w-3 h-3" /> Parameters
+            </button>
+            <button
+              onClick={() => setTopTab('autoresearch')}
+              className={cn(
+                'flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium border-b-2 -mb-px transition-colors',
+                topTab === 'autoresearch'
+                  ? 'border-purple-500 text-foreground'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              )}
+            >
+              <FlaskConical className="w-3 h-3" /> Autoresearch
+            </button>
+          </div>
+        )}
 
         {/* ===== Parameters subtab ===== */}
         {topTab === 'parameters' && (
@@ -491,28 +527,45 @@ export default function AutoresearchView({
         {/* ===== Autoresearch subtab ===== */}
         {topTab === 'autoresearch' && (
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-            {/* Inner mode tabs: Params | Code */}
+            {/* Inner mode tabs: Params | Code.
+                Hidden when ``forceArMode`` pins the mode externally. */}
             <div className="shrink-0 flex items-center justify-between gap-2 border-b border-border/40 px-3 py-1.5">
-              <div className="flex items-center gap-1 rounded-md border border-border/60 bg-background p-0.5">
-                <button
-                  onClick={() => setArMode('params')}
-                  className={cn(
-                    'flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-medium transition-colors',
-                    arMode === 'params' ? 'bg-cyan-500/20 text-cyan-400' : 'text-muted-foreground hover:text-foreground'
+              {forceArMode ? (
+                <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                  {forceArMode === 'params' ? (
+                    <>
+                      <SlidersHorizontal className="w-3 h-3 text-cyan-400" />
+                      <span>Parameter experimenter — operates on this bot's live strategy params.</span>
+                    </>
+                  ) : (
+                    <>
+                      <Code2 className="w-3 h-3 text-purple-400" />
+                      <span>Code experimenter — evolves strategy source against the backtest data plane.</span>
+                    </>
                   )}
-                >
-                  <SlidersHorizontal className="w-3 h-3" /> Parameters
-                </button>
-                <button
-                  onClick={() => setArMode('code')}
-                  className={cn(
-                    'flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-medium transition-colors',
-                    arMode === 'code' ? 'bg-purple-500/20 text-purple-400' : 'text-muted-foreground hover:text-foreground'
-                  )}
-                >
-                  <Code2 className="w-3 h-3" /> Code
-                </button>
-              </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 rounded-md border border-border/60 bg-background p-0.5">
+                  <button
+                    onClick={() => setArMode('params')}
+                    className={cn(
+                      'flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-medium transition-colors',
+                      arMode === 'params' ? 'bg-cyan-500/20 text-cyan-400' : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <SlidersHorizontal className="w-3 h-3" /> Parameters
+                  </button>
+                  <button
+                    onClick={() => setArMode('code')}
+                    className={cn(
+                      'flex items-center gap-1 rounded px-2.5 py-1 text-[10px] font-medium transition-colors',
+                      arMode === 'code' ? 'bg-purple-500/20 text-purple-400' : 'text-muted-foreground hover:text-foreground'
+                    )}
+                  >
+                    <Code2 className="w-3 h-3" /> Code
+                  </button>
+                </div>
+              )}
 
               {/* Strategy from trader's source_configs (code mode only) */}
               {arMode === 'code' && traderStrategies.length > 0 && (

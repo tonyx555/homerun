@@ -1,8 +1,10 @@
-import { useState } from 'react'
-import { Brain, Layers3 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Brain, Layers3, Shield, Sparkles } from 'lucide-react'
 import { cn } from '../lib/utils'
 import UnifiedStrategiesManager from './UnifiedStrategiesManager'
 import MLModelsPanel from './MLModelsPanel'
+import AutoresearchPanel from './AutoresearchPanel'
+import ValidationPanel from './ValidationPanel'
 
 type StrategiesPanelProps = {
   initialSourceFilter?: string | null
@@ -16,7 +18,7 @@ type StrategiesPanelProps = {
   }) => void
 }
 
-type ViewMode = 'strategies' | 'ml-models'
+type ViewMode = 'strategies' | 'ml-models' | 'research' | 'validation'
 
 export default function StrategiesPanel({
   initialSourceFilter,
@@ -24,6 +26,31 @@ export default function StrategiesPanel({
   onOpenCopilot,
 }: StrategiesPanelProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('strategies')
+
+  // Honor a "Research" deep-link from the strategy editor's Research button.
+  // The button stashes ``homerun:research:open`` plus the strategy slug;
+  // we land on the Research subview here, the AutoresearchPanel reads the
+  // strategy slug to preselect a matching bot.
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem('homerun:research:open') === '1') {
+        sessionStorage.removeItem('homerun:research:open')
+        setViewMode('research')
+      }
+    } catch {
+      // ignore — sessionStorage unavailable in some contexts
+    }
+    const handleOpenResearch = () => {
+      try {
+        sessionStorage.removeItem('homerun:research:open')
+      } catch {
+        // ignore
+      }
+      setViewMode('research')
+    }
+    window.addEventListener('homerun:research:open', handleOpenResearch)
+    return () => window.removeEventListener('homerun:research:open', handleOpenResearch)
+  }, [])
 
   return (
     <div className="h-full min-h-0 flex flex-col">
@@ -42,6 +69,18 @@ export default function StrategiesPanel({
           Strategies
         </button>
         <button
+          onClick={() => setViewMode('research')}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
+            viewMode === 'research'
+              ? 'bg-accent text-accent-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+          )}
+        >
+          <Sparkles className="w-3.5 h-3.5" />
+          Research
+        </button>
+        <button
           onClick={() => setViewMode('ml-models')}
           className={cn(
             'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
@@ -52,6 +91,18 @@ export default function StrategiesPanel({
         >
           <Brain className="w-3.5 h-3.5" />
           ML Models
+        </button>
+        <button
+          onClick={() => setViewMode('validation')}
+          className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors',
+            viewMode === 'validation'
+              ? 'bg-accent text-accent-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+          )}
+        >
+          <Shield className="w-3.5 h-3.5" />
+          Validation
         </button>
       </div>
 
@@ -64,7 +115,9 @@ export default function StrategiesPanel({
             onOpenCopilot={onOpenCopilot}
           />
         )}
+        {viewMode === 'research' && <AutoresearchPanel />}
         {viewMode === 'ml-models' && <MLModelsPanel />}
+        {viewMode === 'validation' && <ValidationPanel />}
       </div>
     </div>
   )

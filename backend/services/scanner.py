@@ -7,6 +7,7 @@ import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from utils.utcnow import utcnow
 from typing import Optional, Callable, List, Set
 
@@ -2235,6 +2236,33 @@ class ArbitrageScanner:
         for mid, hist in candidates[:max_markets]:
             out[mid] = hist[-limit:]
         return out
+
+    async def attach_price_history_to_markets(
+        self,
+        markets: list[dict],
+        *,
+        now: Optional[datetime] = None,
+        timeout_seconds: Optional[float] = 0.0,
+        block_for_backfill: bool = False,
+    ) -> int:
+        """Attach scanner-managed market history to a flat list of market dicts.
+
+        Same backfill / hydrate / persist semantics as
+        :meth:`attach_price_history_to_opportunities` but for callers that
+        don't have ``Opportunity`` wrappers (e.g. the crypto worker, which
+        builds its market rows directly).  Internally wraps the markets in
+        a synthetic opportunity-like adapter so the existing infrastructure
+        — which only ever accesses ``opp.markets`` — can be reused as-is.
+        """
+        if not markets:
+            return 0
+        adapter = SimpleNamespace(markets=markets)
+        return await self.attach_price_history_to_opportunities(
+            [adapter],  # type: ignore[list-item]
+            now=now,
+            timeout_seconds=timeout_seconds,
+            block_for_backfill=block_for_backfill,
+        )
 
     async def attach_price_history_to_opportunities(
         self,

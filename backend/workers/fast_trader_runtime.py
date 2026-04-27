@@ -43,6 +43,7 @@ from services.live_pressure import (
 from services.strategy_loader import strategy_loader
 import services.trader_hot_state as hot_state
 from services.trader_hot_state import get_signal_sequence_cursor as _hot_get_signal_sequence_cursor
+from services.trader_orchestrator.decision_gates import enrich_final_reason
 from services.trader_orchestrator.fast_submit import (
     execute_fast_signal,
 )
@@ -347,6 +348,44 @@ class _FastTraderTask:
                 }
             )
         return {"fast_tier": True, "checks": checks_payload}
+
+    def _enriched_strategy_reason(
+        self, decision: Any, base_reason: str, final_decision: str
+    ) -> str:
+        # Mirror the slow-tier worker so generic skip strings like
+        # "Crypto worker filters not met" get the specific failed checks
+        # appended.  enrich_final_reason expects "check_key"/"check_label"
+        # keys, so translate from the strategy's DecisionCheck shape.
+        checks = getattr(decision, "checks", None) or []
+        checks_payload: list[dict[str, Any]] = []
+        for check in checks:
+            if isinstance(check, dict):
+                checks_payload.append(
+                    {
+                        "check_key": str(check.get("check_key") or check.get("key") or "check"),
+                        "check_label": str(check.get("check_label") or check.get("label") or "Check"),
+                        "passed": bool(check.get("passed", False)),
+                        "score": check.get("score"),
+                        "detail": check.get("detail"),
+                        "payload": check.get("payload") or {},
+                    }
+                )
+                continue
+            checks_payload.append(
+                {
+                    "check_key": str(getattr(check, "key", "") or "check"),
+                    "check_label": str(getattr(check, "label", "") or "Check"),
+                    "passed": bool(getattr(check, "passed", False)),
+                    "score": getattr(check, "score", None),
+                    "detail": getattr(check, "detail", None),
+                    "payload": getattr(check, "payload", None) or {},
+                }
+            )
+        return enrich_final_reason(
+            final_decision=final_decision,
+            final_reason=base_reason,
+            checks_payload=checks_payload,
+        )
 
     async def _touch_trader_run(self, session, *, force: bool = False) -> bool:
         now_mono = time.monotonic()
@@ -912,13 +951,14 @@ class _FastTraderTask:
 
         if final_decision != "selected":
             outcome = final_decision if final_decision in {"blocked", "failed", "skipped"} else "blocked"
+            enriched_reason = self._enriched_strategy_reason(decision, reason, final_decision) or f"fast:{final_decision}"
             decision_id = await self._buffer_decision(
                 signal=signal,
                 source_key=source_key,
                 strategy_key=strategy_key,
                 mode=mode,
                 decision=final_decision,
-                reason=reason or f"fast:{final_decision}",
+                reason=enriched_reason,
                 score=getattr(decision, "score", None),
                 checks_summary=self._checks_summary(decision),
                 risk_snapshot={"fast_tier": True},
@@ -935,7 +975,7 @@ class _FastTraderTask:
                 mode=mode,
                 decision_id=decision_id,
                 outcome=outcome,
-                reason=reason or f"fast:{final_decision}",
+                reason=enriched_reason,
             )
             return
 

@@ -414,8 +414,12 @@ async def test_refresh_crypto_markets_publishes_snapshot_without_waiting_for_opp
         def get_live_markets(self, force_refresh):
             return ["ignored"]
 
+    async def _noop_attach_history(_payload):
+        return None
+
     monkeypatch.setattr(runtime, "_publish_crypto_snapshot", _capture_publish)
     monkeypatch.setattr(runtime, "_sync_crypto_subscriptions", _noop_sync_subscriptions)
+    monkeypatch.setattr(runtime, "_attach_polymarket_price_history", _noop_attach_history)
     monkeypatch.setattr(
         runtime,
         "_build_crypto_market_payload",

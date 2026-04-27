@@ -22,6 +22,7 @@ import {
   Square,
   Trophy,
   TrendingUp,
+  XCircle,
   Zap,
 } from 'lucide-react'
 import {
@@ -76,7 +77,14 @@ import {
   type TraderOrchestratorConfig,
   updateTraderOrchestratorSettings,
 } from '../services/apiTraders'
-import { getSettings, updateSettings } from '../services/apiSettings'
+import {
+  clearValidationStrategyOverride,
+  getSettings,
+  getValidationStrategyHealth,
+  overrideValidationStrategy,
+  updateSettings,
+  type StrategyHealthRow,
+} from '../services/apiSettings'
 import { runTraderTuneIteration } from '../services/apiIntelligence'
 import type { TraderTuneAgentResponse } from '../services/apiIntelligence'
 import { discoveryApi } from '../services/discoveryApi'
@@ -5759,6 +5767,52 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     () => (Array.isArray(selectedTrader?.source_configs) ? selectedTrader.source_configs : []),
     [selectedTrader]
   )
+
+  // Strategy health (validation guardrail) — surface a banner in the
+  // selected bot's view whenever any of the bot's strategies is currently
+  // demoted, with override controls so operators can flip status from
+  // here without leaving the trading panel.
+  const strategyHealthQuery = useQuery({
+    queryKey: ['validation-strategy-health'],
+    queryFn: getValidationStrategyHealth,
+    staleTime: 15_000,
+    refetchInterval: 30_000,
+  })
+  const strategyHealthRowsAll: StrategyHealthRow[] = strategyHealthQuery.data || []
+  const strategyHealthByType = useMemo(() => {
+    const out: Record<string, StrategyHealthRow> = {}
+    for (const row of strategyHealthRowsAll) {
+      const key = String(row.strategy_type || '').trim().toLowerCase()
+      if (key) out[key] = row
+    }
+    return out
+  }, [strategyHealthRowsAll])
+  const selectedTraderStrategyHealth = useMemo(() => {
+    const out: StrategyHealthRow[] = []
+    for (const cfg of selectedTraderSourceConfigs) {
+      const key = String(cfg.strategy_key || '').trim().toLowerCase()
+      const row = key ? strategyHealthByType[key] : undefined
+      if (row) out.push(row)
+    }
+    return out
+  }, [selectedTraderSourceConfigs, strategyHealthByType])
+  const selectedTraderDemotedStrategies = useMemo(
+    () => selectedTraderStrategyHealth.filter((r) => r.status === 'demoted'),
+    [selectedTraderStrategyHealth]
+  )
+  const overrideStrategyHealthMutation = useMutation({
+    mutationFn: async ({ strategyType, status }: { strategyType: string; status: 'active' | 'demoted' }) =>
+      overrideValidationStrategy(strategyType, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['validation-strategy-health'] })
+    },
+  })
+  const clearStrategyHealthOverrideMutation = useMutation({
+    mutationFn: async (strategyType: string) => clearValidationStrategyOverride(strategyType),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['validation-strategy-health'] })
+    },
+  })
   const selectedTraderHasCopySource = useMemo(
     () => traderHasCopyTradeSource(selectedTrader),
     [selectedTrader]
@@ -10761,6 +10815,86 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                   </div>
                 </div>
               )}
+
+              {/* Strategy demotion banner — bots have a single strategy,
+                  so this is at most one row. Visible whenever the bot's
+                  strategy is parked under the validation guardrail.
+                  Signals short-circuit at the decision-gate layer so the
+                  bot keeps running but won't open new positions for it.
+                  Override inline without leaving the trading panel. */}
+              {selectedTraderDemotedStrategies.length > 0 && (() => {
+                const row = selectedTraderDemotedStrategies[0]
+                const overrideBusy = overrideStrategyHealthMutation.isPending
+                  || clearStrategyHealthOverrideMutation.isPending
+                return (
+                  <div className="shrink-0 mx-2 mb-1 mt-1 rounded-md border border-amber-500/50 bg-amber-100 dark:bg-amber-500/10 px-3 py-2 space-y-1.5">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+                      <span className="text-[11px] font-semibold text-amber-900 dark:text-amber-200">
+                        Strategy demoted
+                      </span>
+                      <span className="text-[10px] font-mono text-amber-900 dark:text-amber-100">
+                        {row.strategy_type}
+                      </span>
+                      <span className="text-[10px] text-amber-800 dark:text-amber-200/70">
+                        — {row.manual_override ? 'manual override' : 'auto-demoted by guardrail'};
+                        signals recorded but blocked at the decision gate.
+                      </span>
+                      <div className="ml-auto flex items-center gap-1">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-6 gap-1 px-2 text-[10px] border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10"
+                          disabled={overrideBusy}
+                          onClick={() => overrideStrategyHealthMutation.mutate({
+                            strategyType: row.strategy_type,
+                            status: 'active',
+                          })}
+                          title="Force the strategy back to active — bot will trade it again"
+                        >
+                          {overrideStrategyHealthMutation.isPending ? (
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                          ) : (
+                            <CheckCircle2 className="w-3 h-3" />
+                          )}
+                          Activate
+                        </Button>
+                        {row.manual_override && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            className="h-6 gap-1 px-2 text-[10px]"
+                            disabled={overrideBusy}
+                            onClick={() => clearStrategyHealthOverrideMutation.mutate(row.strategy_type)}
+                            title="Clear the manual override — auto-status engine takes over"
+                          >
+                            {clearStrategyHealthOverrideMutation.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <XCircle className="w-3 h-3" />
+                            )}
+                            Clear
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-3 text-[10px] text-amber-800/80 dark:text-muted-foreground/70 font-mono">
+                      <span>n {row.sample_size ?? 0}</span>
+                      {Number.isFinite(Number(row.directional_accuracy)) && (
+                        <span>acc {((Number(row.directional_accuracy) || 0) * 100).toFixed(1)}%</span>
+                      )}
+                      {Number.isFinite(Number(row.mae_roi)) && (
+                        <span>mae {Number(row.mae_roi).toFixed(2)}</span>
+                      )}
+                      {row.last_reason && (
+                        <span className="italic">{row.last_reason}</span>
+                      )}
+                    </div>
+                  </div>
+                )
+              })()}
 
               <div className="shrink-0 flex items-center gap-0.5 border-b border-border/50 px-1">
                 {([
