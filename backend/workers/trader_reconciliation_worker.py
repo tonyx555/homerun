@@ -135,6 +135,15 @@ def _reconcile_retry_delay_seconds(attempt: int) -> float:
 
 def _discard_abandoned_task(task: asyncio.Task) -> None:
     _abandoned_timed_tasks.discard(task)
+    # Consume any pending exception so abandoned tasks don't surface as
+    # "Task exception was never retrieved" in the global asyncio handler.
+    # We deliberately abandoned these (soft-timeout path), so the
+    # TimeoutError/CancelledError is expected and already logged.
+    if not task.cancelled():
+        try:
+            task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            pass
 
 
 def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:

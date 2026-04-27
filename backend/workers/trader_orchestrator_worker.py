@@ -203,6 +203,15 @@ _STUCK_TASK_HARD_KILL_SECONDS = 300.0  # force-kill tasks stuck longer than 5 mi
 
 def _discard_abandoned_trader_cycle(task: asyncio.Task) -> None:
     _abandoned_trader_cycle_tasks.discard(task)
+    # Consume any pending exception so abandoned tasks don't surface as
+    # "Task exception was never retrieved" in the global asyncio handler.
+    # We deliberately abandoned these (soft-timeout / cancel-grace path),
+    # so the TimeoutError/CancelledError is expected and already logged.
+    if not task.cancelled():
+        try:
+            task.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            pass
 
 
 def _clear_inflight_trader_cycle_task(trader_id: str, task: asyncio.Task) -> None:
@@ -2778,11 +2787,25 @@ async def _enforce_source_open_order_timeouts(
         taker_rescue_succeeded += source_rescue_succeeded
         taker_rescue_failed += source_rescue_failed
         updated += source_updated
+        candidates_deferred = int(cleanup.get("candidates_deferred", 0))
+        if candidates_deferred > 0:
+            # Surface persistent backlog so we know when a trader has more
+            # stuck orders than the per-call cap can drain in one cycle.
+            logger.warning(
+                "Open-order cleanup deferred %d/%d candidates over per-call cap "
+                "trader=%s source=%s — backlog will drain on subsequent cycles",
+                candidates_deferred,
+                int(cleanup.get("candidates_total", 0)),
+                trader_id,
+                source_key,
+            )
         source_rows.append(
             {
                 "source": source_key,
                 "timeout_seconds": timeout_seconds,
                 "matched": int(cleanup.get("matched", 0)),
+                "candidates_total": int(cleanup.get("candidates_total", 0)),
+                "candidates_deferred": candidates_deferred,
                 "updated": source_updated,
                 "suppressed": False,
                 "taker_rescue_enabled": rescue_enabled_for_source,

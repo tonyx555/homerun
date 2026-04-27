@@ -105,6 +105,16 @@ UNFILLED_ORDER_STATUSES = {"submitted", "open"}
 SHADOW_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
 LIVE_ACTIVE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
 CLEANUP_ELIGIBLE_ORDER_STATUSES = {"submitted", "executed", "completed", "open"}
+
+# Cap on per-call cleanup work.  cleanup_trader_open_orders sequentially
+# fires one (occasionally two) Polymarket cancel HTTP calls per live
+# candidate, each with an 8s timeout (LIVE_PROVIDER_CANCEL_TIMEOUT_SECONDS).
+# A trader with 50+ stuck unfilled live orders blows the 20s maintenance
+# step budget every cycle.  Cap candidate processing per invocation so a
+# burst of stale orders drains over multiple cycles instead of starving
+# the cycle.  Oldest-first ordering means the most-overdue cancellations
+# happen first; the rest land on the next maintenance pass.
+_OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL = 10
 _LIVE_ORDER_AUTHORITY_RECOVERY_WINDOW_HOURS = 24
 _LIVE_ORDER_AUTHORITY_RECOVERY_GENERAL_MAX_ROWS = 150
 _LIVE_ORDER_AUTHORITY_RECOVERY_CANDIDATE_CACHE_BUCKET_SECONDS = 60
@@ -8433,6 +8443,23 @@ async def cleanup_trader_open_orders(
 
         candidates.append(row)
 
+    # Cap candidates per call to bound the per-cycle wall time on the
+    # per-order live-cancel HTTP fan-out (8s timeout × N orders).
+    # Sort oldest-first by the same anchor we filtered on, so the most
+    # overdue cancellations get the budget; the rest drain on the next
+    # cycle.  See _OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL above.
+    candidates_total = len(candidates)
+    if candidates_total > _OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL:
+        def _age_anchor(row: TraderOrder) -> datetime:
+            if require_unfilled:
+                anchor = row.created_at or row.updated_at or row.executed_at
+            else:
+                anchor = row.executed_at or row.updated_at or row.created_at
+            return anchor or datetime.max
+        candidates.sort(key=_age_anchor)  # oldest first
+        candidates = candidates[:_OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL]
+    candidates_deferred = candidates_total - len(candidates)
+
     mode_breakdown = {"shadow": 0, "live": 0, "other": 0}
     status_breakdown: dict[str, int] = {}
     for row in candidates:
@@ -8725,6 +8752,8 @@ async def cleanup_trader_open_orders(
         "dry_run": bool(dry_run),
         "target_status": target_status,
         "matched": len(candidates),
+        "candidates_total": candidates_total,
+        "candidates_deferred": candidates_deferred,
         "updated": updated,
         "by_mode": mode_breakdown,
         "by_status": status_breakdown,

@@ -1342,21 +1342,17 @@ async def _audit_run_group_inner(
             commit_s = _time.monotonic() - commit_started
             return insert_s, commit_s
         except BaseException:
-            # Invalidate the connection so SQLAlchemy throws it away
-            # rather than returning a possibly-mid-protocol asyncpg
-            # connection to the pool. asyncpg "cannot switch to state"
-            # / "got result for unknown protocol state" errors come
-            # from re-using a connection whose protocol state was
-            # left dangling by an earlier error or cancellation.
-            try:
-                bind = await session.connection()
-                await bind.invalidate()
-            except Exception:
-                pass
-            try:
-                await session.rollback()
-            except Exception:
-                pass
+            # RetryableAsyncSession (in models.database) handles the
+            # connection-invalidation dance for us:
+            #   * execute() schedules drain-then-invalidate on cancel
+            #   * the surrounding ``async with`` close() drains any
+            #     in-flight inner Task, then either close()s cleanly or
+            #     invalidate()s if drain timed out
+            # Calling ``await session.connection()`` and explicit
+            # invalidate/rollback here used to RACE that machinery and
+            # surface as ``cannot switch to state 12; another operation
+            # in progress`` — about 30 times / 24h before this change.
+            # Just propagate; __aexit__ does the right thing.
             raise
 
 

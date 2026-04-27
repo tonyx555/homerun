@@ -2694,3 +2694,81 @@ async def test_cleanup_filters_by_source_age_seconds_and_unfilled_only(tmp_path)
             assert crypto_fresh_unfilled is not None and crypto_fresh_unfilled.status == "open"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_caps_candidates_per_call_oldest_first(tmp_path):
+    """Regression: a trader with 50+ stuck unfilled live orders used to
+    blow the 20s maintenance step budget every cycle.  The cleanup now
+    processes at most _OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL per
+    invocation, oldest-first, with the rest reported as
+    candidates_deferred so the orchestrator can log the backlog."""
+    engine, session_factory = await _build_session_factory(tmp_path)
+    trader_id = "shadow-cleanup-cap"
+    cap = trader_orchestrator_state._OPEN_ORDER_CLEANUP_MAX_CANDIDATES_PER_CALL
+    over_cap = cap + 5
+    try:
+        async with session_factory() as session:
+            await _seed_trader(session, trader_id)
+            base = utcnow()
+            for i in range(over_cap):
+                # Older orders get smaller indices => seeded earlier, so
+                # they should be the ones picked first by the cap.
+                age_seconds = 1000 - i
+                session.add(
+                    TraderOrder(
+                        id=f"order-cap-{i:03d}",
+                        trader_id=trader_id,
+                        source="crypto",
+                        market_id=f"market-{i}",
+                        direction="buy_yes",
+                        mode="shadow",
+                        status="open",
+                        notional_usd=0.0,
+                        entry_price=0.5,
+                        effective_price=0.5,
+                        payload_json={},
+                        created_at=base - timedelta(seconds=age_seconds),
+                        updated_at=base - timedelta(seconds=age_seconds),
+                    )
+                )
+            await session.commit()
+
+            result = await cleanup_trader_open_orders(
+                session,
+                trader_id=trader_id,
+                scope="shadow",
+                max_age_seconds=10.0,
+                source="crypto",
+                require_unfilled=True,
+                dry_run=False,
+                target_status="cancelled",
+                reason="test_cap",
+            )
+
+            assert result["candidates_total"] == over_cap, (
+                f"all {over_cap} orders should match the filter pre-cap"
+            )
+            assert result["candidates_deferred"] == over_cap - cap, (
+                "deferred count should equal total minus per-call cap"
+            )
+            assert result["matched"] == cap, "matched is the post-cap candidate count"
+            assert result["updated"] == cap, "exactly cap orders should be cancelled"
+
+            # The OLDEST `cap` orders should have been processed.  In our
+            # seed, that's order-cap-000 .. order-cap-{cap-1}.
+            for i in range(cap):
+                row = await session.get(TraderOrder, f"order-cap-{i:03d}")
+                assert row is not None
+                assert row.status == "cancelled", (
+                    f"order-cap-{i:03d} (oldest set) should be cancelled this cycle"
+                )
+            # The FRESHER orders (indices cap..over_cap) are deferred.
+            for i in range(cap, over_cap):
+                row = await session.get(TraderOrder, f"order-cap-{i:03d}")
+                assert row is not None
+                assert row.status == "open", (
+                    f"order-cap-{i:03d} (fresher) should be deferred to a future cycle"
+                )
+    finally:
+        await engine.dispose()
