@@ -364,7 +364,7 @@ async def verify_orders_against_wallet_trades(
     wallet_address: str,
     order_window_start: datetime | None = None,
     order_ids: Iterable[str] | None = None,
-    max_trades: int = 2000,
+    max_trades: int = 10000,
     commit: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -665,7 +665,7 @@ async def verify_orders_from_bot_lineage(
     else:
         if order_window_start is None:
             from datetime import timedelta
-            order_window_start = utcnow() - timedelta(days=14)
+            order_window_start = utcnow() - timedelta(days=90)
         query = query.where(TraderOrder.updated_at >= order_window_start)
     rows = list((await session.execute(query)).scalars().all())
 
@@ -831,7 +831,7 @@ async def verify_orders_against_closed_positions(
     wallet_address: str,
     order_window_start: datetime | None = None,
     order_ids: Iterable[str] | None = None,
-    max_positions: int = 500,
+    max_positions: int = 2000,
     commit: bool = True,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -910,7 +910,7 @@ async def verify_orders_against_closed_positions(
     else:
         if order_window_start is None:
             from datetime import timedelta
-            order_window_start = utcnow() - timedelta(days=14)
+            order_window_start = utcnow() - timedelta(days=90)
         query = query.where(TraderOrder.updated_at >= order_window_start)
 
     rows = list((await session.execute(query)).scalars().all())
@@ -1068,7 +1068,7 @@ async def verify_orders_against_market_resolutions(
             # 7-day default window — resolutions usually happen within
             # days/weeks of entry.
             from datetime import timedelta
-            order_window_start = utcnow() - timedelta(days=7)
+            order_window_start = utcnow() - timedelta(days=90)
         query = query.where(TraderOrder.updated_at >= order_window_start)
 
     rows = list((await session.execute(query)).scalars().all())
