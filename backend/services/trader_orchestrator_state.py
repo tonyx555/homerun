@@ -9018,9 +9018,17 @@ async def get_realized_pnl(
     mode: Optional[str] = None,
     since: Optional[datetime] = None,
 ) -> float:
+    # Only sum actual_profit for orders whose realized P&L was verified
+    # against Polymarket (venue_fill / wallet_position / wallet_activity /
+    # venue_order). "summary_only" / "local" / "disputed" rows have not
+    # been reconciled to a real on-venue fill — including them produces
+    # phantom P&L that will not match the user's actual Polymarket account.
     query = select(func.coalesce(func.sum(TraderOrder.actual_profit), 0.0)).where(
         TraderOrder.status.in_(tuple(REALIZED_ORDER_STATUSES)),
         _visible_trader_order_query_clause(),
+        func.lower(func.coalesce(TraderOrder.verification_status, "")).notin_(
+            ("summary_only", "local", "disputed")
+        ),
     )
     if trader_id:
         query = query.where(TraderOrder.trader_id == trader_id)
@@ -9716,17 +9724,37 @@ async def get_trader_orders_summary(
     is_open = status_col.in_(open_statuses)
     is_resolved = status_col.in_(resolved_statuses)
     is_failed = status_col.in_(failed_statuses)
+    # Only count actual_profit for orders whose realized P&L was verified
+    # against Polymarket as the source of truth. "summary_only" rows are
+    # PnL inferred from wallet aggregate / current price — we cannot trust
+    # those numbers for displayed totals because they conflate manual user
+    # trades with bot fills. "local" rows have never been reconciled.
+    # "disputed" rows were verified and disagreed with our internal claim.
+    # Anything else (venue_fill, wallet_position, wallet_activity,
+    # venue_order) reflects an actual on-venue event we matched.
+    _UNVERIFIED_VERIFICATION_STATUSES = ("summary_only", "local", "disputed")
+    is_pnl_verified = func.lower(
+        func.coalesce(TraderOrder.verification_status, "")
+    ).notin_(_UNVERIFIED_VERIFICATION_STATUSES)
     profit_col = func.coalesce(TraderOrder.actual_profit, 0.0)
+    # verified_profit_col is what gets summed for any "P&L" total. If the
+    # row's verification_status is unverified, contribute 0 to the sum so
+    # we never display a phantom number to the user. Counts (wins/losses)
+    # use the raw column so the operator can still see the order count.
+    verified_profit_col = case(
+        (is_pnl_verified, profit_col),
+        else_=0.0,
+    )
 
     query = select(
         func.count().label("total_count"),
         func.count().filter(is_open).label("open"),
         func.count().filter(is_resolved).label("resolved"),
         func.count().filter(is_failed).label("failed"),
-        func.sum(profit_col).filter(is_resolved).label("resolved_pnl"),
-        func.sum(profit_col).filter(is_resolved & (profit_col > 0)).label("wins_pnl"),
-        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
-        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+        func.sum(verified_profit_col).filter(is_resolved).label("resolved_pnl"),
+        func.sum(verified_profit_col).filter(is_resolved & (verified_profit_col > 0)).label("wins_pnl"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col < 0)).label("losses"),
         func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("total_notional"),
         func.avg(TraderOrder.edge_percent).filter(TraderOrder.edge_percent.isnot(None) & (TraderOrder.edge_percent != 0)).label("avg_edge"),
         func.avg(TraderOrder.confidence).filter(TraderOrder.confidence.isnot(None) & (TraderOrder.confidence != 0)).label("avg_confidence"),
@@ -9743,10 +9771,10 @@ async def get_trader_orders_summary(
         func.count().label("orders"),
         func.count().filter(is_open).label("open"),
         func.count().filter(is_resolved).label("resolved"),
-        func.sum(profit_col).filter(is_resolved).label("pnl"),
+        func.sum(verified_profit_col).filter(is_resolved).label("pnl"),
         func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("notional"),
-        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
-        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col < 0)).label("losses"),
         func.max(func.coalesce(TraderOrder.updated_at, TraderOrder.created_at)).label("latest_activity"),
     ).where(_visible_trader_order_query_clause()).group_by(TraderOrder.trader_id)
     if mode:
@@ -9802,10 +9830,10 @@ async def get_trader_orders_summary(
         TraderOrder.source,
         func.count().label("orders"),
         func.count().filter(is_resolved).label("resolved"),
-        func.sum(profit_col).filter(is_resolved).label("pnl"),
+        func.sum(verified_profit_col).filter(is_resolved).label("pnl"),
         func.sum(func.abs(func.coalesce(TraderOrder.notional_usd, 0.0))).label("notional"),
-        func.count().filter(is_resolved & (profit_col > 0)).label("wins"),
-        func.count().filter(is_resolved & (profit_col < 0)).label("losses"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col > 0)).label("wins"),
+        func.count().filter(is_resolved & is_pnl_verified & (profit_col < 0)).label("losses"),
     ).where(_visible_trader_order_query_clause()).group_by(TraderOrder.source)
     if mode:
         by_source_query = by_source_query.where(func.lower(TraderOrder.mode) == mode.strip().lower())
