@@ -3138,7 +3138,7 @@ function summarizeTradeDisplayRows(rows: TradeTableDisplayRow[]): TradeSummarySn
     totalNotional,
     realizedPnl,
     unrealizedPnl,
-    winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+    winRate: (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0,
   }
 }
 
@@ -5295,6 +5295,11 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
   const [cortexFlyoutOpen, setCortexFlyoutOpen] = useState(false)
   const [controlActionError, setControlActionError] = useState<string | null>(null)
   const [globalSettingsDraft, setGlobalSettingsDraft] = useState<GlobalSettingsDraft>(() => buildGlobalSettingsDraft(null, null))
+  // Tune tab stays in TradingPanel — it's for *live* parameter
+  // adjustments on a running bot. The autoresearch *experiment runner*
+  // (separate feature, lives inside AutoresearchView too) was extracted
+  // to Strategies → Research, but the live-tune UI is a per-bot operation
+  // and belongs here.
   const [workTab, setWorkTab] = useState<'trades' | 'terminal' | 'tune' | 'risk' | 'decisions' | 'performance'>('trades')
   const [performanceSubview, setPerformanceSubview] = useState<PerformanceSubview>('latency')
   const [performanceSectionKey, setPerformanceSectionKey] = useState('')
@@ -7522,7 +7527,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
     }
     return {
       open, resolved, wins, losses, failed,
-      totalNotional: 0, resolvedPnl, winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+      totalNotional: 0, resolvedPnl, winRate: (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0,
       avgEdge: 0, avgConfidence: 0,
       traderRows: [] as Array<{
         traderId: string
@@ -7628,7 +7633,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
       open,
       pnl,
       notional,
-      winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+      winRate: (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0,
       decisions,
       selectedDecisions: selectedDecisionsCount,
       events: selectedEvents.length,
@@ -8661,6 +8666,7 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
         const row = traderPerformanceById.get(trader.id)
         const resolved = toNumber(row?.resolved)
         const wins = toNumber(row?.wins)
+        const losses = toNumber(row?.losses)
         return {
           trader,
           orders: toNumber(row?.orders),
@@ -8671,8 +8677,8 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
           pnl: toNumber(row?.pnl),
           notional: toNumber(row?.notional),
           wins,
-          losses: toNumber(row?.losses),
-          winRate: resolved > 0 ? (wins / resolved) * 100 : 0,
+          losses,
+          winRate: (wins + losses) > 0 ? (wins / (wins + losses)) * 100 : 0,
         }
       })
       .sort((a, b) => {
@@ -10908,11 +10914,22 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                           {statusOption.label}
                         </Button>
                       ))}
+                      {selectedTraderOrdersQuery.isFetching ? (
+                        <span className="ml-1 inline-flex items-center gap-1 text-[10px] text-muted-foreground">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          Loading more...
+                        </span>
+                      ) : null}
                     </div>
                     <div className="shrink-0 grid grid-cols-2 gap-1 px-1 sm:grid-cols-4 lg:grid-cols-8">
                       <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
                         <p className="text-[9px] uppercase text-muted-foreground">Trades</p>
-                        <p className="text-xs font-mono">{selectedTradeTotals.total}</p>
+                        <p className="text-xs font-mono">
+                          {selectedTradeTotals.total}
+                          {selectedTraderOrdersQuery.isFetching ? (
+                            <Loader2 className="inline-block ml-1 w-2.5 h-2.5 animate-spin text-muted-foreground" />
+                          ) : null}
+                        </p>
                       </div>
                       <div className="rounded border border-border/60 bg-background/70 px-2 py-1">
                         <p className="text-[9px] uppercase text-muted-foreground">Open</p>
@@ -10997,12 +11014,13 @@ export default function TradingPanel({ isConnected = false }: TradingPanelProps 
                       tuneSaveError={tuneSaveError}
                       tuneRevertError={tuneRevertError}
                       formatTimestamp={formatTimestamp}
+                      forceArMode="params"
                     />
                   ) : (
                     <div className="h-full min-h-0 overflow-hidden px-1">
                       <div className="h-full min-h-0 rounded-md border border-border/50 bg-muted/10 p-2">
                         <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-700 dark:text-amber-100">
-                          Select a bot to use autoresearch.
+                          Select a bot to tune parameters live.
                         </div>
                       </div>
                     </div>
