@@ -46,7 +46,7 @@ from typing import Any, Iterable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import TraderOrder
+from models.database import TraderOrder, release_conn
 from services.polymarket import polymarket_client
 from services.trader_order_verification import (
     TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
@@ -208,6 +208,42 @@ async def _fetch_market_info(row: TraderOrder) -> dict[str, Any] | None:
         except Exception:
             pass
     return None
+
+
+# Bound concurrent Polymarket lookups when pre-fetching market_info for a
+# batch of rows.  8 in flight is plenty (the client has its own per-host
+# connection pool) without DDoSing the data API.
+_MARKET_INFO_PREFETCH_CONCURRENCY = 8
+
+
+async def _prefetch_market_info(
+    rows: Iterable[TraderOrder],
+) -> dict[str, dict[str, Any] | None]:
+    """Concurrently look up market_info for *rows*.
+
+    Returns a dict keyed by ``str(row.id)``.  Failures are recorded as
+    ``None``.  This MUST be called WITHOUT an open DB transaction (or
+    inside ``async with release_conn(session):``) — the whole point of
+    pre-fetching is to keep PG sessions out of the HTTP critical path.
+    """
+    sem = asyncio.Semaphore(_MARKET_INFO_PREFETCH_CONCURRENCY)
+    rows_list = [r for r in rows if r is not None]
+    if not rows_list:
+        return {}
+
+    async def _bounded(r: TraderOrder) -> tuple[str, dict[str, Any] | None]:
+        async with sem:
+            try:
+                info = await _fetch_market_info(r)
+            except Exception:
+                info = None
+            return str(r.id), info
+
+    results = await asyncio.gather(
+        *(_bounded(r) for r in rows_list),
+        return_exceptions=False,
+    )
+    return dict(results)
 
 
 def _market_is_resolved(market_info: dict[str, Any]) -> bool:
@@ -750,10 +786,36 @@ async def verify_orders_from_bot_lineage(
     pnl_total_after = 0.0
     now = utcnow()
 
-    # Commit per-batch (every 50 rows) to keep individual UPDATE
-    # statements small. asyncpg's executemany on hundreds of rows
-    # holds the connection long enough to compete with the worker's
-    # main loop; smaller batches let the worker get connections back.
+    # ── Phase 1 (Python only, NO DB transaction held): figure out which
+    # rows fall into Path B (bot didn't record its own SELL fill, so we
+    # need market resolution metadata).  Path A rows just use payload
+    # data and don't need any HTTP.
+    rows_needing_market_info: list[TraderOrder] = []
+    for row in rows:
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        bot_size = _entry_fill_size(row)
+        bot_cost = _entry_cost_basis(row)
+        if bot_size <= 0.0 or bot_cost <= 0.0:
+            continue
+        sell = _bot_recorded_sell_fill(payload)
+        if sell is not None and sell["filled_size"] > 0.0:
+            continue  # Path A — no HTTP needed
+        rows_needing_market_info.append(row)  # Path B — needs market_info
+
+    # ── Phase 2: prefetch market_info OUTSIDE the transaction so PG
+    # doesn't see this connection as ``idle in transaction`` for the
+    # 200-500ms × N rows the HTTP fan-out takes.  The previous in-loop
+    # pattern was the dominant source of "polymarket_trade_verifier
+    # (bot_lineage) timed out after 30.0s" — N rows × per-row HTTP
+    # held the session well past the 30s budget.
+    market_info_by_id: dict[str, dict[str, Any] | None] = {}
+    if rows_needing_market_info:
+        async with release_conn(session):
+            market_info_by_id = await _prefetch_market_info(rows_needing_market_info)
+
+    # ── Phase 3: writes only.  All HTTP is done; the session/transaction
+    # is held strictly for SQL.
+    # Commit per-batch (every 50 rows) to keep row-lock duration short.
     _commit_batch = 0
     for row in rows:
         examined += 1
@@ -841,8 +903,10 @@ async def verify_orders_from_bot_lineage(
 
         # Path B: market resolution. Deterministic payout from the
         # bot's recorded outcome + market's winning outcome. Does NOT
-        # rely on wallet aggregates.
-        market_info = await _fetch_market_info(row)
+        # rely on wallet aggregates.  market_info was pre-fetched in
+        # Phase 2 above with no transaction held; this is now a pure
+        # dict lookup.
+        market_info = market_info_by_id.get(str(row.id))
         if isinstance(market_info, dict) and _market_is_resolved(market_info):
             winning_idx = _market_winning_outcome_index(market_info)
             our_idx = _direction_to_outcome_index(row.direction)
@@ -1226,6 +1290,15 @@ async def verify_orders_against_market_resolutions(
                 exc_info=exc,
             )
 
+    # Pre-fetch market_info for all rows OUTSIDE the transaction.  The
+    # old per-row in-loop pattern held the session "idle in transaction"
+    # for the full HTTP fan-out duration — same root cause as the
+    # bot_lineage timeouts.
+    market_info_by_id: dict[str, dict[str, Any] | None] = {}
+    if rows:
+        async with release_conn(session):
+            market_info_by_id = await _prefetch_market_info(rows)
+
     for row in rows:
         examined += 1
         # AUTHORITATIVE: Polymarket resolution data is single source of
@@ -1235,7 +1308,7 @@ async def verify_orders_against_market_resolutions(
         # original Athletics/Rangers row was venue_fill = $49.70 but
         # the truth was a $9 loss — the only way to catch that is to
         # not skip "already verified" rows here.
-        market_info = await _fetch_market_info(row)
+        market_info = market_info_by_id.get(str(row.id))
         if not isinstance(market_info, dict) or not _market_is_resolved(market_info):
             skipped_unresolved += 1
             continue
