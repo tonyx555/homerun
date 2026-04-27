@@ -550,6 +550,283 @@ async def verify_orders_against_wallet_trades(
     }
 
 
+def _bot_recorded_sell_fill(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Pull the bot's own confirmed SELL fill data off the order payload.
+
+    The bot stamps its SELL submission's clob_order_id and (when filled)
+    the actual fill price + size on payload['pending_live_exit']. This
+    is the bot's OWN observation of its trade — Polymarket confirmed
+    these specific fills against our specific clob_order_id, so they
+    carry NO conflation with manual user trades on the same wallet.
+
+    Returns dict with {filled_size, filled_notional_usd, average_fill_price,
+    clob_order_id, status} or None if the SELL didn't confirm a fill.
+    """
+    if not isinstance(payload, dict):
+        return None
+    pending_exit = payload.get("pending_live_exit") or payload.get("exit_state")
+    if not isinstance(pending_exit, dict):
+        return None
+    snapshot = pending_exit.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    candidates = (snapshot, pending_exit)
+
+    def _first(keys: tuple[str, ...]) -> float | None:
+        for src in candidates:
+            if not isinstance(src, dict):
+                continue
+            for k in keys:
+                v = safe_float(src.get(k), None, reject_nan_inf=True)
+                if v is not None:
+                    return v
+        return None
+
+    filled_size = _first(("filled_size", "size_matched", "matched_size", "filled_shares", "executed_size")) or 0.0
+    filled_notional = _first(("filled_notional_usd", "filled_notional", "executed_notional_usd", "matched_notional_usd")) or 0.0
+    avg_price = _first(("average_fill_price", "avg_fill_price", "executed_price", "matched_price", "price"))
+    if filled_size <= 0.0 and filled_notional <= 0.0:
+        return None
+    if filled_notional <= 0.0 and avg_price is not None and filled_size > 0.0:
+        filled_notional = filled_size * avg_price
+    if avg_price is None and filled_size > 0.0:
+        avg_price = filled_notional / filled_size
+    clob_id = ""
+    for src in candidates:
+        if not isinstance(src, dict):
+            continue
+        for k in ("provider_clob_order_id", "exit_order_clob_id", "clob_order_id"):
+            text = str(src.get(k) or "").strip()
+            if text:
+                clob_id = text
+                break
+        if clob_id:
+            break
+    status = ""
+    for src in candidates:
+        if not isinstance(src, dict):
+            continue
+        text = str(src.get("normalized_status") or src.get("status") or src.get("provider_status") or "").strip().lower()
+        if text:
+            status = text
+            break
+    return {
+        "filled_size": float(filled_size),
+        "filled_notional_usd": float(filled_notional),
+        "average_fill_price": float(avg_price) if avg_price is not None else None,
+        "clob_order_id": clob_id,
+        "status": status,
+    }
+
+
+async def verify_orders_from_bot_lineage(
+    session: AsyncSession,
+    *,
+    order_window_start: datetime | None = None,
+    order_ids: Iterable[str] | None = None,
+    commit: bool = True,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Verify P&L from data the BOT itself recorded — not wallet aggregates.
+
+    This is the authoritative path. It uses ONLY:
+      * The bot's BUY entry fill (size, cost) — captured when our
+        BUY clob_order_id confirmed a fill on Polymarket
+      * The bot's SELL fill on its OWN clob_order_id (size, proceeds)
+        — captured when polling Polymarket for the status of the
+        SELL we submitted
+      * The market's resolution (winning outcome) — deterministic
+        from market metadata
+
+    Manual user trades on the same wallet have DIFFERENT clob_order_ids,
+    so they cannot affect the bot's recorded SELL fills. This eliminates
+    the wallet conflation problem that closed_positions / trade-matcher
+    suffer from.
+
+    Verification rules per row:
+      A) If payload['pending_live_exit'] has the bot's confirmed SELL
+         fill data → realized_pnl = sell_proceeds - cost_basis_pro_rated
+      B) Else, if market resolved → realized_pnl =
+         (won?size:0) - cost_basis (deterministic)
+      C) Else → unverified, no write, defer
+
+    Writes verification_status='wallet_activity' (the only status the
+    DB-layer guard accepts) with verification_source='bot_lineage'.
+    """
+    query = (
+        select(TraderOrder)
+        .where(TraderOrder.mode == "live")
+        .where(TraderOrder.status.in_(_RESOLVED_STATUSES))
+    )
+    if order_ids is not None:
+        ids = [str(oid).strip() for oid in order_ids if str(oid).strip()]
+        if not ids:
+            return {"examined": 0, "verified_sell_fill": 0, "verified_resolution": 0, "unmatched": 0}
+        query = query.where(TraderOrder.id.in_(ids))
+    else:
+        if order_window_start is None:
+            from datetime import timedelta
+            order_window_start = utcnow() - timedelta(days=14)
+        query = query.where(TraderOrder.updated_at >= order_window_start)
+    rows = list((await session.execute(query)).scalars().all())
+
+    examined = 0
+    verified_sell_fill = 0
+    verified_resolution = 0
+    unmatched = 0
+    pnl_total_before = 0.0
+    pnl_total_after = 0.0
+    now = utcnow()
+
+    # Commit per-batch (every 50 rows) to keep individual UPDATE
+    # statements small. asyncpg's executemany on hundreds of rows
+    # holds the connection long enough to compete with the worker's
+    # main loop; smaller batches let the worker get connections back.
+    _commit_batch = 0
+    for row in rows:
+        examined += 1
+        payload = row.payload_json if isinstance(row.payload_json, dict) else {}
+        prior = float(row.actual_profit) if row.actual_profit is not None else 0.0
+        bot_size = _entry_fill_size(row)
+        bot_cost = _entry_cost_basis(row)
+        if bot_size <= 0.0 or bot_cost <= 0.0:
+            unmatched += 1
+            continue
+        bot_avg_price = bot_cost / bot_size
+
+        # Path A: bot recorded a confirmed SELL fill on its own
+        # clob_order_id. This is the strongest evidence — manual user
+        # trades have different clob_order_ids and cannot pollute it.
+        sell = _bot_recorded_sell_fill(payload)
+        if sell is not None and sell["filled_size"] > 0.0:
+            sell_size = sell["filled_size"]
+            sell_proceeds = sell["filled_notional_usd"]
+            # Pro-rate cost basis to the matched sell size (handles
+            # partial fills cleanly).
+            allocated_cost = bot_cost * min(1.0, sell_size / bot_size)
+            verified_pnl = sell_proceeds - allocated_cost
+            verified_sell_fill += 1
+            pnl_total_before += prior
+            pnl_total_after += verified_pnl
+            if not dry_run:
+                row.actual_profit = float(verified_pnl)
+                row.updated_at = now
+                apply_trader_order_verification(
+                    row,
+                    verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+                    verification_source="bot_lineage_sell_fill",
+                    verification_reason=f"bot_sell_clob={sell['clob_order_id'][:14]}... fill={sell_size:.4f}@{(sell['average_fill_price'] or 0.0):.4f}",
+                    verification_tx_hash=sell["clob_order_id"] or None,
+                    verified_at=now,
+                    force=True,
+                )
+                payload["verified_close"] = {
+                    "verified_at": now.isoformat(),
+                    "source": "bot_lineage_sell_fill",
+                    "matched_size": sell_size,
+                    "matched_proceeds": sell_proceeds,
+                    "allocated_cost": allocated_cost,
+                    "realized_pnl": verified_pnl,
+                    "bot_sell_clob_order_id": sell["clob_order_id"],
+                    "bot_sell_avg_price": sell["average_fill_price"],
+                }
+                row.payload_json = payload
+                append_trader_order_verification_event(
+                    session,
+                    trader_order_id=str(row.id),
+                    verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+                    source="bot_lineage_sell_fill",
+                    event_type="verified_close_from_bot_sell_fill",
+                    reason=f"verified_pnl={verified_pnl:.4f} bot_sell_size={sell_size:.4f}",
+                    tx_hash=sell["clob_order_id"] or None,
+                    payload_json={
+                        "bot_sell_clob_order_id": sell["clob_order_id"],
+                        "bot_sell_avg_price": sell["average_fill_price"],
+                        "prior_actual_profit": prior,
+                        "verified_actual_profit": verified_pnl,
+                    },
+                    created_at=now,
+                )
+                _commit_batch += 1
+                if commit and _commit_batch >= 50:
+                    await session.commit()
+                    _commit_batch = 0
+            continue
+
+        # Path B: market resolution. Deterministic payout from the
+        # bot's recorded outcome + market's winning outcome. Does NOT
+        # rely on wallet aggregates.
+        market_info = await _fetch_market_info(row)
+        if isinstance(market_info, dict) and _market_is_resolved(market_info):
+            winning_idx = _market_winning_outcome_index(market_info)
+            our_idx = _direction_to_outcome_index(row.direction)
+            if winning_idx is not None and our_idx is not None:
+                won = our_idx == winning_idx
+                payout = bot_size * (1.0 if won else 0.0)
+                verified_pnl = payout - bot_cost
+                verified_resolution += 1
+                pnl_total_before += prior
+                pnl_total_after += verified_pnl
+                if not dry_run:
+                    row.actual_profit = float(verified_pnl)
+                    row.updated_at = now
+                    apply_trader_order_verification(
+                        row,
+                        verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+                        verification_source="bot_lineage_resolution",
+                        verification_reason=("won" if won else "lost") + " on resolution",
+                        verified_at=now,
+                        force=True,
+                    )
+                    payload["verified_close"] = {
+                        "verified_at": now.isoformat(),
+                        "source": "bot_lineage_resolution",
+                        "matched_size": bot_size,
+                        "matched_proceeds": payout,
+                        "allocated_cost": bot_cost,
+                        "realized_pnl": verified_pnl,
+                        "winning_outcome_index": winning_idx,
+                        "our_outcome_index": our_idx,
+                        "won": won,
+                    }
+                    row.payload_json = payload
+                    append_trader_order_verification_event(
+                        session,
+                        trader_order_id=str(row.id),
+                        verification_status=TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+                        source="bot_lineage_resolution",
+                        event_type="verified_close_from_market_resolution",
+                        reason=f"verified_pnl={verified_pnl:.4f} won={won}",
+                        payload_json={
+                            "winning_outcome_index": winning_idx,
+                            "our_outcome_index": our_idx,
+                            "prior_actual_profit": prior,
+                            "verified_actual_profit": verified_pnl,
+                        },
+                        created_at=now,
+                    )
+                    _commit_batch += 1
+                    if commit and _commit_batch >= 50:
+                        await session.commit()
+                        _commit_batch = 0
+                continue
+
+        unmatched += 1
+
+    if commit and _commit_batch > 0 and not dry_run:
+        await session.commit()
+
+    return {
+        "examined": examined,
+        "verified_sell_fill": verified_sell_fill,
+        "verified_resolution": verified_resolution,
+        "unmatched": unmatched,
+        "pnl_total_before": pnl_total_before,
+        "pnl_total_after": pnl_total_after,
+        "pnl_delta": pnl_total_after - pnl_total_before,
+        "dry_run": dry_run,
+    }
+
+
 async def verify_orders_against_closed_positions(
     session: AsyncSession,
     *,

@@ -513,7 +513,41 @@ async def _verify_realized_pnl_against_wallet_trades() -> None:
         from services.polymarket_trade_verifier import (
             verify_orders_against_wallet_trades,
             verify_orders_against_closed_positions,
+            verify_orders_from_bot_lineage,
         )
+        # PASS 0: bot-lineage FIRST and HIGHEST authority.
+        #
+        # Uses ONLY data the bot itself recorded — its own SELL fills
+        # (matched by the bot's specific clob_order_id, immune to manual
+        # user trades on the same wallet) plus deterministic resolution
+        # payouts from the bot's recorded BUY size/outcome. This is the
+        # ONLY way to guarantee per-bot-order P&L on a wallet that mixes
+        # bot trades with occasional manual user trades.
+        async with AsyncSessionLocal() as bot_session:
+            try:
+                bot_result = await asyncio.wait_for(
+                    verify_orders_from_bot_lineage(
+                        bot_session,
+                        commit=True,
+                    ),
+                    timeout=_REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "polymarket_trade_verifier (bot_lineage) timed out after %.1fs",
+                    _REALIZED_PNL_VERIFY_TIMEOUT_SECONDS,
+                )
+                return
+        if (bot_result.get("verified_sell_fill", 0) > 0
+                or bot_result.get("verified_resolution", 0) > 0):
+            logger.info(
+                "polymarket_trade_verifier sweep (bot_lineage)",
+                examined=bot_result.get("examined"),
+                verified_sell_fill=bot_result.get("verified_sell_fill"),
+                verified_resolution=bot_result.get("verified_resolution"),
+                unmatched=bot_result.get("unmatched"),
+                pnl_delta=round(bot_result.get("pnl_delta", 0.0), 4),
+            )
         # PASS 1: closed_positions FIRST.
         #
         # For resolved markets, the on-chain settlement price (curPrice
