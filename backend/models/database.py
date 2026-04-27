@@ -26,6 +26,8 @@ import asyncio
 import os as _os
 import time as _time
 import warnings as _warnings
+from config import settings
+from models.types import PreciseFloat as Float
 
 # SAWarning fired from AsyncAdaptedQueuePool._finalize_fairy when the
 # *connection's* __del__ runs before the session's __del__ has finished
@@ -56,9 +58,6 @@ class _DropFinalizeFairyGCWarning(_logging.Filter):
 
 _logging.getLogger("sqlalchemy.pool.impl.AsyncAdaptedQueuePool").addFilter(_DropFinalizeFairyGCWarning())
 _logging.getLogger("sqlalchemy.pool").addFilter(_DropFinalizeFairyGCWarning())
-
-from config import settings
-from models.types import PreciseFloat as Float
 
 Base = declarative_base()
 
