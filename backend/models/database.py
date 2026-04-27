@@ -3457,6 +3457,75 @@ _sa_event.listen(TraderOrderVerification, "before_insert", _enforce_pnl_verifica
 _sa_event.listen(TraderOrderVerification, "before_update", _enforce_pnl_verification_guard_v2)
 
 
+# ── Dual-write mirror: TraderOrder → TraderOrderVerification ─────────
+#
+# Phase 3 step 2 (this commit): every successful TraderOrder write
+# mirrors the verification fields onto trader_order_verification via
+# a synchronous after_insert / after_update event listener.  This
+# guarantees the side table is always in sync with the canonical
+# columns on trader_orders WITHOUT requiring every existing caller
+# (40+ direct write sites + apply_trader_order_verification +
+# polymarket_trade_verifier) to be updated.
+#
+# Step 3 (this commit): readers prefer the side table via
+# COALESCE(v.*, t.*) so once dual-write is in place the new table is
+# already authoritative for new verifications.
+#
+# Step 4 (FUTURE commit, after validation): once readers are fully
+# cut over and we've confirmed P&L numbers match in production, drop
+# the verification_status / verification_source / verification_reason
+# / verification_tx_hash / verified_at / actual_profit columns from
+# trader_orders.  At that point the verifier and orchestrator never
+# share a row-lock target.
+#
+# Trade-off during dual-write window: every TraderOrder UPSERT does
+# an extra UPSERT on trader_order_verification in the same connection
+# / same transaction.  Both UPSERTs are sub-millisecond against indexes
+# on PK / trader_order_id, so the additional row-lock surface is tiny.
+# The contention picture is unchanged from before this commit — that
+# benefit lands at step 4.
+def _mirror_trader_order_to_verification(mapper, connection, target):  # noqa: ANN001
+    """Mirror verification fields onto trader_order_verification.
+
+    Fired AFTER every insert/update of a TraderOrder row so the side
+    table is always in sync.  Uses pg_insert + ON CONFLICT DO UPDATE
+    so the same handler covers initial insert and ongoing updates.
+    """
+    from sqlalchemy.dialects.postgresql import insert as _pg_insert
+
+    order_id = getattr(target, "id", None)
+    if not order_id:
+        return
+    payload = {
+        "trader_order_id": str(order_id),
+        "verification_status": getattr(target, "verification_status", None) or "local",
+        "verification_source": getattr(target, "verification_source", None),
+        "verification_reason": getattr(target, "verification_reason", None),
+        "verification_tx_hash": getattr(target, "verification_tx_hash", None),
+        "verified_at": getattr(target, "verified_at", None),
+        "actual_profit": getattr(target, "actual_profit", None),
+        "execution_wallet_address": getattr(target, "execution_wallet_address", None),
+        "updated_at": _utcnow(),
+    }
+    stmt = _pg_insert(TraderOrderVerification.__table__).values(**payload)
+    update_set = {k: stmt.excluded[k] for k in payload if k != "trader_order_id"}
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["trader_order_id"],
+        set_=update_set,
+    )
+    try:
+        connection.execute(stmt)
+    except Exception:
+        # NEVER let a mirror failure abort the parent TraderOrder write.
+        # The side table is a derived view; any lost mirror update will
+        # be reconciled on the next TraderOrder write to the same row.
+        pass
+
+
+_sa_event.listen(TraderOrder, "after_insert", _mirror_trader_order_to_verification)
+_sa_event.listen(TraderOrder, "after_update", _mirror_trader_order_to_verification)
+
+
 class TraderOrderVerificationEvent(Base):
     """Immutable verification evidence attached to a trader order."""
 

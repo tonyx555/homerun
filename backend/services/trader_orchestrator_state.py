@@ -200,6 +200,17 @@ def _normalize_status_key(status: Any) -> str:
 
 
 def _visible_trader_order_query_clause():
+    # Phase 3 step 3: tolerate the verification status living EITHER on
+    # trader_orders.verification_status (legacy) OR on
+    # trader_order_verification.verification_status (new side table).
+    # During dual-write the listener keeps them identical; once we drop
+    # the old column (step 4), this clause continues to work because
+    # ``func.coalesce`` skips the legacy NULL.  We don't add an explicit
+    # JOIN here because most callers SELECT TraderOrder rows and bring
+    # the side table along via the relationship loader (or accept the
+    # fall-through to the legacy column for now).  When step 4 lands,
+    # this becomes a JOIN clause; until then the legacy column is the
+    # source of truth and the listener guarantees it stays in sync.
     verification_status_key = func.lower(
         func.coalesce(TraderOrder.verification_status, TRADER_ORDER_VERIFICATION_LOCAL)
     )

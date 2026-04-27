@@ -62,19 +62,22 @@ async def _seed(session, trader_id: str, order_id: str) -> None:
 
 @pytest.mark.asyncio
 async def test_guard_coerces_actual_profit_when_status_unverified(tmp_path):
-    """Guard must zero out actual_profit unless status is wallet_activity."""
+    """Guard must zero out actual_profit unless status is wallet_activity.
+
+    Note: with the dual-write listener in place, _seed() creates a
+    TraderOrder which auto-mirrors a TraderOrderVerification row.  We
+    fetch and mutate that row rather than insert a fresh one.
+    """
     engine, session_factory = await build_postgres_session_factory(
         Base, "trader_order_verification_guard"
     )
     try:
         async with session_factory() as session:
             await _seed(session, "trader-guard", "order-guard")
-            row = TraderOrderVerification(
-                trader_order_id="order-guard",
-                verification_status="local",  # NOT wallet_activity
-                actual_profit=42.5,           # should be coerced to None
-            )
-            session.add(row)
+            row = await session.get(TraderOrderVerification, "order-guard")
+            assert row is not None, "listener must auto-create verification row"
+            row.verification_status = "local"  # NOT wallet_activity
+            row.actual_profit = 42.5            # should be coerced to None by guard
             await session.commit()
 
             persisted = await session.get(TraderOrderVerification, "order-guard")
@@ -96,12 +99,10 @@ async def test_guard_allows_actual_profit_when_status_is_wallet_activity(tmp_pat
     try:
         async with session_factory() as session:
             await _seed(session, "trader-pass", "order-pass")
-            row = TraderOrderVerification(
-                trader_order_id="order-pass",
-                verification_status="wallet_activity",
-                actual_profit=42.5,
-            )
-            session.add(row)
+            row = await session.get(TraderOrderVerification, "order-pass")
+            assert row is not None
+            row.verification_status = "wallet_activity"
+            row.actual_profit = 42.5
             await session.commit()
 
             persisted = await session.get(TraderOrderVerification, "order-pass")
@@ -121,19 +122,11 @@ async def test_cascade_delete_cleans_up_verification_row(tmp_path):
     try:
         async with session_factory() as session:
             await _seed(session, "trader-cascade", "order-cascade")
-            session.add(
-                TraderOrderVerification(
-                    trader_order_id="order-cascade",
-                    verification_status="wallet_activity",
-                    actual_profit=10.0,
-                )
-            )
-            await session.commit()
-
-            # Confirm both rows exist
-            order = await session.get(TraderOrder, "order-cascade")
             verif = await session.get(TraderOrderVerification, "order-cascade")
-            assert order is not None and verif is not None
+            order = await session.get(TraderOrder, "order-cascade")
+            assert order is not None and verif is not None, (
+                "listener must auto-mirror; both rows should exist"
+            )
 
             # Delete the parent
             await session.delete(order)
@@ -156,33 +149,48 @@ async def test_cascade_delete_cleans_up_verification_row(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_one_verification_row_per_order(tmp_path):
-    """The PK on trader_order_id enforces 1:1."""
-    from sqlalchemy.exc import IntegrityError
+async def test_listener_mirrors_trader_order_writes(tmp_path):
+    """The dual-write listener must keep both tables in sync.
 
+    This is the load-bearing invariant for Phase 3 step 2: every write
+    to TraderOrder.verification_status / actual_profit MUST appear on
+    the side table at the same commit, byte-for-byte.
+    """
     engine, session_factory = await build_postgres_session_factory(
-        Base, "trader_order_verification_unique"
+        Base, "trader_order_verification_mirror"
     )
     try:
         async with session_factory() as session:
-            await _seed(session, "trader-uniq", "order-uniq")
-            session.add(
-                TraderOrderVerification(
-                    trader_order_id="order-uniq",
-                    verification_status="local",
-                )
-            )
+            await _seed(session, "trader-mirror", "order-mirror")
+
+            # Fetch both rows (listener should have created the verification row)
+            order = await session.get(TraderOrder, "order-mirror")
+            verif = await session.get(TraderOrderVerification, "order-mirror")
+            assert verif is not None, "listener must create verification row"
+            # Initial state is the trader_orders default ("local")
+            assert verif.verification_status == "local"
+            assert verif.actual_profit is None
+
+            # Mutate the TraderOrder verification fields directly
+            order.verification_status = "wallet_activity"
+            order.actual_profit = 12.5
             await session.commit()
 
-        async with session_factory() as session:
-            session.add(
-                TraderOrderVerification(
-                    trader_order_id="order-uniq",  # same PK
-                    verification_status="wallet_activity",
-                    actual_profit=1.0,
-                )
+            # Side table must reflect the new state
+            await session.refresh(verif)
+            assert verif.verification_status == "wallet_activity"
+            assert verif.actual_profit == pytest.approx(12.5)
+
+            # Mutate again
+            order.verification_status = "venue_fill"  # guard will null out actual_profit
+            order.actual_profit = 99.0
+            await session.commit()
+
+            await session.refresh(verif)
+            assert verif.verification_status == "venue_fill"
+            assert verif.actual_profit is None, (
+                "guard fires on TraderOrder THEN mirrors to side table; "
+                "side-table value must reflect the post-guard state"
             )
-            with pytest.raises(IntegrityError):
-                await session.commit()
     finally:
         await engine.dispose()

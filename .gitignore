@@ -73,3 +73,4 @@ output/
 .env.*.local
 secrets.json
 .claude/worktrees/
+.cutover-snapshots/
