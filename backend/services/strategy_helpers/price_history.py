@@ -3,16 +3,17 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+
+DEFAULT_WINDOW_SECONDS = 300.0
 
 
 @dataclass
 class PriceSnapshot:
-    """Single (yes, no) price observation with a wall-clock timestamp."""
+    """Single (yes, no) price observation with a monotonic timestamp."""
 
-    yes: float
-    no: float
-    ts: float  # epoch seconds
+    yes_price: float
+    no_price: float
+    ts: float  # time.monotonic() seconds
 
 
 @dataclass
@@ -30,29 +31,38 @@ class MarketPriceHistory:
             vol = history.recent_volatility()
     """
 
-    window_seconds: float
+    window_seconds: float = DEFAULT_WINDOW_SECONDS
     _snapshots: deque = field(default_factory=deque, init=False, repr=False)
 
     def record(self, yes_price: float, no_price: float) -> None:
         now = time.monotonic()
-        self._snapshots.append(PriceSnapshot(yes=float(yes_price), no=float(no_price), ts=now))
+        self._snapshots.append(PriceSnapshot(yes_price=float(yes_price), no_price=float(no_price), ts=now))
         cutoff = now - self.window_seconds
         while self._snapshots and self._snapshots[0].ts < cutoff:
             self._snapshots.popleft()
 
     @property
     def has_data(self) -> bool:
-        return bool(self._snapshots)
+        return len(self._snapshots) >= 2
 
     @property
     def snapshots(self) -> list[PriceSnapshot]:
         return list(self._snapshots)
 
-    def recent_volatility(self, *, side: str = "yes") -> Optional[float]:
-        """Return std-dev of the chosen price side over the window, or None if < 2 entries."""
+    def max_drop_yes(self) -> float:
+        if not self._snapshots:
+            return 0.0
+        prices = [s.yes_price for s in self._snapshots]
+        return max(0.0, max(prices) - prices[-1])
+
+    def max_drop_no(self) -> float:
+        if not self._snapshots:
+            return 0.0
+        prices = [s.no_price for s in self._snapshots]
+        return max(0.0, max(prices) - prices[-1])
+
+    def recent_volatility(self, *, side: str = "yes") -> float:
         if len(self._snapshots) < 2:
-            return None
-        prices = [s.yes if side == "yes" else s.no for s in self._snapshots]
-        mean = sum(prices) / len(prices)
-        variance = sum((p - mean) ** 2 for p in prices) / len(prices)
-        return variance**0.5
+            return 0.0
+        prices = [s.yes_price if side == "yes" else s.no_price for s in self._snapshots]
+        return max(prices) - min(prices)

@@ -60,6 +60,7 @@ from services.strategy_helpers.crypto_scope import (
 )
 from services.strategy_helpers.price_window import PriceWindow
 from services.strategy_helpers.cycle_tracker import CycleTracker
+from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot
 # Note: crypto_strategy_utils is loaded lazily via a descriptor below to
 # avoid a circular import — that module re-exports from
 # services.strategies.crypto_strategy_utils, and importing it at
@@ -99,6 +100,12 @@ class StrategySDK:
     # markets). One-shot markets like elections or sports should use
     # ``time_to_resolution`` and reason about their lifecycle directly.
     CycleTracker = CycleTracker
+
+    # MarketPriceHistory / PriceSnapshot — binary (yes/no) rolling window.
+    # Re-exported here so strategies can use ``StrategySDK.MarketPriceHistory``
+    # without a separate import from strategy_helpers.price_history.
+    MarketPriceHistory = MarketPriceHistory
+    PriceSnapshot = PriceSnapshot
 
     # Re-exports of the crypto-strategy scope helpers, available to any
     # strategy without a direct import. Use these to honor the same
