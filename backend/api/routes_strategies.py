@@ -19,7 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.database import (
     AsyncSessionLocal,
     Strategy,
-    StrategyTombstone,
     get_db_session,
 )
 from services.opportunity_strategy_catalog import (
@@ -75,35 +74,34 @@ router = APIRouter(prefix="/strategy-manager", tags=["Strategies (Unified)"])
 _SLUG_RE = re.compile(r"^[a-z][a-z0-9_]{1,48}[a-z0-9]$")
 
 
-def _get_crypto_module_fn(fn_name: str) -> dict:
-    """Call a function from the loaded btc_eth_highfreq strategy module."""
-    import sys
+def _get_crypto_scope_attr(attr_name: str) -> dict:
+    """Read a module-level dict from services.strategy_helpers.crypto_scope.
 
-    loaded = _strategy_loader.get_strategy("btc_eth_highfreq")
-    if loaded is None:
+    Used by the unified-docs response to surface the crypto-strategy scope
+    defaults / schema without strategies importing the module directly.
+    """
+    try:
+        from services.strategy_helpers import crypto_scope
+    except Exception:
         return {}
-    mod = sys.modules.get(getattr(loaded, "module_name", ""))
-    if mod is None:
-        return {}
-    fn = getattr(mod, fn_name, None)
-    if callable(fn):
-        return fn()
+    val = getattr(crypto_scope, attr_name, None)
+    if isinstance(val, dict):
+        return dict(val)
     return {}
 
 
-def _get_crypto_module_attr(attr_name: str) -> dict:
-    """Get a module-level dict from the loaded btc_eth_highfreq strategy module."""
-    import sys
-
-    loaded = _strategy_loader.get_strategy("btc_eth_highfreq")
-    if loaded is None:
+def _get_crypto_scope_fn(fn_name: str) -> dict:
+    """Call a function on services.strategy_helpers.crypto_scope by name."""
+    try:
+        from services.strategy_helpers import crypto_scope
+    except Exception:
         return {}
-    mod = sys.modules.get(getattr(loaded, "module_name", ""))
-    if mod is None:
-        return {}
-    val = getattr(mod, attr_name, None)
-    if isinstance(val, dict):
-        return dict(val)
+    fn = getattr(crypto_scope, fn_name, None)
+    if callable(fn):
+        try:
+            return fn()
+        except Exception:
+            return {}
     return {}
 
 
@@ -1186,7 +1184,7 @@ async def get_unified_docs():
                 "news_edge_defaults()": "Default news strategy filters",
                 "news_edge_config_schema()": "Schema for news strategy filters",
                 "CRYPTO_HF_SCOPE_DEFAULTS": "Default high-frequency crypto scope and exit controls",
-                "crypto_highfreq_scope_config_schema()": "Schema for high-frequency crypto scope controls",
+                "crypto_scope_config_schema()": "Schema for high-frequency crypto scope controls",
                 "StrategySDK.strategy_retention_config_schema()": "Schema for max_opportunities and retention_window",
             },
             "validation_helpers": {
@@ -1287,8 +1285,8 @@ async def get_unified_docs():
                 "StrategySDK.get_trader_tags()": "Tag definitions and wallet counts",
                 "StrategySDK.get_traders_by_tag(tag_name, limit)": "Wallets for a tag",
             },
-            "crypto_highfreq_scope_defaults": _get_crypto_module_attr("CRYPTO_HF_SCOPE_DEFAULTS"),
-            "crypto_highfreq_scope_schema": _get_crypto_module_fn("crypto_highfreq_scope_config_schema"),
+            "crypto_scope_defaults": _get_crypto_scope_attr("CRYPTO_HF_SCOPE_DEFAULTS"),
+            "crypto_scope_schema": _get_crypto_scope_fn("crypto_scope_config_schema"),
             "news_edge_defaults": news_edge_defaults(),
             "news_edge_schema": news_edge_config_schema(),
             "traders_copy_trade_defaults": traders_copy_trade_defaults(),
@@ -2223,11 +2221,9 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
             raise HTTPException(status_code=404, detail="Strategy not found")
         original_source_key = str(row.source_key or "").strip().lower()
 
-        if bool(row.is_system) and not req.unlock_system:
-            raise HTTPException(
-                status_code=403,
-                detail="System strategies are read-only. Set unlock_system=true for admin override.",
-            )
+        # is_system is an informational flag (UI label / sort hint) only —
+        # users can edit any strategy regardless. The historical 403 gate
+        # was removed; ``unlock_system`` on the request is ignored.
 
         original_slug = row.slug
         slug_changed = False
@@ -2375,25 +2371,17 @@ async def update_strategy(strategy_id: str, req: UnifiedStrategyUpdateRequest):
 
 @router.delete("/{strategy_id}")
 async def delete_strategy(strategy_id: str):
-    """Delete a strategy (with tombstone for system strategies)."""
+    """Delete a strategy.
+
+    Any strategy can be deleted regardless of ``is_system``. No tombstone
+    is written — once deleted, the row is gone. To restore a shipped
+    template, hit ``POST /{id}/reset-to-factory`` if the slug still has
+    a registered seed, or recreate manually.
+    """
     async with AsyncSessionLocal() as session:
         row = await session.get(Strategy, strategy_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
-
-        if bool(row.is_system):
-            tombstone = await session.get(StrategyTombstone, row.slug)
-            if tombstone is None:
-                session.add(
-                    StrategyTombstone(
-                        slug=row.slug,
-                        deleted_at=utcnow(),
-                        reason="user_deleted_system_strategy",
-                    )
-                )
-            else:
-                tombstone.deleted_at = utcnow()
-                tombstone.reason = "user_deleted_system_strategy"
 
         strategy_loader.unload(row.slug)
         await session.delete(row)
@@ -2448,11 +2436,14 @@ async def reload_strategy(strategy_id: str):
 
 @router.post("/{strategy_id}/reset-to-factory")
 async def reset_strategy_to_factory_endpoint(strategy_id: str):
-    """Reset a system strategy to its original factory seed definition.
+    """Reset a strategy to its original shipped seed definition.
 
-    This restores the strategy's source code, config, config_schema, and
-    description to the values shipped with the application. Only works
-    for system strategies.
+    Restores ``source_code``, ``config``, ``config_schema``, ``description``,
+    etc. to the values shipped with the application. Works for any
+    strategy whose slug has a registered seed in
+    ``SYSTEM_OPPORTUNITY_STRATEGY_SEEDS`` — ``is_system`` is no longer
+    a requirement. Returns 400 when the slug has no seed registered
+    (i.e. user-authored strategies have nothing to reset to).
     """
     from services.opportunity_strategy_catalog import reset_strategy_to_factory
 
@@ -2460,13 +2451,17 @@ async def reset_strategy_to_factory_endpoint(strategy_id: str):
         row = await session.get(Strategy, strategy_id)
         if row is None:
             raise HTTPException(status_code=404, detail="Strategy not found")
-        if not row.is_system:
-            raise HTTPException(
-                status_code=400,
-                detail="Only system strategies can be reset to factory defaults.",
-            )
 
         result = await reset_strategy_to_factory(session, row.slug)
+        if result.get("status") == "not_found":
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Strategy '{row.slug}' has no shipped seed to reset to. "
+                    "Reset-to-factory only applies to slugs registered in "
+                    "the strategy catalog."
+                ),
+            )
 
         # Reload into the unified loader after reset
         if result.get("status") in ("reset", "created"):

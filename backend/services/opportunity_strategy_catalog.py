@@ -15,7 +15,7 @@ from models.database import Strategy, StrategyTombstone
 from services.strategy_sdk import StrategySDK
 from services.strategy_helpers.crypto_scope import (
     crypto_scope_config_schema,
-    normalize_crypto_legacy_config,
+    merge_crypto_defaults,
 )
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
@@ -748,19 +748,157 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         },
     ),
     # ── Crypto strategies ────────────────────────────────────
+    # Three independent BTC/ETH strategies split out from the deprecated
+    # ``btc_eth_highfreq`` (which was a multi-mode dispatcher). Each is a
+    # standalone Python module, individually editable in the strategies UI,
+    # with its own focused config blob (no shared scope dict).
     SystemOpportunityStrategySeed(
-        slug="btc_eth_highfreq",
+        slug="btc_eth_maker_quote",
         source_key="crypto",
-        import_module="services.strategies.btc_eth_highfreq",
+        import_module="services.strategies.btc_eth_maker_quote",
         sort_order=190,
         config_schema={
             "param_fields": [
+                *crypto_scope_config_schema().get("param_fields", []),
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
                 {
-                    "key": "strategy_mode",
-                    "label": "Strategy Mode",
-                    "type": "enum",
-                    "options": ["auto", "directional", "maker_quote", "convergence"],
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
                 },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "list"},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="btc_eth_directional_edge",
+        source_key="crypto",
+        import_module="services.strategies.btc_eth_directional_edge",
+        sort_order=192,
+        config_schema={
+            "param_fields": [
+                *crypto_scope_config_schema().get("param_fields", []),
+                {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
+                {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
+                {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
+                {
+                    "key": "direction_guardrail_prob_floor",
+                    "label": "Direction Guardrail Prob Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {
+                    "key": "direction_guardrail_price_floor",
+                    "label": "Direction Guardrail Price Floor",
+                    "type": "number",
+                    "min": 0,
+                    "max": 1,
+                },
+                {"key": "direction_guardrail_regimes", "label": "Direction Guardrail Regimes", "type": "list"},
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="crypto_5m_midcycle",
+        source_key="crypto",
+        import_module="services.strategies.crypto_5m_midcycle",
+        sort_order=193,
+        config_schema={
+            "param_fields": [
+                {"key": "enabled", "label": "Enabled", "type": "boolean", "default": True, "phase": "signal"},
+                {
+                    "key": "assets",
+                    "label": "Assets",
+                    "type": "list",
+                    "options": ["BTC", "ETH", "SOL", "XRP"],
+                    "default": ["SOL", "XRP"],
+                    "phase": "signal",
+                },
+                {
+                    "key": "min_distance_bps",
+                    "label": "Min |Distance from Reference| (bps)",
+                    "type": "number",
+                    "min": 0.0,
+                    "max": 1000.0,
+                    "default": 5.0,
+                    "phase": "signal",
+                },
+                {
+                    "key": "max_entry_price",
+                    "label": "Max VWAP Entry Price",
+                    "type": "number",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "default": 0.70,
+                    "phase": "execution",
+                },
+                {
+                    "key": "min_entry_price",
+                    "label": "Min VWAP Entry Price",
+                    "type": "number",
+                    "min": 0.0,
+                    "max": 1.0,
+                    "default": 0.05,
+                    "phase": "execution",
+                },
+                {
+                    "key": "bet_size_usd",
+                    "label": "Bet Size (USD)",
+                    "type": "number",
+                    "min": 1.0,
+                    "max": 10000.0,
+                    "default": 15.0,
+                    "phase": "execution",
+                },
+                {
+                    "key": "midcycle_seconds",
+                    "label": "Midcycle Milestone (sec since cycle start)",
+                    "type": "number",
+                    "min": 1.0,
+                    "max": 299.0,
+                    "default": 150.0,
+                    "phase": "signal",
+                },
+                {
+                    "key": "min_seconds_to_resolution",
+                    "label": "Min Seconds to Resolution",
+                    "type": "number",
+                    "min": 0.0,
+                    "max": 300.0,
+                    "default": 90.0,
+                    "phase": "signal",
+                },
+                {
+                    "key": "max_oracle_age_ms",
+                    "label": "Max Oracle Age (ms)",
+                    "type": "integer",
+                    "min": 0,
+                    "max": 60000,
+                    "default": 5000,
+                    "phase": "signal",
+                },
+            ]
+        },
+    ),
+    SystemOpportunityStrategySeed(
+        slug="btc_eth_convergence",
+        source_key="crypto",
+        import_module="services.strategies.btc_eth_convergence",
+        sort_order=194,
+        config_schema={
+            "param_fields": [
                 *crypto_scope_config_schema().get("param_fields", []),
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
@@ -1023,22 +1161,20 @@ def build_system_opportunity_strategy_rows(*, now: datetime | None = None) -> li
 
 
 async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> int:
+    """Insert any missing shipped strategies; never overwrite existing rows.
+
+    Once a strategy row exists for a registered seed slug, this function
+    leaves it alone — the user's edits to ``source_code``, ``config``,
+    ``config_schema``, etc. are preserved across reboots. To get a
+    fresh copy of the shipped template, call ``reset_strategy_to_factory``
+    explicitly (wired to the ``POST /{id}/reset-to-factory`` endpoint).
+
+    Tombstones are no longer consulted — deleted strategies stay deleted.
+    Users who want a shipped template back can hit reset-to-factory or
+    re-create manually.
+    """
     rows = build_system_opportunity_strategy_rows()
     seed_by_slug = {row["slug"]: row for row in rows}
-    try:
-        tombstoned_slugs = set(
-            (
-                await session.execute(
-                    select(StrategyTombstone.slug).where(StrategyTombstone.slug.in_(list(seed_by_slug.keys())))
-                )
-            )
-            .scalars()
-            .all()
-        )
-    except (ProgrammingError, OperationalError):
-        # Backward compatibility for environments mid-upgrade where the tombstone table
-        # might not exist yet. Seeder behavior falls back to legacy non-tombstoned mode.
-        tombstoned_slugs = set()
     existing = {
         plugin.slug: plugin
         for plugin in (
@@ -1049,53 +1185,15 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
     }
 
     inserted = 0
-    rewritten = 0
     for slug, row in seed_by_slug.items():
-        if slug in tombstoned_slugs:
+        if slug in existing:
+            # Row exists — leave it alone, regardless of is_system.
             continue
+        session.add(Strategy(**row))
+        inserted += 1
 
-        current = existing.get(slug)
-        if current is None:
-            session.add(Strategy(**row))
-            inserted += 1
-            continue
-
-        if bool(current.is_system):
-            current_config = dict(current.config or {})
-            seed_defaults = dict(row.get("config") or {})
-            merged_config = {**seed_defaults, **current_config}
-            if str(row.get("source_key") or "") == "crypto":
-                merged_config = normalize_crypto_legacy_config(merged_config)
-            config_changed = current_config != merged_config
-            source_changed = (
-                str(current.source_key or "") != str(row["source_key"])
-                or str(current.name or "") != str(row["name"])
-                or str(current.description or "") != str(row["description"])
-                or str(current.source_code or "") != str(row["source_code"])
-                or str(current.class_name or "") != str(row["class_name"])
-                or dict(current.config_schema or {}) != dict(row["config_schema"] or {})
-                or int(current.sort_order or 0) != int(row["sort_order"] or 0)
-            )
-            if source_changed:
-                current.source_key = row["source_key"]
-                current.name = row["name"]
-                current.description = row["description"]
-                current.source_code = row["source_code"]
-                current.class_name = row["class_name"]
-                current.config_schema = row["config_schema"]
-                current.is_system = True
-                current.status = "unloaded"
-                current.error_message = None
-                current.version = int(current.version or 1) + 1
-                current.sort_order = row["sort_order"]
-                current.updated_at = row["updated_at"]
-                rewritten += 1
-            if config_changed:
-                current.config = merged_config
-                current.updated_at = row["updated_at"]
-            continue
-
-        continue
+    # Track removals separately so the return-value semantics survive.
+    rewritten = 0
 
     # Disable old execution-only duplicate slugs that are now aliases on
     # unified entries, plus any previously removed strategies.
@@ -1147,6 +1245,11 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
         "btc_5m_reversal_sniper",
         "btc_5m_threshold_flip",
         "crypto_twin_parallel",
+        # Replaced by 3 standalone strategies: btc_eth_maker_quote,
+        # btc_eth_directional_edge, btc_eth_convergence (each independently
+        # user-editable). Existing trader rows pointing at "btc_eth_highfreq"
+        # will need to be retargeted to one of the new slugs.
+        "btc_eth_highfreq",
     ]
     orphan_rows = {
         row.slug: row
@@ -1200,15 +1303,18 @@ async def ensure_all_strategies_seeded(session: AsyncSession) -> dict:
 
 
 async def reset_strategy_to_factory(session: AsyncSession, slug: str) -> dict:
-    """Reset a system strategy to its factory seed definition.
+    """Reset a strategy to its shipped seed definition.
 
-    Only works for system strategies with a corresponding seed.
-    Returns dict with status and details.
+    Works for any slug that has a registered seed in
+    ``SYSTEM_OPPORTUNITY_STRATEGY_SEEDS`` — ``is_system`` is no longer
+    a precondition. Returns ``{"status": "not_found", ...}`` when the
+    slug has no shipped seed (i.e. user-authored strategies have nothing
+    to revert to).
     """
     rows = build_system_opportunity_strategy_rows()
     seed_row = next((r for r in rows if r["slug"] == slug), None)
     if seed_row is None:
-        return {"status": "not_found", "detail": f"No system seed for slug '{slug}'"}
+        return {"status": "not_found", "detail": f"No shipped seed for slug '{slug}'"}
 
     current = (await session.execute(select(Strategy).where(Strategy.slug == slug))).scalar_one_or_none()
 
