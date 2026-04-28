@@ -38,6 +38,7 @@ from services.strategy_helpers.crypto_strategy_utils import (
     first_present as _first_present,
     resolve_oracle_availability as _resolve_oracle_availability,
     extract_oracle_status as _extract_oracle_status,
+    enrich_crypto_market_row as _enrich_crypto_market_row,
     normalize_timeframe,
 )
 from services.data_events import DataEvent
@@ -4910,38 +4911,21 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             if not (0.0 <= up_price <= 1.0 and 0.0 <= down_price <= 1.0):
                 continue
 
-            price_to_beat = self._float(market.get("price_to_beat"))
-            oracle_price = self._float(market.get("oracle_price"))
-            oracle_status = _extract_oracle_status(
-                live_market={},
-                payload={
-                    "oracle_price": oracle_price,
-                    "oracle_source": market.get("oracle_source"),
-                    "oracle_updated_at_ms": market.get("oracle_updated_at_ms"),
-                    "oracle_age_seconds": market.get("oracle_age_seconds"),
-                    "price_to_beat": price_to_beat,
-                    "oracle_prices_by_source": market.get("oracle_prices_by_source"),
-                },
-                now_ms=int(time.time() * 1000.0),
-            )
+            # Read enriched fields stamped by market_runtime.  When the
+            # caller passed a raw dict (tests / legacy callers), enrich
+            # in-place so this strategy is callable in isolation without
+            # market_runtime sitting upstream.
+            if "oracle_status" not in market or "regime" not in market:
+                _enrich_crypto_market_row(market)
+            oracle_status = market.get("oracle_status") or {}
             oracle_price = self._float(oracle_status.get("price"))
             price_to_beat = self._float(oracle_status.get("price_to_beat"))
             has_oracle = bool(oracle_status.get("available"))
 
-            timeframe_seconds = self._timeframe_seconds(market.get("timeframe"))
+            timeframe_seconds = int(market.get("timeframe_seconds") or self._timeframe_seconds(market.get("timeframe")))
             seconds_left = self._float(market.get("seconds_left"))
             if seconds_left is None:
-                end_time = market.get("end_time")
-                if isinstance(end_time, str) and end_time.strip():
-                    try:
-                        from datetime import datetime as _dt, timezone as _tz
-
-                        parsed = _dt.fromisoformat(end_time.replace("Z", "+00:00"))
-                        seconds_left = max(0.0, (parsed - _dt.now(_tz.utc)).total_seconds())
-                    except Exception:
-                        seconds_left = float(timeframe_seconds)
-                else:
-                    seconds_left = float(timeframe_seconds)
+                seconds_left = float(timeframe_seconds)
             is_live = bool(market.get("is_live")) if isinstance(market.get("is_live"), bool) else (seconds_left > 0.0)
             is_current = bool(market.get("is_current")) if isinstance(market.get("is_current"), bool) else is_live
             start_time = str(market.get("start_time") or "").strip() or None
@@ -4950,26 +4934,21 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
                 str(market.get("fetched_at") or market.get("snapshot_fetched_at") or "").strip() or None
             )
             market_data_age_ms = self._float(market.get("market_data_age_ms"))
-            if market_data_age_ms is None and live_market_fetched_at:
-                parsed_fetched_at = parse_datetime_utc(live_market_fetched_at)
-                if parsed_fetched_at is not None:
-                    market_data_age_ms = max(
-                        0.0,
-                        (datetime.now(timezone.utc) - parsed_fetched_at.astimezone(timezone.utc)).total_seconds()
-                        * 1000.0,
-                    )
 
-            regime = self._crypto_regime(seconds_left, timeframe_seconds)
+            regime = str(market.get("regime") or self._crypto_regime(seconds_left, timeframe_seconds))
 
             # --- Latency-arb detect: only signal when oracle shows decisive move ---
             # The oracle (Binance direct WS) updates 30-90s before the Polymarket
-            # order book reprices.  We exploit this lag by entering when the oracle
-            # has moved decisively from price_to_beat AND the market price hasn't
-            # caught up yet.
-            if has_oracle and price_to_beat is not None and oracle_price is not None:
-                diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
+            # order book reprices.  diff_pct/oracle_move_pct are stamped by
+            # market_runtime; fall back to local compute for raw-dict callers.
+            diff_pct_raw = market.get("oracle_diff_pct")
+            if diff_pct_raw is None:
+                if has_oracle and price_to_beat is not None and oracle_price is not None:
+                    diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
+                else:
+                    diff_pct = 0.0
             else:
-                diff_pct = 0.0
+                diff_pct = float(diff_pct_raw)
 
             oracle_move_pct = abs(diff_pct)
 

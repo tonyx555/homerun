@@ -18,6 +18,7 @@ from services.intent_runtime import get_intent_runtime
 from services.machine_learning_sdk import get_machine_learning_sdk
 from services.reference_runtime import get_reference_runtime
 from services.runtime_status import runtime_status
+from services.strategy_helpers.crypto_strategy_utils import enrich_crypto_market_row
 from services.worker_state import read_worker_control, summarize_worker_stats, write_worker_snapshot
 from services.ws_feeds import get_feed_manager
 from utils.converters import normalize_identifier as _normalize_market_id
@@ -1639,6 +1640,11 @@ class MarketRuntime:
             down_price = _to_float(row.get("down_price"))
             row["combined"] = (up_price + down_price) if up_price is not None and down_price is not None else None
             row["price_updated_at"] = now_iso
+            # Stamp shared per-market derived fields once here so the
+            # 3 BTC/ETH crypto strategies can READ them instead of each
+            # recomputing extract_oracle_status / regime / age on the
+            # event-dispatch hot path.  See enrich_crypto_market_row.
+            enrich_crypto_market_row(row, now_ms=int(now_dt.timestamp() * 1000))
             rebuilt.append(row)
         return rebuilt
 

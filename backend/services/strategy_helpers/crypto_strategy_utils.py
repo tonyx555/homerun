@@ -5,6 +5,8 @@ importing code never needs to distinguish between the two locations.
 """
 from __future__ import annotations
 
+import time
+from datetime import datetime, timezone
 from typing import Any
 
 # Re-export everything from the canonical location so importers of
@@ -189,3 +191,99 @@ def extract_oracle_status(
         "directional_state": "available" if directional_available else "unavailable",
         "directional_reasons": [],
     }
+
+
+# ---------------------------------------------------------------------------
+# Shared per-market enrichment — runs ONCE in market_runtime, strategies READ
+# ---------------------------------------------------------------------------
+
+
+def compute_regime(seconds_left: float, timeframe_seconds_value: int) -> str:
+    """Classify a crypto market window as opening / mid / closing."""
+    denom = float(max(1, int(timeframe_seconds_value)))
+    ratio = float(seconds_left) / denom
+    if ratio > 1.0:
+        ratio = 1.0
+    elif ratio < 0.0:
+        ratio = 0.0
+    if ratio > 0.67:
+        return "opening"
+    if ratio < 0.33:
+        return "closing"
+    return "mid"
+
+
+def enrich_crypto_market_row(
+    row: dict[str, Any],
+    *,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    """Stamp shared per-market derived fields onto a crypto market row in-place.
+
+    Computes once what the 3 BTC/ETH strategies were each duplicating per
+    crypto_update event:
+
+      * ``oracle_status`` — normalised dict from ``extract_oracle_status``
+      * ``timeframe_seconds`` — canonical window length in seconds
+      * ``regime`` — opening / mid / closing
+      * ``market_data_age_ms`` — populated from ``fetched_at`` if absent
+      * ``oracle_diff_pct`` / ``oracle_move_pct`` — signed and absolute %
+        between oracle price and price_to_beat (0.0 when oracle missing)
+
+    Idempotent. Safe on partial inputs — missing oracle yields a status
+    dict with ``available == False`` and zero diffs.
+    """
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    oracle_status = extract_oracle_status(
+        live_market={},
+        payload={
+            "oracle_price": row.get("oracle_price"),
+            "oracle_source": row.get("oracle_source"),
+            "oracle_updated_at_ms": row.get("oracle_updated_at_ms"),
+            "oracle_age_seconds": row.get("oracle_age_seconds"),
+            "price_to_beat": row.get("price_to_beat"),
+            "oracle_prices_by_source": row.get("oracle_prices_by_source"),
+        },
+        now_ms=float(now_ms),
+    )
+    row["oracle_status"] = oracle_status
+
+    tf_seconds = timeframe_seconds(row.get("timeframe"), default=900)
+    row["timeframe_seconds"] = tf_seconds
+
+    seconds_left_raw = row.get("seconds_left")
+    if seconds_left_raw is None:
+        seconds_left_value = float(tf_seconds)
+    else:
+        try:
+            seconds_left_value = float(seconds_left_raw)
+        except (TypeError, ValueError):
+            seconds_left_value = float(tf_seconds)
+    row["regime"] = compute_regime(seconds_left_value, tf_seconds)
+
+    if row.get("market_data_age_ms") is None:
+        fetched_at = row.get("fetched_at") or row.get("snapshot_fetched_at")
+        if fetched_at:
+            parsed = parse_datetime_utc(str(fetched_at))
+            if parsed is not None:
+                row["market_data_age_ms"] = max(
+                    0.0,
+                    (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+                    * 1000.0,
+                )
+
+    oracle_price = oracle_status.get("price")
+    price_to_beat = oracle_status.get("price_to_beat")
+    diff_pct = 0.0
+    if (
+        oracle_price is not None
+        and price_to_beat is not None
+        and float(price_to_beat) > 0.0
+    ):
+        diff_pct = ((float(oracle_price) - float(price_to_beat)) / float(price_to_beat)) * 100.0
+    row["oracle_diff_pct"] = diff_pct
+    row["oracle_move_pct"] = abs(diff_pct)
+
+    return row
