@@ -18,13 +18,13 @@
   <a href="https://github.com/braedonsaunders/codeflow"><img src=".github/codeflow-card.svg" alt="Homerun codebase stats — powered by codeflow" width="100%" /></a>
 </p>
 
-![Homerun Dashboard — Market Scanner](./screenshots/dashboard-scanner.png)
-
-<br />
-
 > **If you can fetch the signal, you can trade the signal.**
 >
 > Homerun is a full-stack platform for building, backtesting, and executing prediction market trading systems. Write strategies and data sources in pure Python. Connect any signal — RSS, REST APIs, Twitter, Chainlink, Binance, custom scripts — into any strategy. Validate, backtest, paper trade, then go live. Everything is hot-reloadable, DB-managed, and version-controlled.
+
+<br />
+
+![Homerun Dashboard — Market Scanner](./screenshots/dashboard-scanner.png)
 
 <br />
 
