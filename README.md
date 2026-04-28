@@ -39,8 +39,6 @@ Most trading bots give you a toy DSL and a rigid pipeline. Homerun gives you **f
 | Execution | Single venue | Polymarket + Kalshi + paper, unified pipeline |
 | AI | Bolted on | Native LLM scoring, semantic search, autonomous research agent |
 
-<br />
-
 ## What's Inside
 
 ### Strategy Engine
