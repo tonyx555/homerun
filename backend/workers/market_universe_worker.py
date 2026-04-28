@@ -88,6 +88,9 @@ async def _run_with_timeout_budget(coro, *, timeout_seconds: float, label: str):
     timeout_budget = max(0.01, float(timeout_seconds))
     existing = _inflight_timed_tasks.get(label)
     if existing is not None and not existing.done():
+        close = getattr(coro, "close", None)
+        if callable(close):
+            close()
         raise _TimedTaskStillRunningError(label)
 
     task = asyncio.create_task(coro, name=f"market-universe-{label}")

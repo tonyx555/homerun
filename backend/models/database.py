@@ -327,6 +327,8 @@ class RetryableAsyncSession(AsyncSession):
         # this session; without this a wait_for-cancelled execute on the
         # same session would surface isce / "another operation in
         # progress" the next time we touch the connection.
+        from utils.retry import is_db_connection_broken
+
         await self._wait_inflight()
         inner = asyncio.ensure_future(super().execute(statement, params=params, **kwargs))
         self._track_inflight(inner)
@@ -335,7 +337,17 @@ class RetryableAsyncSession(AsyncSession):
         except asyncio.CancelledError:
             self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
-        except DBAPIError:
+        except DBAPIError as exc:
+            # Connection-broken errors (e.g. asyncpg
+            # ``cannot switch to state X; another operation in progress``)
+            # mean the underlying socket's protocol state is corrupted —
+            # rollback would race the still-active inner task and the
+            # next checkout would reuse the poisoned connection.  Drain
+            # the inner first, then drop the connection so the pool
+            # replaces it.
+            if is_db_connection_broken(exc):
+                self._fire_and_forget(self._drain_then_invalidate(inner))
+                raise
             try:
                 await self._reset_after_failed_execute()
             except Exception:
@@ -4120,6 +4132,7 @@ _connect_args: dict = {
     "server_settings": {
         "timezone": "UTC",
         "statement_timeout": str(max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))),
+        "lock_timeout": str(max(100, int(settings.DATABASE_LOCK_TIMEOUT_MS))),
         "idle_in_transaction_session_timeout": str(max(1000, int(settings.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS))),
         # TCP keepalive on the server side of each connection — detect dead
         # clients within ~90 seconds (60s idle + 3×10s probes) instead of
@@ -4209,6 +4222,9 @@ def _on_checkout(dbapi_connection, connection_record, connection_proxy):
                 f"SET statement_timeout = '{max(1000, int(settings.DATABASE_STATEMENT_TIMEOUT_MS))}'"
             )
             cursor.execute(
+                f"SET lock_timeout = '{max(100, int(settings.DATABASE_LOCK_TIMEOUT_MS))}'"
+            )
+            cursor.execute(
                 "SET idle_in_transaction_session_timeout = "
                 f"'{max(1000, int(settings.DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS))}'"
             )
@@ -4277,13 +4293,19 @@ AsyncSessionLocal = sessionmaker(async_engine, class_=RetryableAsyncSession, exp
 # overflow — we WANT ``pool_timeout`` errors surfaced fast if the pool saturates
 # rather than queueing behind slow work.
 #
-# Statement timeout is aggressive (1500ms): any DB query the fast path makes
+# Statement timeout is aggressive (2500ms): any DB query the fast path makes
 # that runs longer than that is pathological and should fail loud instead of
-# holding a connection.
+# holding a connection. Lock timeout is shorter (500ms) so a row contended
+# by the scanner / orchestrator surfaces as a clean LockNotAvailable error
+# (which the retry path handles cleanly) instead of letting the wait expand
+# the query into the statement-timeout window — that path is the one that
+# corrupts the asyncpg protocol state and produces the recurring
+# "cannot switch to state X; another operation (Y) is in progress" warnings.
 
 _FAST_POOL_SIZE = 4
 _FAST_MAX_OVERFLOW = 0
-_FAST_STATEMENT_TIMEOUT_MS = 1500
+_FAST_STATEMENT_TIMEOUT_MS = 2500
+_FAST_LOCK_TIMEOUT_MS = 500
 _FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS = 3000
 _FAST_POOL_TIMEOUT_SECONDS = 2
 
@@ -4298,10 +4320,11 @@ _fast_engine_kw: dict = {
 }
 _fast_connect_args: dict = {
     "timeout": float(max(1.0, float(settings.DATABASE_CONNECT_TIMEOUT_SECONDS))),
-    "command_timeout": float(max(2.0, (_FAST_STATEMENT_TIMEOUT_MS / 1000.0) + 1.0)),
+    "command_timeout": float(max(3.0, (_FAST_STATEMENT_TIMEOUT_MS / 1000.0) + 1.0)),
     "server_settings": {
         "timezone": "UTC",
         "statement_timeout": str(_FAST_STATEMENT_TIMEOUT_MS),
+        "lock_timeout": str(_FAST_LOCK_TIMEOUT_MS),
         "idle_in_transaction_session_timeout": str(_FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS),
         "tcp_keepalives_idle": "30",
         "tcp_keepalives_interval": "5",
@@ -4329,6 +4352,7 @@ def _fast_on_checkout(dbapi_connection, connection_record, connection_proxy):  #
         cursor = dbapi_connection.cursor()
         try:
             cursor.execute(f"SET statement_timeout = '{_FAST_STATEMENT_TIMEOUT_MS}'")
+            cursor.execute(f"SET lock_timeout = '{_FAST_LOCK_TIMEOUT_MS}'")
             cursor.execute(f"SET idle_in_transaction_session_timeout = '{_FAST_IDLE_IN_TRANSACTION_TIMEOUT_MS}'")
         finally:
             cursor.close()

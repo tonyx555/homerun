@@ -57,8 +57,8 @@ async def test_market_catalog_storage_strips_nested_event_markets_and_relinks_on
         assert row.event_count == 1
         assert row.market_count == 2
         assert isinstance(row.events_json, list)
-        assert isinstance(row.events_json[0], dict)
-        assert "markets" not in row.events_json[0]
+        assert row.events_json == []
+        assert row.markets_json == []
 
     async with session_factory() as session:
         events, markets, metadata = await read_market_catalog(

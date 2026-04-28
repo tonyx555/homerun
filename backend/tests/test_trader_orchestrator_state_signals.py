@@ -54,3 +54,10 @@ async def test_list_unconsumed_trade_signals_excludes_cold_scanner_rows_from_sch
     assert "coalesce(trade_signals.source, '')" in compiled
     assert "trade_signals.runtime_sequence is not null" in compiled
     assert "execution_activation" not in compiled
+    # The slow GROUP BY MAX subquery has been replaced with NOT EXISTS
+    # against trader_signal_consumption — the unique constraint
+    # (trader_id, signal_id) lets the planner anti-join row-by-row using
+    # the index instead of materialising the entire ledger.
+    assert "not (exists" in compiled
+    assert "group by trader_signal_consumption.signal_id" not in compiled
+    assert "max(trader_signal_consumption.consumed_at)" not in compiled

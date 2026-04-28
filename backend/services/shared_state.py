@@ -1,16 +1,19 @@
 """
-Shared state: DB as single source of truth.
-Scanner worker writes a small status snapshot plus normalized active opportunity state;
-API and other workers read from DB.
+Shared state for scanner/trader workers.
+Small operational snapshots live in DB. The scanner market catalog keeps DB metadata
+plus an atomic local payload file so large catalogs do not monopolize Postgres.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from threading import Lock
 from typing import Any, Optional
 
@@ -75,13 +78,12 @@ _TRADERS_SNAPSHOT_WRITE_STATEMENT_TIMEOUT_MS = 4000
 _MARKET_CATALOG_WRITE_STATEMENT_TIMEOUT_MS = 8000
 _SCANNER_STATE_PROJECTION_STATEMENT_TIMEOUT_MS = 8000
 
-# Process-local TTL cache for the market_catalog row.  The catalog row
-# carries a tens-of-megabytes ``markets_json`` payload; reading it
-# costs ~1s end-to-end (TOAST decompression + transfer + deserialise)
-# regardless of how warm the buffer cache is.  The catalog updates at
-# roughly the scanner cadence (~1 write/minute), so a 5s TTL keeps
-# every reader within one cycle of fresh data while collapsing dozens
-# of redundant 68 MB transfers per minute into a single fetch.
+# Process-local TTL cache for the market catalog payload.  The catalog can
+# be tens of megabytes; reading it repeatedly costs noticeable I/O and JSON
+# decoding time even when it no longer comes from Postgres TOAST storage.
+# The catalog updates at roughly the scanner cadence (~1 write/minute), so
+# a 5s TTL keeps readers within one cycle of fresh data while collapsing
+# redundant reads into a single fetch.
 #
 # The cache is per-process; cross-process invalidation relies solely
 # on the TTL.  ``write_market_catalog`` clears it eagerly so the
@@ -478,6 +480,127 @@ async def write_scanner_snapshot(
 # ---------------------------------------------------------------------------
 
 CATALOG_ID = "latest"
+_MARKET_CATALOG_FILE_VERSION = 1
+_MARKET_CATALOG_FILE_PATH = (
+    Path(__file__).resolve().parents[2] / "data" / "cache" / "market_catalog_latest.json"
+)
+
+
+def _catalog_file_updated_at(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+def _write_market_catalog_file(
+    events_payload: list[Any],
+    markets_payload: list[Any],
+    *,
+    updated_at: datetime,
+    duration_seconds: float,
+    error: str | None,
+) -> None:
+    path = _MARKET_CATALOG_FILE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f"{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with tmp_path.open("w", encoding="utf-8") as handle:
+            json.dump(
+                {
+                    "version": _MARKET_CATALOG_FILE_VERSION,
+                    "updated_at": _catalog_file_updated_at(updated_at),
+                    "event_count": len(events_payload),
+                    "market_count": len(markets_payload),
+                    "fetch_duration_seconds": duration_seconds,
+                    "error": error,
+                    "events": events_payload,
+                    "markets": markets_payload,
+                },
+                handle,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                default=str,
+            )
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+
+
+def _read_market_catalog_file() -> tuple[list[Any], list[Any], dict[str, Any]] | None:
+    path = _MARKET_CATALOG_FILE_PATH
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    events_payload = payload.get("events")
+    markets_payload = payload.get("markets")
+    if not isinstance(events_payload, list) or not isinstance(markets_payload, list):
+        return None
+    try:
+        event_count = int(payload.get("event_count") or len(events_payload))
+        market_count = int(payload.get("market_count") or len(markets_payload))
+    except (TypeError, ValueError):
+        return None
+    metadata = {
+        "updated_at": parse_iso_datetime(str(payload.get("updated_at") or ""), naive=True)
+        if payload.get("updated_at")
+        else None,
+        "event_count": event_count,
+        "market_count": market_count,
+        "fetch_duration_seconds": payload.get("fetch_duration_seconds"),
+        "error": payload.get("error"),
+    }
+    return events_payload, markets_payload, metadata
+
+
+def _catalog_file_matches_metadata(
+    events_payload: list[Any],
+    markets_payload: list[Any],
+    file_metadata: dict[str, Any],
+    metadata: dict[str, Any],
+) -> bool:
+    event_count = metadata.get("event_count")
+    market_count = metadata.get("market_count")
+    try:
+        if event_count is not None and int(event_count) != len(events_payload):
+            return False
+        if market_count is not None and int(market_count) != len(markets_payload):
+            return False
+    except (TypeError, ValueError):
+        return False
+    db_updated_at = metadata.get("updated_at")
+    if isinstance(db_updated_at, datetime):
+        file_updated_at = file_metadata.get("updated_at")
+        if not isinstance(file_updated_at, datetime):
+            return False
+        if file_updated_at.tzinfo is not None:
+            file_updated_at = file_updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if db_updated_at.tzinfo is not None:
+            db_updated_at = db_updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+        if abs((file_updated_at - db_updated_at).total_seconds()) > 0.001:
+            return False
+    return True
+
+
+def _catalog_file_is_newer(file_metadata: dict[str, Any], db_metadata: dict[str, Any]) -> bool:
+    file_updated_at = file_metadata.get("updated_at")
+    db_updated_at = db_metadata.get("updated_at")
+    if not isinstance(file_updated_at, datetime) or not isinstance(db_updated_at, datetime):
+        return False
+    if file_updated_at.tzinfo is not None:
+        file_updated_at = file_updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    if db_updated_at.tzinfo is not None:
+        db_updated_at = db_updated_at.astimezone(timezone.utc).replace(tzinfo=None)
+    return file_updated_at >= db_updated_at
 
 
 def relink_event_markets(events: list, markets: list) -> None:
@@ -505,7 +628,7 @@ async def write_market_catalog(
     duration_seconds: float = 0.0,
     error: str | None = None,
 ) -> None:
-    """Persist the upstream market catalog (events + markets) to DB."""
+    """Persist catalog payload to the local cache file and scalar metadata to DB."""
     from models.database import MarketCatalog
 
     def _serialize_catalog_payloads() -> tuple[list[Any], list[Any]]:
@@ -532,28 +655,51 @@ async def write_market_catalog(
         return events_payload, markets_payload
 
     events_payload, markets_payload = await asyncio.to_thread(_serialize_catalog_payloads)
+    updated_at = utcnow()
+    should_replace_catalog = error is None or bool(events_payload) or bool(markets_payload)
+    if should_replace_catalog:
+        await asyncio.to_thread(
+            _write_market_catalog_file,
+            events_payload,
+            markets_payload,
+            updated_at=updated_at,
+            duration_seconds=duration_seconds,
+            error=error,
+        )
 
     await _apply_local_db_timeouts(
         session,
         statement_timeout_ms=_MARKET_CATALOG_WRITE_STATEMENT_TIMEOUT_MS,
     )
 
-    updated_at = utcnow()
     values = {
         "updated_at": updated_at,
-        "events_json": events_payload,
-        "markets_json": markets_payload,
-        "event_count": len(events_payload),
-        "market_count": len(markets_payload),
-        "fetch_duration_seconds": duration_seconds,
         "error": error,
     }
+    if should_replace_catalog:
+        values.update(
+            {
+                "events_json": [],
+                "markets_json": [],
+                "event_count": len(events_payload),
+                "market_count": len(markets_payload),
+                "fetch_duration_seconds": duration_seconds,
+            }
+        )
 
     update_result = await session.execute(
         update(MarketCatalog).where(MarketCatalog.id == CATALOG_ID).values(**values)
     )
     if int(update_result.rowcount or 0) == 0:
-        session.add(MarketCatalog(id=CATALOG_ID, **values))
+        insert_values = {
+            "events_json": [],
+            "markets_json": [],
+            "event_count": len(events_payload) if should_replace_catalog else 0,
+            "market_count": len(markets_payload) if should_replace_catalog else 0,
+            "fetch_duration_seconds": duration_seconds if should_replace_catalog else None,
+            **values,
+        }
+        session.add(MarketCatalog(id=CATALOG_ID, **insert_values))
     await _commit_with_retry(session)
     # Drop the read-side cache so this process's next read sees the
     # write it just made.  Other processes pick it up via TTL.
@@ -640,6 +786,54 @@ async def _fetch_market_catalog_full(
     return events_text_value, markets_text_value, metadata
 
 
+def _decode_catalog_text(events_text: str, markets_text: str) -> tuple[list[Any], list[Any]]:
+    def _decode_text(text_value: str) -> list[Any]:
+        if not text_value:
+            return []
+        try:
+            decoded = json.loads(text_value)
+        except Exception:
+            return []
+        return decoded if isinstance(decoded, list) else []
+
+    return _decode_text(events_text), _decode_text(markets_text)
+
+
+async def _fetch_market_catalog_payloads(
+    session: AsyncSession,
+) -> tuple[list[Any], list[Any], dict[str, Any]]:
+    metadata = await _fetch_market_catalog_metadata(session)
+    metadata_has_catalog_row = "event_count" in metadata or "market_count" in metadata
+    if metadata_has_catalog_row:
+        async with release_conn(session):
+            file_payload = await asyncio.to_thread(_read_market_catalog_file)
+        if file_payload is not None:
+            events_payload, markets_payload, file_metadata = file_payload
+            metadata_matches = _catalog_file_matches_metadata(
+                events_payload,
+                markets_payload,
+                file_metadata,
+                metadata,
+            )
+            file_is_newer = _catalog_file_is_newer(file_metadata, metadata)
+            if metadata_matches or file_is_newer:
+                if metadata_matches:
+                    merged_metadata = dict(file_metadata)
+                    merged_metadata.update({key: value for key, value in metadata.items() if value is not None})
+                else:
+                    merged_metadata = dict(file_metadata)
+                return events_payload, markets_payload, merged_metadata
+
+    events_text, markets_text, metadata = await _fetch_market_catalog_full(session)
+    async with release_conn(session):
+        events_payload, markets_payload = await asyncio.to_thread(
+            _decode_catalog_text,
+            events_text,
+            markets_text,
+        )
+    return events_payload, markets_payload, metadata
+
+
 async def read_market_catalog(
     session: AsyncSession,
     *,
@@ -649,10 +843,10 @@ async def read_market_catalog(
 ) -> tuple[list, list, dict[str, Any]]:
     """Read persisted market catalog. Returns (events, markets, metadata).
 
-    Backed by a process-local TTL cache (~5s) for the JSON-heavy paths
-    so dozens of readers within a single scanner cycle share one DB
-    fetch.  The metadata-only path bypasses the cache because it does
-    not touch the JSON columns and is already cheap.
+    Backed by a process-local TTL cache (~5s) for the JSON-heavy paths so
+    readers within a single scanner cycle share one payload decode. The
+    metadata-only path bypasses the cache because it only reads small DB
+    scalar columns and is already cheap.
     """
     from models.market import Event, Market
 
@@ -678,46 +872,30 @@ async def read_market_catalog(
                 and (time.monotonic() - loaded_at) < _MARKET_CATALOG_CACHE_TTL_SECONDS
             )
             if not fresh:
-                events_text, markets_text, metadata = await _fetch_market_catalog_full(session)
-                cache["events_text"] = events_text
-                cache["markets_text"] = markets_text
+                events_payload, markets_payload, metadata = await _fetch_market_catalog_payloads(session)
+                cache["events_payload"] = events_payload
+                cache["markets_payload"] = markets_payload
                 cache["metadata"] = metadata
                 cache["loaded_at_mono"] = time.monotonic()
 
-    cached_events_text: str = cache.get("events_text") or "" if include_events else ""
-    cached_markets_text: str = cache.get("markets_text") or "" if include_markets else ""
+    cached_events_payload: list[Any] = list(cache.get("events_payload") or []) if include_events else []
+    cached_markets_payload: list[Any] = list(cache.get("markets_payload") or []) if include_markets else []
     metadata = dict(cache.get("metadata") or {"updated_at": None, "error": None})
 
-    import json as _json
-
-    def _decode_text(text_value: str) -> list[Any]:
-        if not text_value:
-            return []
-        try:
-            decoded = _json.loads(text_value)
-        except Exception:
-            return []
-        return decoded if isinstance(decoded, list) else []
-
     if not validate:
-        def _decode_only() -> tuple[list, list]:
-            return _decode_text(cached_events_text), _decode_text(cached_markets_text)
-
-        async with release_conn(session):
-            events_only, markets_only = await asyncio.to_thread(_decode_only)
-        return events_only, markets_only, metadata
+        return cached_events_payload, cached_markets_payload, metadata
 
     def _deserialize_payload() -> tuple[list, list]:
         events: list[Any] = []
         if include_events:
-            for d in _decode_text(cached_events_text):
+            for d in cached_events_payload:
                 try:
                     events.append(Event.model_validate(d))
                 except Exception:
                     pass
         markets: list[Any] = []
         if include_markets:
-            for d in _decode_text(cached_markets_text):
+            for d in cached_markets_payload:
                 try:
                     markets.append(Market.model_validate(d))
                 except Exception:

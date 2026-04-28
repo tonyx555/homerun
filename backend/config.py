@@ -161,6 +161,14 @@ class Settings(BaseSettings):
     DATABASE_CONNECT_TIMEOUT_SECONDS: float = 8.0
     DATABASE_STATEMENT_TIMEOUT_MS: int = 30000
     DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 60000
+    # Per-statement lock-wait cap. Standard-pool callers (reconciliation,
+    # scanner snapshot writers, ad-hoc API queries) compete with the
+    # signal hot path on shared rows (trade_signals, strategy_versions).
+    # Without lock_timeout, a contended UPDATE blocks until
+    # statement_timeout fires (30s) which holds a connection and burns
+    # the per-cycle budget.  Failing fast turns lock contention into a
+    # quick clean retryable error rather than a 30-second silence.
+    DATABASE_LOCK_TIMEOUT_MS: int = 5000
 
     ORCHESTRATOR_MAINTENANCE_INTERVAL_SECONDS: float = 5.0
     MARKET_REENTRY_COOLDOWN_SECONDS: float = 600.0

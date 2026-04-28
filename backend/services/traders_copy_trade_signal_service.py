@@ -59,11 +59,13 @@ class TradersCopyTradeSignalService:
         self._running = False
         self._sync_task: asyncio.Task | None = None
         self._processor_task: asyncio.Task | None = None
+        self._processor_tasks: set[asyncio.Task] = set()
         self._replay_task: asyncio.Task | None = None
-        self._queue: asyncio.Queue[WalletTradeEvent] = asyncio.Queue(maxsize=5000)
+        self._queue: asyncio.Queue[WalletTradeEvent] = asyncio.Queue(maxsize=20000)
         self._callback_registered = False
         self._tracked_wallets: set[str] = set()
         self._recent_events: dict[str, datetime] = {}
+        self._queued_event_keys: set[str] = set()
         self._token_cache: dict[str, tuple[datetime, _TokenMarketSnapshot]] = {}
         self._execution_wallet: str = ""
         self._scope_refresh_interval_seconds = 15
@@ -74,6 +76,7 @@ class TradersCopyTradeSignalService:
         self._replay_cursor_detected_at: datetime | None = None
         self._replay_cursor_id: str = ""
         self._replay_wakeup = asyncio.Event()
+        self._processor_concurrency = 8
         self._overflow_direct_process_semaphore = asyncio.Semaphore(16)
         self._strategy_missing_warned = False
         self._background_tasks: set[asyncio.Task] = set()
@@ -93,7 +96,16 @@ class TradersCopyTradeSignalService:
         self._replay_cursor_detected_at = utcnow()
         self._replay_cursor_id = ""
         self._sync_task = asyncio.create_task(self._scope_sync_loop())
-        self._processor_task = asyncio.create_task(self._processor_loop())
+        self._processor_tasks = set()
+        for index in range(self._processor_concurrency):
+            task = asyncio.create_task(
+                self._processor_loop(),
+                name=f"traders-copy-signal-processor-{index + 1}",
+            )
+            self._processor_tasks.add(task)
+            task.add_done_callback(self._processor_tasks.discard)
+            if index == 0:
+                self._processor_task = task
         self._replay_task = asyncio.create_task(self._replay_loop())
         logger.info("Traders copy-trade signal service started")
 
@@ -107,6 +119,9 @@ class TradersCopyTradeSignalService:
             self._sync_task.cancel()
         if self._processor_task and not self._processor_task.done():
             self._processor_task.cancel()
+        for task in list(self._processor_tasks):
+            if not task.done():
+                task.cancel()
         if self._replay_task and not self._replay_task.done():
             self._replay_task.cancel()
         for task in list(self._background_tasks):
@@ -126,15 +141,20 @@ class TradersCopyTradeSignalService:
 
     async def _processor_loop(self) -> None:
         while self._running:
+            event: WalletTradeEvent | None = None
+            event_key = ""
             try:
                 event = await self._queue.get()
             except asyncio.CancelledError:
                 raise
             try:
+                event_key = self._event_dedupe_key(event)
                 await self._process_wallet_trade_event(event)
             except Exception as exc:
                 logger.warning("Copy-trade signal processing failed", exc_info=exc)
             finally:
+                if event_key:
+                    self._queued_event_keys.discard(event_key)
                 self._queue.task_done()
 
     async def _replay_loop(self) -> None:
@@ -229,9 +249,16 @@ class TradersCopyTradeSignalService:
             return
         if self._execution_wallet and wallet == self._execution_wallet:
             return
+        event_key = self._event_dedupe_key(event)
+        now = utcnow()
+        self._prune_recent_events(now)
+        if event_key in self._recent_events or event_key in self._queued_event_keys:
+            return
+        self._queued_event_keys.add(event_key)
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:
+            self._queued_event_keys.discard(event_key)
             logger.warning(
                 "Copy-trade signal queue full; replay fallback activated",
                 wallet=wallet,
@@ -335,8 +362,7 @@ class TradersCopyTradeSignalService:
 
         return tracked_wallets | pool_wallets | group_wallets | individual_wallets
 
-    def _is_duplicate_event(self, event: WalletTradeEvent) -> bool:
-        now = utcnow()
+    def _event_dedupe_key(self, event: WalletTradeEvent) -> str:
         # NOTE: do NOT include block_number in the dedupe key. tx_hash
         # already uniquely identifies a chain event; block_number is 0
         # for pre-confirmation observations and N for post-confirmation,
@@ -347,7 +373,7 @@ class TradersCopyTradeSignalService:
         # with block=N) for every dropped signal. The signal-emission
         # dedupe at the bottom of _process_wallet_trade_event already
         # excludes block_number; keep the two consistent.
-        event_key = make_dedupe_key(
+        return make_dedupe_key(
             "traders_copy_trade",
             str(event.wallet_address or "").strip().lower(),
             str(event.tx_hash or "").strip().lower(),
@@ -358,10 +384,17 @@ class TradersCopyTradeSignalService:
             round(max(0.0, safe_float(event.price, 0.0)), 8),
             round(max(0.0, safe_float(event.size, 0.0)), 8),
         )
+
+    def _prune_recent_events(self, now: datetime) -> None:
         stale_before = now - timedelta(seconds=self._event_dedupe_ttl_seconds)
         stale_keys = [key for key, seen_at in self._recent_events.items() if seen_at < stale_before]
         for key in stale_keys:
             self._recent_events.pop(key, None)
+
+    def _is_duplicate_event(self, event: WalletTradeEvent) -> bool:
+        now = utcnow()
+        event_key = self._event_dedupe_key(event)
+        self._prune_recent_events(now)
         if event_key in self._recent_events:
             return True
         self._recent_events[event_key] = now

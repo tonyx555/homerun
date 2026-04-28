@@ -147,6 +147,58 @@ class TestScannerInit:
         assert "tail_end_carry" not in incremental
         assert "tail_end_carry" in full_snapshot
 
+    def test_polymarket_active_filter_requires_condition_and_clob_token(self):
+        from services.scanner import ArbitrageScanner
+
+        now = utcnow()
+        tradable = Market(
+            id="market-tradable",
+            condition_id="condition-tradable",
+            question="Will this trade?",
+            slug="tradable",
+            clob_token_ids=["yes-token", "no-token"],
+            outcome_prices=[0.52, 0.48],
+        )
+        missing_tokens = Market(
+            id="market-missing-tokens",
+            condition_id="condition-missing-tokens",
+            question="Missing tokens?",
+            slug="missing-tokens",
+            clob_token_ids=[],
+            outcome_prices=[0.52, 0.48],
+        )
+        orderbook_disabled = Market(
+            id="market-disabled",
+            condition_id="condition-disabled",
+            question="Disabled order book?",
+            slug="disabled",
+            clob_token_ids=["yes-token", "no-token"],
+            outcome_prices=[0.52, 0.48],
+            enable_order_book=False,
+        )
+        json_token_ids = SimpleNamespace(
+            platform="polymarket",
+            condition_id="condition-json",
+            clob_token_ids='["yes-token","no-token"]',
+        )
+        single_token_market = SimpleNamespace(
+            platform="polymarket",
+            condition_id="condition-single",
+            clob_token_ids=["outcome-token"],
+        )
+        empty_json_token_ids = SimpleNamespace(
+            platform="polymarket",
+            condition_id="condition-empty-json",
+            clob_token_ids="[]",
+        )
+
+        assert ArbitrageScanner._is_market_active(tradable, now) is True
+        assert ArbitrageScanner._is_market_active(json_token_ids, now) is True
+        assert ArbitrageScanner._is_market_active(single_token_market, now) is True
+        assert ArbitrageScanner._is_market_active(missing_tokens, now) is False
+        assert ArbitrageScanner._is_market_active(empty_json_token_ids, now) is False
+        assert ArbitrageScanner._is_market_active(orderbook_disabled, now) is False
+
 
 # ---------------------------------------------------------------------------
 # scan pipeline (refresh_catalog + scan_fast)
@@ -224,6 +276,7 @@ class TestScanPipeline:
             condition_id="condition-timeout-fallback",
             question="Will fallback market stay available?",
             slug="timeout-fallback",
+            clob_token_ids=["fallback-yes-token", "fallback-no-token"],
             outcome_prices=[0.52, 0.48],
         )
         mock_polymarket_client.get_all_events.side_effect = asyncio.TimeoutError()

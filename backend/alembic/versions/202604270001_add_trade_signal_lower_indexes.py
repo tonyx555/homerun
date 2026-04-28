@@ -10,14 +10,22 @@ query filters with ``func.lower(func.coalesce(TradeSignal.status, ""))``
 and ``func.lower(func.coalesce(TradeSignal.source, ""))``, which defeats
 the plain B-tree indexes on ``status`` and ``source``.
 
-Also: the per-trader anti-join against ``trader_signal_consumption``
-groups by ``signal_id`` to find the latest ``consumed_at`` per signal.
-The existing unique constraint ``(trader_id, signal_id)`` is sufficient
-for lookup but not for the GROUP BY + MAX path the planner takes.  A
-composite index ``(trader_id, signal_id, consumed_at DESC)`` lets the
-subquery become a simple index range scan.
+Also: the anti-join against ``trader_signal_consumption`` (rewritten as
+``NOT EXISTS`` on top of the unique ``(trader_id, signal_id)`` constraint)
+becomes an index-only scan when the index also includes ``consumed_at``
+so the planner does not have to fetch the heap to evaluate
+``consumed_at >= signal_sort_ts``.
 
 Same pattern as 202603310001 (lower_wallet_address_indexes).
+
+NOTE on locking: Plain ``CREATE INDEX`` takes a SHARE lock on the table
+which blocks writers for the index build duration. ``CONCURRENTLY``
+would avoid that, but cannot run inside a transaction and conflicts
+with the way ``init_database`` wraps migrations in
+``async_engine.begin()``. Since this migration only adds indexes (no
+DML), if you need to apply it on a high-write table without blocking
+writes, drop the indexes here and create them out-of-band with
+``CREATE INDEX CONCURRENTLY``.
 """
 from __future__ import annotations
 
@@ -47,7 +55,8 @@ def upgrade() -> None:
     )
     # Composite index for the per-trader consumption anti-join.  Order
     # matters: trader_id first (equality filter), signal_id second
-    # (join key), consumed_at DESC last (so MAX is an index-only scan).
+    # (join key), consumed_at DESC last so the NOT EXISTS subquery
+    # filtering on ``consumed_at >= signal_sort_ts`` is index-only.
     op.execute(
         "CREATE INDEX IF NOT EXISTS "
         "idx_trader_signal_consumption_trader_signal_consumed "

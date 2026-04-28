@@ -906,6 +906,17 @@ class ArbitrageScanner:
         if end_date is not None and end_date <= now:
             return False
 
+        platform = str(getattr(market, "platform", "polymarket") or "polymarket").strip().lower()
+        if platform == "polymarket":
+            condition_id = str(getattr(market, "condition_id", "") or "").strip()
+            clob_token_ids = ArbitrageScanner._coerce_market_token_ids(
+                getattr(market, "clob_token_ids", None)
+            )
+            if not condition_id or not clob_token_ids:
+                return False
+            if getattr(market, "enable_order_book", None) is False:
+                return False
+
         if bool(getattr(market, "closed", False)):
             return False
         if bool(getattr(market, "resolved", False)):

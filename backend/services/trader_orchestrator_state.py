@@ -6610,36 +6610,55 @@ async def list_unconsumed_trade_signals(
             or 0
         ) > 0
     signal_sort_ts = func.coalesce(TradeSignal.updated_at, TradeSignal.created_at)
-    max_consumed_subq = (
-        select(
-            TraderSignalConsumption.signal_id,
-            func.max(TraderSignalConsumption.consumed_at).label("max_consumed_at"),
-        )
-        .where(TraderSignalConsumption.trader_id == trader_id)
-        .group_by(TraderSignalConsumption.signal_id)
-        .subquery("max_consumed")
-    )
-    reactivated_after_consumption_clause = and_(
-        max_consumed_subq.c.max_consumed_at.is_not(None),
-        signal_sort_ts > max_consumed_subq.c.max_consumed_at,
-    )
-    pending_unconsumed_clause = and_(
-        max_consumed_subq.c.max_consumed_at.is_(None),
-        func.lower(func.coalesce(TradeSignal.status, "")) == "pending",
-    )
-    pending_unconsumed_cursor_bypass_clause = and_(
-        pending_unconsumed_clause,
-        cursor_signal_consumed,
-    )
-    query = (
-        select(TradeSignal)
-        .outerjoin(max_consumed_subq, TradeSignal.id == max_consumed_subq.c.signal_id)
+    # Replace the LEFT JOIN + GROUP BY MAX with two correlated NOT EXISTS
+    # subqueries. The uq_trader_signal_consumption (trader_id, signal_id)
+    # constraint guarantees at most one row per pair, so MAX(consumed_at)
+    # was always redundant work. Anti-join via NOT EXISTS lets the planner
+    # short-circuit per row using the unique index instead of materializing
+    # the entire consumption ledger for the trader.
+    unconsumed_or_reactivated_clause = ~(
+        select(TraderSignalConsumption.id)
         .where(
-            or_(
-                max_consumed_subq.c.max_consumed_at.is_(None),
-                reactivated_after_consumption_clause,
+            and_(
+                TraderSignalConsumption.trader_id == trader_id,
+                TraderSignalConsumption.signal_id == TradeSignal.id,
+                TraderSignalConsumption.consumed_at >= signal_sort_ts,
             )
         )
+        .exists()
+    )
+    never_consumed_clause = ~(
+        select(TraderSignalConsumption.id)
+        .where(
+            and_(
+                TraderSignalConsumption.trader_id == trader_id,
+                TraderSignalConsumption.signal_id == TradeSignal.id,
+            )
+        )
+        .exists()
+    )
+    pending_unconsumed_clause = and_(
+        never_consumed_clause,
+        func.lower(func.coalesce(TradeSignal.status, "")) == "pending",
+    )
+    # The cursor-bypass branch is only meaningful when the cursor signal
+    # has already been consumed; otherwise it can never widen the result
+    # set (cursor advances strictly forward), so collapse the clause to
+    # FALSE rather than emit an EXISTS subquery the planner has to evaluate.
+    if cursor_signal_consumed:
+        pending_unconsumed_cursor_bypass_clause = pending_unconsumed_clause
+    else:
+        pending_unconsumed_cursor_bypass_clause = sa_text("FALSE")
+    # Within the result set (outer WHERE already enforces
+    # unconsumed_or_reactivated), "reactivated" is exactly the complement
+    # of "never consumed" — i.e. the signal has a consumption row that
+    # predates the latest signal_sort_ts. We use this for cursor-bypass
+    # branches so reactivated signals re-emerge even when their
+    # runtime_sequence falls below the cursor.
+    reactivated_after_consumption_clause = ~never_consumed_clause
+    query = (
+        select(TradeSignal)
+        .where(unconsumed_or_reactivated_clause)
         .where(or_(TradeSignal.expires_at.is_(None), TradeSignal.expires_at >= now))
         .where(scanner_runtime_ready_clause)
         .limit(max(1, min(limit, 5000)))
