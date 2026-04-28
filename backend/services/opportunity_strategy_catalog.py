@@ -8,14 +8,12 @@ import re
 import uuid
 
 from sqlalchemy import select
-from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models.database import Strategy, StrategyTombstone
+from models.database import Strategy
 from services.strategy_sdk import StrategySDK
 from services.strategy_helpers.crypto_scope import (
     crypto_scope_config_schema,
-    merge_crypto_defaults,
 )
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema

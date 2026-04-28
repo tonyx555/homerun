@@ -33,7 +33,7 @@ import re
 import time
 from typing import Any, Optional
 
-from models import Event, Market, Opportunity
+from models import Market, Opportunity
 from services.data_events import DataEvent
 from services.strategies.base import BaseStrategy
 from services.strategy_helpers.cycle_tracker import CycleTracker
