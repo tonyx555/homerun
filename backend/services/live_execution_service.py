@@ -255,6 +255,42 @@ def _validated_positive_float(value: Any, *, field_name: str) -> float:
     return float(parsed)
 
 
+def _normalize_clob_metadata(value: Any) -> Optional[str]:
+    """Coerce a CLOB ``OrderArgs.metadata`` payload to a valid bytes32 hex
+    string, or ``None`` if the input is not usable.
+
+    The ``py_clob_client_v2`` order builder feeds ``metadata`` through
+    ``bytes.fromhex(value.replace("0x", "").zfill(64))`` so any non-hex
+    character (a colon, brace, comma, etc.) raises ``ValueError`` from
+    deep inside the signing thread and the order is lost. Upstream
+    callers historically pass either:
+
+      * a deterministic 0x-prefixed bytes32 (the fast-tier idempotency
+        key) — keep as-is,
+      * ``None`` / empty string — drop, the SDK substitutes BYTES32_ZERO,
+      * a stringified dict / opportunity id / debug tag — drop with a
+        warning; the order still places, it just loses venue-side
+        discoverability.
+
+    Returning ``None`` here is equivalent to omitting the kwarg, so the
+    SDK falls back to its default zero metadata.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    body = text[2:] if text.lower().startswith("0x") else text
+    if len(body) > 64:
+        return None
+    body = body.zfill(64)
+    try:
+        bytes.fromhex(body)
+    except ValueError:
+        return None
+    return "0x" + body
+
+
 def _tick_size_from_position(position: dict[str, Any]) -> float:
     for key in (
         "_tick_size",
@@ -3077,8 +3113,16 @@ class LiveExecutionService:
                                 price=submit_price,
                                 order_type=provider_order_type,
                             )
-                            if metadata:
-                                market_order_kwargs["metadata"] = str(metadata)
+                            normalized_metadata = _normalize_clob_metadata(metadata)
+                            if normalized_metadata is None and metadata:
+                                logger.warning(
+                                    "Dropping non-hex CLOB metadata before submission",
+                                    token_id=token_key,
+                                    side=side.value,
+                                    metadata_excerpt=str(metadata)[:80],
+                                )
+                            if normalized_metadata is not None:
+                                market_order_kwargs["metadata"] = normalized_metadata
                             order_args = MarketOrderArgs(**market_order_kwargs)
                             signed_order = await asyncio.wait_for(
                                 asyncio.to_thread(self._client.create_market_order, order_args),
@@ -3091,8 +3135,16 @@ class LiveExecutionService:
                                 side=order_side,
                                 token_id=token_key,
                             )
-                            if metadata:
-                                limit_order_kwargs["metadata"] = str(metadata)
+                            normalized_metadata = _normalize_clob_metadata(metadata)
+                            if normalized_metadata is None and metadata:
+                                logger.warning(
+                                    "Dropping non-hex CLOB metadata before submission",
+                                    token_id=token_key,
+                                    side=side.value,
+                                    metadata_excerpt=str(metadata)[:80],
+                                )
+                            if normalized_metadata is not None:
+                                limit_order_kwargs["metadata"] = normalized_metadata
                             order_args = OrderArgs(**limit_order_kwargs)
                             signed_order = await asyncio.wait_for(
                                 asyncio.to_thread(self._client.create_order, order_args),

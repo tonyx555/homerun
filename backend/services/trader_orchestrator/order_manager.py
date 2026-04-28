@@ -39,6 +39,31 @@ class LegSubmitResult:
     notional_usd: float | None = None
 
 
+def _clob_metadata_from_leg(leg: dict[str, Any]) -> str | None:
+    """Extract CLOB-compatible metadata from a leg dict.
+
+    ``leg["metadata"]`` carries two distinct shapes in this codebase:
+
+      * a 0x-prefixed bytes32 hex string (set by the fast-tier idempotency
+        path) — pass through to the venue so the reconcile sweep can match
+        the on-chain order back to its DB row,
+      * an internal bookkeeping dict (set by strategies / session_engine
+        for ExecutionPlan metadata like ``market_coverage``) — never meant
+        for the venue; stringifying it produces garbage that the CLOB SDK
+        feeds into ``bytes.fromhex`` and crashes the order with
+        "non-hexadecimal number found".
+
+    Return only string-typed metadata, leaving validation to
+    ``live_execution_service._normalize_clob_metadata`` at the actual
+    submission boundary.
+    """
+    raw = leg.get("metadata")
+    if not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    return text or None
+
+
 def _normalize_id(value: Any) -> str:
     return str(value or "").strip().lower()
 
@@ -865,7 +890,7 @@ async def submit_execution_leg(
         allow_taker_limit_buy_above_signal=allow_taker_limit_buy_above_signal,
         aggressive_limit_buy_submit_as_gtc=aggressive_limit_buy_submit_as_gtc,
         skip_buy_pre_submit_gate=skip_buy_pre_submit_gate,
-        metadata=str(leg.get("metadata") or "") or None,
+        metadata=_clob_metadata_from_leg(leg),
     )
 
     execution_error_text = str(execution.error_message or "").lower()
