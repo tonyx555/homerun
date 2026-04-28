@@ -1438,184 +1438,22 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         candidate: HighFreqCandidate,
         selected: SubStrategyScore,
     ) -> Optional[Opportunity]:
-        """Turn a scored sub-strategy into an Opportunity via the base
-        class ``create_opportunity`` (which applies all hard filters)."""
+        """Turn a scored convergence sub-strategy into an Opportunity via the
+        base class ``create_opportunity`` (which applies all hard filters)."""
 
         market = candidate.market
         sub = selected.strategy
         params = selected.params
 
-        if sub == SubStrategy.MAKER_QUOTE:
-            return self._generate_maker_quote(candidate, params)
-        elif sub == SubStrategy.DIRECTIONAL_EDGE:
-            return self._generate_directional_edge(candidate, params)
-        elif sub == SubStrategy.CONVERGENCE:
+        if sub == SubStrategy.CONVERGENCE:
             return self._generate_convergence(candidate, params)
 
         logger.warning(
-            "BtcEthHighFreq: unknown sub-strategy %s for market %s",
+            "BtcEthConvergence: unsupported sub-strategy %s for market %s",
             sub,
             market.id,
         )
         return None
-
-    def _generate_directional_edge(
-        self,
-        c: HighFreqCandidate,
-        params: dict,
-    ) -> Optional[Opportunity]:
-        """Generate opportunity for sub-strategy D: Directional Edge.
-
-        Buys only the predicted winning side (directional bet, not arb).
-        Uses maker orders to avoid taker fees and earn rebates.
-        """
-        market = c.market
-        side = params["side"]  # "UP" or "DOWN"
-        edge = params["edge"]
-        buy_price = params["buy_price"]
-        model_up = params["model_up"]
-
-        # Build single-side position
-        maker_mode = _cfg.BTC_ETH_HF_MAKER_MODE
-        positions = []
-        if market.clob_token_ids and len(market.clob_token_ids) >= 2:
-            if side == "UP":
-                token_id = market.clob_token_ids[0]
-                outcome = "YES"
-            else:
-                token_id = market.clob_token_ids[1]
-                outcome = "NO"
-
-            positions = [
-                {
-                    "action": "BUY",
-                    "outcome": outcome,
-                    "price": buy_price,
-                    "token_id": token_id,
-                    "_maker_mode": maker_mode,
-                    "_maker_price": buy_price,
-                    "post_only": maker_mode,
-                }
-            ]
-
-        # Fair value for directional bet: model probability * $1.00 payout
-        expected_payout = model_up if side == "UP" else (1.0 - model_up)
-
-        opp = self.create_opportunity(
-            title=(f"BTC/ETH HF Directional: {c.asset} {c.timeframe} ({side} edge {edge:.1%})"),
-            description=(
-                f"Directional {side} bet on {c.asset} {c.timeframe} market. "
-                f"Model: {model_up:.0%} Up / {1 - model_up:.0%} Down. "
-                f"Market: {params['market_up']:.1%} Up. "
-                f"Edge: {edge:.1%}. "
-                f"{'Maker order (0% fee + rebates).' if maker_mode else ''}"
-            ),
-            total_cost=buy_price,
-            expected_payout=expected_payout,
-            markets=[market],
-            positions=positions,
-            is_guaranteed=False,  # Directional, not guaranteed
-            min_liquidity_hard=200.0,
-            min_position_size=5.0,
-            min_absolute_profit=0.5,
-        )
-
-        if opp is not None:
-            self._attach_highfreq_metadata(
-                opp,
-                c,
-                SubStrategy.DIRECTIONAL_EDGE,
-                params,
-            )
-            opp.risk_factors.insert(
-                0,
-                f"Directional bet: profit depends on {c.asset} going {side}",
-            )
-        return opp
-
-    def _generate_maker_quote(
-        self,
-        c: HighFreqCandidate,
-        params: dict,
-    ) -> Optional[Opportunity]:
-        """Generate opportunity for Layer 1: Maker Quote.
-
-        Places post_only limit buy orders on BOTH YES and NO sides,
-        1 tick below each side's current ask.  Earns the bid-ask spread
-        plus maker rebates when both sides fill.  Oracle skew tilts quotes
-        toward the predicted winner for additional directional edge.
-        """
-        market = c.market
-        quote_yes = params["quote_yes"]
-        quote_no = params["quote_no"]
-        combined_cost = params["combined_cost"]
-        size_usd = params["size_usd"]
-
-        positions: list[dict] = []
-        if market.clob_token_ids and len(market.clob_token_ids) >= 2:
-            positions = [
-                {
-                    "action": "LIMIT_BUY",
-                    "outcome": "YES",
-                    "price": quote_yes,
-                    "token_id": market.clob_token_ids[0],
-                    "post_only": True,
-                    "_maker_mode": True,
-                    "_maker_price": quote_yes,
-                    "note": f"Maker quote YES @ ${quote_yes:.2f}",
-                },
-                {
-                    "action": "LIMIT_BUY",
-                    "outcome": "NO",
-                    "price": quote_no,
-                    "token_id": market.clob_token_ids[1],
-                    "post_only": True,
-                    "_maker_mode": True,
-                    "_maker_price": quote_no,
-                    "note": f"Maker quote NO @ ${quote_no:.2f}",
-                },
-            ]
-
-        spread_capture = params["spread_capture"]
-        oracle_skew = params.get("oracle_skew", 0.0)
-
-        opp = self.create_opportunity(
-            title=(
-                f"BTC/ETH HF Maker Quote: {c.asset} {c.timeframe} "
-                f"(spread ${spread_capture:.3f})"
-            ),
-            description=(
-                f"Two-sided maker quoting on {c.asset} {c.timeframe} market. "
-                f"Quote YES@${quote_yes:.2f} + NO@${quote_no:.2f} = "
-                f"${combined_cost:.4f} for $1.00 payout. "
-                f"Spread capture: ${spread_capture:.4f}. "
-                f"Oracle skew: {oracle_skew:+.4f}. "
-                f"Post-only maker orders (0% taker fee + rebates)."
-            ),
-            total_cost=combined_cost,
-            expected_payout=1.0,
-            markets=[market],
-            positions=positions,
-            is_guaranteed=False,
-            min_liquidity_hard=0.0,
-            min_position_size=0.0,
-            min_absolute_profit=0.0,
-        )
-
-        if opp is not None:
-            opp.max_position_size = max(opp.max_position_size, size_usd * 2.0)
-            self._attach_highfreq_metadata(
-                opp,
-                c,
-                SubStrategy.MAKER_QUOTE,
-                params,
-            )
-            opp.risk_factors.insert(
-                0,
-                "Maker quote: profit requires BOTH sides filling; "
-                "single-side fill creates directional exposure",
-            )
-        return opp
 
     def _generate_convergence(
         self,
