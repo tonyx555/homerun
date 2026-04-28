@@ -20,17 +20,26 @@ The token must be subscribed; production strategies should call
 ``feed_manager.polymarket_feed.subscribe(token_ids=...)`` once on market
 discovery to keep the cache warm.
 
-Rolling per-market price history:
+Rolling price windows:
 
-    StrategySDK.MarketPriceHistory  # @dataclass, window-evicting deque
-    StrategySDK.PriceSnapshot       # single (yes, no) observation
+    StrategySDK.PriceWindow         # generic single-stream rolling window
+                                    # (use one per token / outcome / feed)
 
-Both are available as class attributes; instantiate directly:
+For any market (binary, multi-outcome, cycle), keep a
+``dict[token_id, StrategySDK.PriceWindow]`` — one window per outcome's
+token id. For external feeds (oracle, spot, etc.) instantiate a single
+``PriceWindow`` keyed by whatever stream identifier you choose.
 
-    history = StrategySDK.MarketPriceHistory(window_seconds=60)
-    history.record(yes_price=0.55, no_price=0.45)
-    if history.has_data:
-        vol = history.recent_volatility()
+Cycle markets (5-minute / 15-minute / 1-hour crypto over-under, etc.):
+
+    StrategySDK.CycleTracker        # idempotent milestone tracking
+                                    # (only meaningful for recurring markets)
+    StrategySDK.time_to_resolution  # universal: works on any market
+
+Binary fair-value math (cash-or-nothing digital under zero-drift GBM):
+
+    StrategySDK.prob_above(value, threshold, vol_per_sec, seconds_remaining)
+    StrategySDK.prob_below(value, threshold, vol_per_sec, seconds_remaining)
 """
 
 from __future__ import annotations
@@ -38,6 +47,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import json
 import logging
+import math
 from pathlib import Path
 import re
 import time
@@ -48,8 +58,13 @@ from services.strategy_helpers.crypto_scope import (
     crypto_scope_config_schema as _crypto_scope_config_schema,
     normalize_crypto_legacy_config as _normalize_crypto_legacy_config,
 )
-from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot
-from services.strategy_helpers import crypto_strategy_utils as _crypto_utils
+from services.strategy_helpers.price_window import PriceWindow
+from services.strategy_helpers.cycle_tracker import CycleTracker
+# Note: crypto_strategy_utils is loaded lazily via a descriptor below to
+# avoid a circular import — that module re-exports from
+# services.strategies.crypto_strategy_utils, and importing it at
+# module-load time triggers services.strategies.__init__.py, which in
+# turn imports strategies (e.g. news_edge) that import StrategySDK.
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +87,18 @@ class StrategySDK:
         )
     """
 
-    # Re-exports of the price-history dataclasses so any strategy can do
-    # ``StrategySDK.MarketPriceHistory(window_seconds=60)`` without
-    # importing from the helpers module directly.
-    MarketPriceHistory = MarketPriceHistory
-    PriceSnapshot = PriceSnapshot
+    # PriceWindow is the canonical rolling-window primitive — it makes
+    # no outcome assumptions and works for any single price stream
+    # (one outcome of a multi-outcome market, a crypto spot price, an
+    # oracle feed, etc.). Multi-stream callers maintain their own
+    # ``dict[stream_id, PriceWindow]``.
+    PriceWindow = PriceWindow
+
+    # CycleTracker is opt-in: only meaningful for fixed-cycle recurring
+    # markets (e.g. Polymarket's 5m / 15m / 1h crypto over-under
+    # markets). One-shot markets like elections or sports should use
+    # ``time_to_resolution`` and reason about their lifecycle directly.
+    CycleTracker = CycleTracker
 
     # Re-exports of the crypto-strategy scope helpers, available to any
     # strategy without a direct import. Use these to honor the same
@@ -125,7 +147,23 @@ class StrategySDK:
     # market_ml_probability_yes, history_cancel_peak), fee (taker_fee_pct,
     # fee_aware_min_edge_pct), and generic (first_present, normalize_ratio,
     # normalize_signed_ratio, bounded_sigmoid, parse_datetime_utc).
-    crypto = _crypto_utils
+    class _CryptoDescriptor:
+        """Lazy proxy for ``services.strategy_helpers.crypto_strategy_utils``.
+
+        Resolved on first access to avoid pulling the strategies-package
+        init chain at SDK module-load time. Returns the actual module so
+        ``StrategySDK.crypto.foo(...)`` works exactly like a direct import.
+        """
+
+        _resolved = None
+
+        def __get__(self, obj, objtype=None):
+            if StrategySDK._CryptoDescriptor._resolved is None:
+                from services.strategy_helpers import crypto_strategy_utils as _module
+                StrategySDK._CryptoDescriptor._resolved = _module
+            return StrategySDK._CryptoDescriptor._resolved
+
+    crypto = _CryptoDescriptor()
 
     _ai_instance = None
 
@@ -2499,6 +2537,169 @@ class StrategySDK:
         if denom <= 0.0:
             return None
         return (bid_size - ask_size) / denom
+
+    # ── Market lifecycle ───────────────────────────────────────
+
+    @staticmethod
+    def _coerce_end_ts_ms(value: Any) -> Optional[int]:
+        """Best-effort extract a resolution-time epoch-millis int from
+        a Market ORM object, a market dict, an ISO datetime string, a
+        ``datetime``, or a raw int/float.
+        """
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+        if isinstance(value, datetime):
+            try:
+                return int(value.timestamp() * 1000.0)
+            except (OSError, OverflowError, ValueError):
+                return None
+        # Pydantic / ORM Market — try common attribute names
+        for attr in ("end_date", "endDate", "end_time", "end_ts_ms", "end_ms"):
+            if hasattr(value, attr):
+                inner = getattr(value, attr)
+                if inner is not None and inner is not value:
+                    return StrategySDK._coerce_end_ts_ms(inner)
+        if isinstance(value, dict):
+            for key in ("end_date", "endDate", "end_time", "end_ts_ms", "end_ms"):
+                v = value.get(key)
+                if v is not None:
+                    return StrategySDK._coerce_end_ts_ms(v)
+            return None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                from services.strategy_helpers.crypto_strategy_utils import (
+                    parse_datetime_utc,
+                )
+
+                dt = parse_datetime_utc(text)
+                if dt is not None:
+                    return int(dt.timestamp() * 1000.0)
+            except Exception:
+                pass
+            try:
+                return int(float(text))
+            except (TypeError, ValueError):
+                return None
+        return None
+
+    @staticmethod
+    def time_to_resolution(
+        market_or_end_ts_ms: Any,
+        now_ms: Optional[int] = None,
+    ) -> Optional[float]:
+        """Seconds until the market resolves, or None if unknown.
+
+        Universal across market types — crypto, election, sports,
+        weather, anything with a parseable resolution timestamp. For
+        open-ended markets (no ``end_date``) or markets whose end time
+        can't be parsed, returns ``None``.
+
+        Args:
+            market_or_end_ts_ms: A Market ORM/Pydantic object (with
+                ``.end_date``), a market dict (``end_date`` /
+                ``endDate`` / ``end_time``), an ISO datetime string,
+                a ``datetime``, or a raw epoch-millis int/float.
+            now_ms: Wall-clock millis. Defaults to ``time.time() * 1000``.
+
+        Returns:
+            Float seconds until resolution. Negative when the market
+            is past its resolution time. ``None`` when end_date is
+            absent or unparseable.
+        """
+        end_ms = StrategySDK._coerce_end_ts_ms(market_or_end_ts_ms)
+        if end_ms is None:
+            return None
+        now = int(now_ms) if now_ms is not None else int(time.time() * 1000)
+        return (end_ms - now) / 1000.0
+
+    # ── Binary fair-value math ─────────────────────────────────
+
+    @staticmethod
+    def prob_above(
+        value: float,
+        threshold: float,
+        vol_per_sec: float,
+        seconds_remaining: float,
+    ) -> Optional[float]:
+        """P(underlying ends > threshold) under zero-drift GBM.
+
+        Cash-or-nothing digital fair value for a binary "above" market
+        (e.g. "will BTC be above $100k at 4pm?"). Useful for *any*
+        binary market resolving on a continuous underlying — crypto
+        over $K, sports total over N, temperature over X°.
+
+        Math: under GBM with zero drift,
+            P(S_T > K) = N(d2),  d2 = ln(S/K) / (sigma * sqrt(T))
+        where N is the standard normal CDF (computed via
+        ``math.erf`` — no scipy dependency).
+
+        Args:
+            value: Current underlying value (S). Must be > 0 finite.
+            threshold: Resolution threshold (K). Must be > 0 finite.
+            vol_per_sec: Per-second volatility (sigma). Must be >= 0
+                finite. Express as a unitless return per second
+                (e.g. 0.0001 for 1 bps/sec).
+            seconds_remaining: Time to resolution (T). Must be >= 0
+                finite.
+
+        Returns:
+            Probability in [0.0, 1.0]. ``None`` if any input is
+            invalid (NaN, infinite, or out-of-range).
+
+            When ``T == 0`` or ``sigma == 0`` the math is degenerate;
+            returns 1.0 if ``value > threshold``, 0.0 if
+            ``value < threshold``, 0.5 if equal.
+        """
+        try:
+            s = float(value)
+            k = float(threshold)
+            sigma = float(vol_per_sec)
+            t = float(seconds_remaining)
+        except (TypeError, ValueError):
+            return None
+        if not (
+            math.isfinite(s)
+            and math.isfinite(k)
+            and math.isfinite(sigma)
+            and math.isfinite(t)
+        ):
+            return None
+        if s <= 0.0 or k <= 0.0 or sigma < 0.0 or t < 0.0:
+            return None
+        if t == 0.0 or sigma == 0.0:
+            if s > k:
+                return 1.0
+            if s < k:
+                return 0.0
+            return 0.5
+        d2 = math.log(s / k) / (sigma * math.sqrt(t))
+        return 0.5 * (1.0 + math.erf(d2 / math.sqrt(2.0)))
+
+    @staticmethod
+    def prob_below(
+        value: float,
+        threshold: float,
+        vol_per_sec: float,
+        seconds_remaining: float,
+    ) -> Optional[float]:
+        """P(underlying ends < threshold). Equals ``1 - prob_above``.
+
+        See :meth:`prob_above` for argument semantics. Returns ``None``
+        on invalid input. At ``T == 0`` and ``S == K`` returns 0.5
+        (mirrors prob_above's tie-breaking convention).
+        """
+        p_up = StrategySDK.prob_above(value, threshold, vol_per_sec, seconds_remaining)
+        if p_up is None:
+            return None
+        return 1.0 - p_up
 
     # ── Historical price access ────────────────────────────────
 
