@@ -2,7 +2,7 @@
   <img src="./logo.png" alt="Homerun" width="340" />
   <h1>Homerun</h1>
   <p><strong>The open-source operating system for prediction market alpha.</strong></p>
-  <p>38 strategies. 39 data sources. Full Python. Paper to live. One platform.</p>
+  <p>Built-in strategies & data sources. Full Python. Paper to live. One platform.</p>
 </div>
 
 <p align="center">
@@ -53,7 +53,7 @@ Most trading bots give you a toy DSL and a rigid pipeline. Homerun gives you **f
 
 ### Strategy Engine
 
-38 built-in strategies spanning every edge in prediction markets:
+Built-in strategies spanning every edge in prediction markets:
 
 - **Cross-Platform Arbitrage** — Polymarket vs Kalshi price dislocations
 - **Basic Arb** — YES + NO sums below $1.00
@@ -69,7 +69,7 @@ Most trading bots give you a toy DSL and a rigid pipeline. Homerun gives you **f
 - **VPIN Toxicity** — Market microstructure attack detection
 - **CTF Basic Arb** — Split/merge structural arbitrage against live order books
 - **Insider Detection** — 27-point anomaly scoring on suspicious patterns
-- **Miracle Bets, Sports Overreaction Fader, Market Making** — And 20+ more
+- **Miracle Bets, Sports Overreaction Fader, Market Making** — And more
 
 Every strategy is a DB-managed Python class. Edit in the UI, validate, backtest, enable — hot-reloaded in seconds.
 
@@ -77,7 +77,7 @@ Every strategy is a DB-managed Python class. Edit in the UI, validate, backtest,
 
 ![Global Event Map — Data Sources](./screenshots/map.png)
 
-39 prebuilt data source presets plus a full custom Python template:
+Prebuilt data source presets plus a full custom Python template:
 
 - **RSS / Atom** — News wires, government feeds, sports, markets
 - **REST APIs** — Macro events, sports scores, crypto feeds, custom endpoints
@@ -262,108 +262,6 @@ class MacroFeedSource(BaseDataSource):
             for row in rows[: self._as_int(self.config.get("limit"), 200, 1, 5000)]
         ]
 ```
-
-<br />
-
-## Key API Surface
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /api/strategy-manager` | List strategies with runtime metadata |
-| `GET /api/strategy-manager/template` | Strategy starter template |
-| `GET /api/strategy-manager/docs` | Strategy developer reference |
-| `POST /api/strategy-manager/validate` | Validate strategy source code |
-| `POST /api/strategy-manager/{id}/reload` | Hot-reload strategy runtime |
-| `GET /api/data-sources` | List data sources |
-| `GET /api/data-sources/template` | Data source templates & presets |
-| `GET /api/data-sources/docs` | Data source developer reference |
-| `POST /api/data-sources/validate` | Validate source code |
-| `POST /api/data-sources/{id}/run` | Execute ingestion now |
-| `GET /api/data-sources/{id}/records` | Normalized records |
-| `GET /api/opportunities` | Unified opportunities feed |
-| `POST /api/validation/code-backtest*` | Detect/evaluate/exit backtests |
-
-Full Swagger docs at `http://localhost:8000/docs` — 26 route modules covering strategies, data sources, trading, discovery, AI, news, weather, events, crypto, ML, workers, and settings.
-
-<br />
-
-## Architecture
-
-```text
-External APIs / RSS / Python Sources / Binance WS / Chainlink
-                        |
-                        v
-               Data Source Runtime
-          (fetch -> transform -> upsert)
-                        |
-                        v
-          data_source_records table  <---------+
-                        |                      |
-                        |                 StrategySDK
-                        |            (read/run/list sources)
-                        v                      |
-       Event Dispatcher + 16 Workers           |
-   (market/news/weather/events/traders/crypto) |
-                        |                      |
-                        +--------> Strategy Runtime (DB-loaded Python)
-                                    detect / evaluate / should_exit
-                                              |
-                                              v
-                                     Opportunity + Signal
-                                              |
-                              +---------------+---------------+
-                              |               |               |
-                              v               v               v
-                         AI Judging    Risk Gates      Signal Bus
-                        (LLM score)   (exposure,     (confluence,
-                                       loss, Kelly)   copy trade)
-                                              |
-                                              v
-                                    Trader Orchestrator
-                                  (preflight -> arm -> execute)
-                                              |
-                              +---------------+---------------+
-                              |               |               |
-                              v               v               v
-                          Paper           Polymarket        Kalshi
-                        (simulation)     (CLOB live)     (live orders)
-```
-
-<br />
-
-## Project Layout
-
-```text
-homerun/
-├── backend/
-│   ├── api/                    # 26 FastAPI route modules
-│   ├── services/               # Strategy runtime, data sources, orchestrator, AI, SDKs
-│   ├── workers/                # 16 background workers
-│   ├── models/                 # 65+ SQLAlchemy ORM models
-│   └── main.py                 # App entrypoint
-├── frontend/
-│   └── src/
-│       ├── components/         # 97+ React/TypeScript components
-│       ├── services/           # API client layer
-│       └── hooks/store/lib     # Jotai state, WebSocket, keyboard shortcuts
-├── scripts/                    # Setup, run, and OS-specific launchers
-└── gui.py                      # Desktop GUI (tkinter)
-```
-
-<br />
-
-## By the Numbers
-
-| | |
-|---|---|
-| **Strategies** | 38 built-in, unlimited custom |
-| **Data Source Presets** | 39 prebuilt + custom Python template |
-| **API Routes** | 26 modules, full Swagger docs |
-| **Background Workers** | 16 concurrent, SLO-monitored |
-| **Database Models** | 65+ ORM classes, 86 migrations |
-| **Frontend Components** | 97+ React/TypeScript |
-| **Venues** | Polymarket, Kalshi, paper |
-| **AI Integrations** | LLM judging, FAISS search, autonomous Cortex agent |
 
 <br />
 
