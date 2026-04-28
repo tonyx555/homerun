@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import re
 import time
-from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -41,11 +40,7 @@ from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, _
 from services.strategy_helpers.crypto_strategy_utils import (
     parse_datetime_utc,
     first_present as _first_present,
-    normalize_oracle_source as _normalize_oracle_source,
-    to_epoch_ms as _epoch_ms,
-    compute_age_ms as _age_ms,
     resolve_oracle_availability as _resolve_oracle_availability,
-    parse_oracle_point as _oracle_point,
     extract_oracle_status as _extract_oracle_status,
 )
 from services.data_events import DataEvent
@@ -952,16 +947,11 @@ from services.strategy_helpers.price_history import MarketPriceHistory, PriceSna
 # Crypto scope helpers + timeframe utilities — moved out of this file
 # to services.strategy_helpers.crypto_scope so other modules can import
 # them without depending on this strategy file existing.
-from services.strategy_helpers.crypto_scope import (
-    CRYPTO_HF_SCOPE_CONFIG_SCHEMA,
+from services.strategy_helpers.crypto_scope import (  # noqa: E402
     CRYPTO_HF_SCOPE_DEFAULTS,
-    _LEGACY_CRYPTO_HF_ORACLE_GATE_DEFAULTS,
-    _LEGACY_CRYPTO_HF_REMOVED_SUB_STRATEGIES,
     _crypto_hf_default_param_value,
-    _matches_legacy_crypto_hf_oracle_gate,
     _normalize_timeframe,
     _timeframe_override,
-    crypto_highfreq_scope_config_schema,
     normalize_crypto_highfreq_legacy_config,
 )
 

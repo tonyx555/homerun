@@ -28,11 +28,9 @@ if str(BACKEND_ROOT) not in sys.path:
 
 from models.database import (
     Base,
-    LiveTradingPosition,
     Trader,
     TraderOrder,
 )
-from services import trader_hot_state
 from services.trader_orchestrator.position_lifecycle import (
     _LIVE_EXIT_ORDER_TIMEOUT_SECONDS,
     _LIVE_EXIT_RETRY_TIMEOUT_SECONDS,
