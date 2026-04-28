@@ -64,7 +64,7 @@ from services.opportunity_strategy_catalog import (
 )
 from services.strategy_versioning import normalize_strategy_version, resolve_strategy_version
 from services.strategy_sdk import StrategySDK
-from services.strategies.btc_eth_highfreq import normalize_crypto_highfreq_legacy_config
+from services.strategy_helpers.crypto_scope import merge_crypto_defaults
 from services.strategies.news_edge import validate_news_edge_config
 from services.strategies.traders_copy_trade import validate_traders_copy_trade_config
 from services.trader_orchestrator.templates import (
@@ -3914,8 +3914,12 @@ def _normalize_strategy_params(value: Any, source_key: str, strategy_key: str = 
         return StrategySDK.validate_trader_filter_config(out)
     if normalized_source == "news":
         return validate_news_edge_config(out)
-    if normalized_source == "crypto" and normalized_strategy_key == "btc_eth_highfreq":
-        out = normalize_crypto_highfreq_legacy_config(out)
+    if normalized_source == "crypto" and normalized_strategy_key in {
+        "btc_eth_maker_quote",
+        "btc_eth_directional_edge",
+        "btc_eth_convergence",
+    }:
+        out = merge_crypto_defaults(out)
     if "min_confidence" in out:
         out["min_confidence"] = _normalize_confidence_fraction(out.get("min_confidence"), 0.0)
     return StrategySDK.normalize_strategy_retention_config(out)

@@ -68,7 +68,7 @@ async def test_overview_stays_empty_after_deleting_last_trader(postgres_session_
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {},
                     }
                 ],
@@ -141,7 +141,7 @@ async def test_create_trader_copies_settings_from_existing_trader(postgres_sessi
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {"strategy_mode": "maker_quote"},
                     }
                 ],
@@ -200,7 +200,7 @@ async def test_create_trader_scopes_by_mode_and_list_filter(postgres_session_fac
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {},
                     }
                 ],
@@ -214,7 +214,7 @@ async def test_create_trader_scopes_by_mode_and_list_filter(postgres_session_fac
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {},
                     }
                 ],
@@ -228,7 +228,7 @@ async def test_create_trader_scopes_by_mode_and_list_filter(postgres_session_fac
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {},
                     }
                 ],
@@ -284,7 +284,7 @@ async def test_create_trader_rejects_invalid_mode(postgres_session_factory):
                     "source_configs": [
                         {
                             "source_key": "crypto",
-                            "strategy_key": "btc_eth_highfreq",
+                            "strategy_key": "btc_eth_maker_quote",
                             "strategy_params": {},
                         }
                     ],
@@ -302,7 +302,7 @@ async def test_update_trader_rejects_unknown_strategy_key(postgres_session_facto
                 "source_configs": [
                     {
                         "source_key": "crypto",
-                        "strategy_key": "btc_eth_highfreq",
+                        "strategy_key": "btc_eth_maker_quote",
                         "strategy_params": {},
                     }
                 ],

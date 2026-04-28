@@ -35,7 +35,7 @@ async def test_force_delete_cleans_up_active_orders_before_delete(tmp_path):
                 Trader(
                     id=trader_id,
                     name="Force Delete Trader",
-                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
                     risk_limits_json={},
                     metadata_json={},
                     is_enabled=True,
@@ -90,7 +90,7 @@ async def test_delete_blocks_shadow_exposure_without_force(tmp_path):
                 Trader(
                     id=trader_id,
                     name="Paper Exposure Trader",
-                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
                     risk_limits_json={},
                     metadata_json={},
                     is_enabled=True,
@@ -142,7 +142,7 @@ async def test_delete_blocks_live_exposure_without_force(tmp_path):
                 Trader(
                     id=trader_id,
                     name="Live Exposure Trader",
-                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
                     risk_limits_json={},
                     metadata_json={},
                     is_enabled=True,
@@ -196,7 +196,7 @@ async def test_force_delete_override_skips_provider_cancel_path(tmp_path, monkey
                 Trader(
                     id=trader_id,
                     name="Force Delete Override Trader",
-                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                    source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
                     risk_limits_json={},
                     metadata_json={},
                     is_enabled=True,

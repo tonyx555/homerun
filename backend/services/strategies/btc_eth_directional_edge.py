@@ -502,11 +502,11 @@ class _CryptoMarketFetcher:
             else:
                 loop.run_until_complete(feed_mgr.polymarket_feed.subscribe(token_ids=token_ids))
             logger.debug(
-                "BtcEthHighFreq: subscribed %d crypto tokens to WS feed",
+                "BtcEthDirectionalEdge: subscribed %d crypto tokens to WS feed",
                 len(token_ids),
             )
         except Exception as e:
-            logger.debug("BtcEthHighFreq: WS subscription failed (non-critical): %s", e)
+            logger.debug("BtcEthDirectionalEdge: WS subscription failed (non-critical): %s", e)
 
     @staticmethod
     def _is_currently_live(event: dict, now_ms: float) -> bool:
@@ -624,7 +624,7 @@ class _CryptoMarketFetcher:
                     )
                     if resp.status_code != 200:
                         logger.debug(
-                            "BtcEthHighFreq: Gamma series_id=%s returned %s",
+                            "BtcEthDirectionalEdge: Gamma series_id=%s returned %s",
                             series_id,
                             resp.status_code,
                         )
@@ -647,7 +647,7 @@ class _CryptoMarketFetcher:
                                     seen_ids.add(mid)
                                 except Exception as e:
                                     logger.debug(
-                                        "BtcEthHighFreq: failed to parse market %s: %s",
+                                        "BtcEthDirectionalEdge: failed to parse market %s: %s",
                                         mid,
                                         e,
                                     )
@@ -655,7 +655,7 @@ class _CryptoMarketFetcher:
                     time.sleep(0.05)  # Rate limit between series
                 except Exception as e:
                     logger.debug(
-                        "BtcEthHighFreq: series_id=%s fetch failed: %s",
+                        "BtcEthDirectionalEdge: series_id=%s fetch failed: %s",
                         series_id,
                         e,
                     )
@@ -669,13 +669,13 @@ class _CryptoMarketFetcher:
 
         if all_markets:
             logger.info(
-                "BtcEthHighFreq: fetched %d live crypto markets via Gamma series API (%s)",
+                "BtcEthDirectionalEdge: fetched %d live crypto markets via Gamma series API (%s)",
                 len(all_markets),
                 ", ".join(f"{a} {tf}" for _, a, tf in series),
             )
         else:
             logger.debug(
-                "BtcEthHighFreq: no live crypto markets found across %d series",
+                "BtcEthDirectionalEdge: no live crypto markets found across %d series",
                 len(series),
             )
         return all_markets
@@ -775,7 +775,7 @@ def _resolve_enabled_active_modes(config: Any) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot  # noqa: E402,F401
+from services.strategy_helpers.price_window import PriceWindow  # noqa: E402,F401
 
 # Crypto scope helpers + timeframe utilities — moved out of this file
 # to services.strategy_helpers.crypto_scope so other modules can import
@@ -785,7 +785,7 @@ from services.strategy_helpers.crypto_scope import (  # noqa: E402
     _crypto_hf_default_param_value,
     _normalize_timeframe,
     _timeframe_override,
-    normalize_crypto_highfreq_legacy_config,
+    merge_crypto_defaults,
 )
 
 
@@ -879,7 +879,9 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         # so the detect path just needs to pass every market through.
         self.min_profit = 0.0
         # Per-market price history keyed by market ID
-        self._price_histories: dict[str, MarketPriceHistory] = {}
+        self._price_windows: dict[str, PriceWindow] = {}
+        # Keyed by CLOB token id (one window per outcome stream) so a 3+ outcome
+        # market would just track more entries; binary markets get exactly 2.
         # Runtime anti-churn controls used by evaluate().
         self._edge_first_seen_ms: dict[str, int] = {}
         self._last_selected_at_ms_by_market: dict[str, int] = {}
@@ -888,7 +890,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         self._paused_until_ms: int = 0
 
     def configure(self, config: dict) -> None:
-        super().configure(normalize_crypto_highfreq_legacy_config(config))
+        super().configure(merge_crypto_defaults(config))
 
     # ------------------------------------------------------------------
     # Public API
@@ -914,15 +916,15 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
 
         candidates = self._find_candidates(markets, prices)
         if not candidates:
-            logger.debug("BtcEthHighFreq: no BTC/ETH high-freq candidates found")
+            logger.debug("BtcEthDirectionalEdge: no BTC/ETH high-freq candidates found")
             return opportunities
 
         enabled_sub_strategies = _resolve_enabled_sub_strategies(getattr(self, "config", {}))
         if not enabled_sub_strategies:
-            logger.info("BtcEthHighFreq: no sub-strategies enabled in config; skipping detection")
+            logger.info("BtcEthDirectionalEdge: no sub-strategies enabled in config; skipping detection")
             return opportunities
 
-        logger.info(f"BtcEthHighFreq: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
+        logger.info(f"BtcEthDirectionalEdge: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
 
         for candidate in candidates:
             # Update price history
@@ -933,7 +935,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             if selected is None:
                 reasons = " | ".join(f"{s.strategy.value}: {s.reason}" for s in all_scores)
                 logger.debug(
-                    f"BtcEthHighFreq: no viable sub-strategy for market "
+                    f"BtcEthDirectionalEdge: no viable sub-strategy for market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"yes={candidate.yes_price:.3f} no={candidate.no_price:.3f} "
                     f"liq=${candidate.market.liquidity:.0f}) — {reasons}"
@@ -942,7 +944,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
 
             scores_str = ", ".join(f"{s.strategy.value}={s.score:.1f}" for s in all_scores)
             logger.info(
-                f"BtcEthHighFreq: market {candidate.market.id} "
+                f"BtcEthDirectionalEdge: market {candidate.market.id} "
                 f"({candidate.asset} {candidate.timeframe}) — "
                 f"selected {selected.strategy.value} (score={selected.score:.1f}). "
                 f"All scores: {scores_str}"
@@ -953,13 +955,13 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             if opp is not None:
                 opportunities.append(opp)
                 logger.info(
-                    f"BtcEthHighFreq: opportunity detected — {opp.title} | "
+                    f"BtcEthDirectionalEdge: opportunity detected — {opp.title} | "
                     f"ROI {opp.roi_percent:.2f}% | sub-strategy={selected.strategy.value} | "
                     f"market={candidate.market.id}"
                 )
             else:
                 logger.debug(
-                    f"BtcEthHighFreq: create_opportunity rejected market "
+                    f"BtcEthDirectionalEdge: create_opportunity rejected market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"sub={selected.strategy.value}, score={selected.score:.1f}) — "
                     f"hard filters in base strategy blocked it "
@@ -967,7 +969,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
                     f"liq=${candidate.market.liquidity:.0f})"
                 )
 
-        logger.info(f"BtcEthHighFreq: scan complete — {len(opportunities)} opportunity(ies) found")
+        logger.info(f"BtcEthDirectionalEdge: scan complete — {len(opportunities)} opportunity(ies) found")
         return opportunities
 
     # ------------------------------------------------------------------
@@ -1002,7 +1004,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             pass  # Non-fatal: fall back to scanner markets only
 
         logger.debug(
-            f"BtcEthHighFreq: scanning {len(all_markets)} markets "
+            f"BtcEthDirectionalEdge: scanning {len(all_markets)} markets "
             f"({len(markets)} from scanner, {len(all_markets) - len(markets)} from Gamma)"
         )
 
@@ -1025,7 +1027,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
                 asset_hit_no_tf += 1
                 if asset_hit_no_tf <= 5:
                     logger.debug(
-                        f"BtcEthHighFreq: asset={asset} but no timeframe — "
+                        f"BtcEthDirectionalEdge: asset={asset} but no timeframe — "
                         f"slug={market.slug} question={market.question[:80]}"
                     )
                 continue
@@ -1115,26 +1117,42 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def _update_price_history(self, candidate: HighFreqCandidate) -> None:
-        """Record the latest prices into the rolling window for this market."""
-        mid = candidate.market.id
-        if mid not in self._price_histories:
-            if candidate.timeframe == "4hr":
-                window = _4HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "1hr":
-                window = _1HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "5min":
-                window = 120  # 2 min for 5-min markets
-            else:
-                window = _DEFAULT_HISTORY_WINDOW_SEC
-            self._price_histories[mid] = MarketPriceHistory(window_seconds=window)
+        """Record latest outcome prices into per-token PriceWindows.
 
-        self._price_histories[mid].record(
-            candidate.yes_price,
-            candidate.no_price,
-        )
+        One :class:`PriceWindow` per CLOB token id. Binary markets get two
+        windows (yes + no); a future 3+ outcome market would naturally
+        produce N windows without any code change.
+        """
+        if candidate.timeframe == "4hr":
+            window = _4HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "1hr":
+            window = _1HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "5min":
+            window = 120  # 2 min for 5-min markets
+        else:
+            window = _DEFAULT_HISTORY_WINDOW_SEC
 
-    def _get_history(self, market_id: str) -> Optional[MarketPriceHistory]:
-        return self._price_histories.get(market_id)
+        token_ids = list(candidate.market.clob_token_ids or [])
+        prices = [candidate.yes_price, candidate.no_price]
+        for token_id, price in zip(token_ids, prices):
+            if not token_id:
+                continue
+            existing = self._price_windows.get(token_id)
+            if existing is None or existing.window_seconds != window:
+                existing = PriceWindow(window_seconds=window)
+                self._price_windows[token_id] = existing
+            existing.record(price)
+
+    def _get_price_window(self, token_id: str) -> Optional[PriceWindow]:
+        """Return the rolling :class:`PriceWindow` for a specific token id.
+
+        Returns None when no observations have been recorded for that
+        token. Strategies that need yes-side or no-side stats should
+        look up the relevant token id (``market.clob_token_ids[0]`` for
+        YES, ``[1]`` for NO on a binary market) and call methods on the
+        returned window.
+        """
+        return self._price_windows.get(token_id)
 
     # ------------------------------------------------------------------
     # Dynamic strategy selector
@@ -1392,7 +1410,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             return self._generate_directional_edge(candidate, params)
 
         logger.warning(
-            "BtcEthHighFreq: unknown sub-strategy %s for market %s",
+            "BtcEthDirectionalEdge: unknown sub-strategy %s for market %s",
             sub,
             market.id,
         )
@@ -1460,7 +1478,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         )
 
         if opp is not None:
-            self._attach_highfreq_metadata(
+            self._attach_substrategy_metadata(
                 opp,
                 c,
                 SubStrategy.DIRECTIONAL_EDGE,
@@ -1476,7 +1494,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _attach_highfreq_metadata(
+    def _attach_substrategy_metadata(
         opp: Opportunity,
         candidate: HighFreqCandidate,
         sub_strategy: SubStrategy,
@@ -1488,7 +1506,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         # of dicts). We append a metadata entry at the end.
         opp.positions_to_take.append(
             {
-                "_highfreq_metadata": True,
+                "_substrategy_metadata": True,
                 "asset": candidate.asset,
                 "timeframe": candidate.timeframe,
                 "sub_strategy": sub_strategy.value,
@@ -1671,7 +1689,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
                 "leg_fill_tolerance_ratio": 0.02,
             },
             "metadata": {
-                "generated_by": "btc_eth_highfreq.evaluate",
+                "generated_by": "btc_eth_directional_edge.evaluate",
                 "active_mode": "maker_quote",
                 "regime": regime,
             },
@@ -4806,7 +4824,7 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         """
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
-        defaults = normalize_crypto_highfreq_legacy_config(self.config)
+        defaults = merge_crypto_defaults(self.config)
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")

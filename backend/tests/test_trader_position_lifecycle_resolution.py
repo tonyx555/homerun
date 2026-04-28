@@ -38,7 +38,7 @@ async def _seed_order(
         Trader(
             id="trader-1",
             name="Crypto Trader",
-            source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+            source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             risk_limits_json={},
             metadata_json={},
             is_enabled=True,
@@ -2153,7 +2153,7 @@ async def test_live_exit_submission_uses_ioc_for_rapid_strategy_close(tmp_path, 
                 mode="live",
                 status="open",
                 payload_json={
-                    "strategy_type": "btc_eth_highfreq",
+                    "strategy_type": "btc_eth_maker_quote",
                     "token_id": "token-1",
                     "provider_reconciliation": {
                         "filled_size": 5.0,

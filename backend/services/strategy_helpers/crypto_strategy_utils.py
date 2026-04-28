@@ -86,7 +86,7 @@ def extract_oracle_status(
 
     Merges per-source oracle data from both dicts, picks the best source via
     the same ranking used by ``pick_oracle_source``, and returns a dict
-    compatible with the fields consumed by BtcEthHighFreqStrategy.evaluate().
+    compatible with the fields consumed by crypto-strategy evaluate() methods.
     """
     # Prefer payload over live_market for primary fields.
     oracle_price = _safe_float(

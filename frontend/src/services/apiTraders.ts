@@ -1255,14 +1255,14 @@ export interface TraderStrategyValidationResult {
 
 const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
   scanner: 'basic',
-  crypto: 'btc_eth_highfreq',
+  crypto: 'btc_eth_maker_quote',
   manual: 'manual_wallet_position',
   news: 'news_edge',
   weather: 'weather_distribution',
   traders: 'traders_confluence',
 }
 
-const DEFAULT_STRATEGY_KEY = 'btc_eth_highfreq'
+const DEFAULT_STRATEGY_KEY = 'btc_eth_maker_quote'
 
 function normalizeTraderSourceKey(value: unknown): string {
   return String(value || '').trim().toLowerCase()

@@ -32,7 +32,7 @@ async def _seed_trader_with_order(session: AsyncSession) -> None:
         Trader(
             id="trader-1",
             name="Crypto Trader",
-            source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+            source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             risk_limits_json={},
             metadata_json={},
             is_enabled=True,

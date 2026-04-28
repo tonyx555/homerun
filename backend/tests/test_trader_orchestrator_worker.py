@@ -425,7 +425,7 @@ def test_supports_live_market_context_ignores_explicit_disable():
         trader_orchestrator_worker._supports_live_market_context(
             SimpleNamespace(source="crypto"),
             source_config={
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {"enable_live_market_context": False},
             },
         )
@@ -442,7 +442,7 @@ def test_source_config_allows_new_entries_respects_strategy_param_overrides(monk
 
     base_config = {
         "source_key": "crypto",
-        "strategy_key": "btc_eth_highfreq",
+        "strategy_key": "btc_eth_maker_quote",
         "strategy_params": {},
     }
 
@@ -518,7 +518,7 @@ def test_merged_strategy_params_use_loaded_strategy_config_defaults(monkeypatch)
     merged = trader_orchestrator_worker._merged_strategy_params_for_source_config(
         {
             "source_key": "crypto",
-            "strategy_key": "btc_eth_highfreq",
+            "strategy_key": "btc_eth_maker_quote",
             "strategy_params": {
                 "max_signal_age_seconds": 7.5,
             },
@@ -914,7 +914,7 @@ def test_normalize_source_configs_merges_strategy_defaults(monkeypatch):
             "source_configs": [
                 {
                     "source_key": "crypto",
-                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_key": "btc_eth_maker_quote",
                     "strategy_params": {"reentry_cooldown_seconds_per_market": 8.0},
                 }
             ]
@@ -944,7 +944,7 @@ def test_normalize_source_configs_preserves_explicit_params_without_strategy_def
             "source_configs": [
                 {
                     "source_key": "crypto",
-                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_key": "btc_eth_maker_quote",
                     "strategy_params": {"max_signal_age_seconds": 7.5},
                 }
             ]
@@ -1213,7 +1213,7 @@ def test_source_open_order_timeout_seconds_honors_explicit_crypto_timeout():
     timeout = trader_orchestrator_worker._source_open_order_timeout_seconds(
         {
             "source_key": "crypto",
-            "strategy_key": "btc_eth_highfreq",
+            "strategy_key": "btc_eth_maker_quote",
             "strategy_params": {
                 "max_open_order_seconds": 8,
             },
@@ -1246,7 +1246,7 @@ async def test_enforce_source_open_order_timeouts_calls_cleanup_with_source_scop
             source_configs={
                 "crypto": {
                     "source_key": "crypto",
-                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_key": "btc_eth_maker_quote",
                     "strategy_params": {"max_open_order_seconds": 20},
                 },
                 "news": {
@@ -1304,7 +1304,7 @@ async def test_enforce_source_open_order_timeouts_suppresses_repeated_failures(m
             source_configs={
                 "crypto": {
                     "source_key": "crypto",
-                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_key": "btc_eth_maker_quote",
                     "strategy_params": {"max_open_order_seconds": 20},
                 }
             },
@@ -1316,7 +1316,7 @@ async def test_enforce_source_open_order_timeouts_suppresses_repeated_failures(m
             source_configs={
                 "crypto": {
                     "source_key": "crypto",
-                    "strategy_key": "btc_eth_highfreq",
+                    "strategy_key": "btc_eth_maker_quote",
                     "strategy_params": {"max_open_order_seconds": 20},
                 }
             },
@@ -1906,7 +1906,7 @@ class _DummySessionContext:
 
 
 class _SelectedStrategy:
-    key = "btc_eth_highfreq"
+    key = "btc_eth_maker_quote"
 
     def evaluate(self, signal, context):
         return StrategyDecision(
@@ -1920,7 +1920,7 @@ class _SelectedStrategy:
 
 
 class _SkippedStrategy:
-    key = "btc_eth_highfreq"
+    key = "btc_eth_maker_quote"
 
     def evaluate(self, signal, context):
         return StrategyDecision(
@@ -1949,7 +1949,7 @@ def _base_trader_payload(*, allow_averaging: bool) -> dict:
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {
                     "max_signals_per_cycle": 1,
                     "scan_batch_size": 1,
@@ -1983,7 +1983,7 @@ def _base_signal() -> SimpleNamespace:
         created_at=datetime.utcnow(),
         source="crypto",
         signal_type="crypto_worker_multistrat",
-        strategy_type="btc_eth_highfreq",
+        strategy_type="btc_eth_maker_quote",
         market_id="market-1",
         market_question="Will BTC close higher?",
         direction="buy_yes",
@@ -2130,7 +2130,7 @@ async def test_run_trader_once_emits_filtered_heartbeat_for_crypto_scope_prefilt
         created_at=datetime.utcnow(),
         source="crypto",
         signal_type="crypto_opportunity",
-        strategy_type="btc_eth_highfreq",
+        strategy_type="btc_eth_maker_quote",
         market_id="crypto-market-1",
         market_question="Solana Up or Down",
         direction="buy_yes",
@@ -2162,7 +2162,7 @@ async def test_run_trader_once_emits_filtered_heartbeat_for_crypto_scope_prefilt
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {
                     "max_signals_per_cycle": 2,
                     "scan_batch_size": 2,
@@ -4696,7 +4696,7 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {
                     "max_signals_per_cycle": 2,
                     "scan_batch_size": 2,
@@ -4749,7 +4749,7 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
                 resolved_key=strategy_key,
                 reason=f"strategy_unavailable:{strategy_key}",
             )
-            if strategy_key == "btc_eth_highfreq"
+            if strategy_key == "btc_eth_maker_quote"
             else SimpleNamespace(
                 available=True,
                 strategy_key=strategy_key,
@@ -4837,8 +4837,8 @@ async def test_run_trader_once_blocks_unavailable_strategy_only(monkeypatch):
     assert orders_written == 1
     assert submit_calls["count"] == 1
     assert len(blocked) == 1
-    assert blocked[0]["strategy_key"] == "btc_eth_highfreq"
-    assert blocked[0]["reason"].startswith("strategy_unavailable:btc_eth_highfreq")
+    assert blocked[0]["strategy_key"] == "btc_eth_maker_quote"
+    assert blocked[0]["reason"].startswith("strategy_unavailable:btc_eth_maker_quote")
     assert len(selected) == 1
     assert any(entry[0] == "signal-1" and entry[1] == "skipped" for entry in statuses)
     assert any(c.get("signal_id") == "signal-1" and c.get("outcome") == "blocked" for c in consumptions)
@@ -4851,7 +4851,7 @@ async def test_run_trader_once_uses_cached_live_context_builder_for_trigger_cycl
         "source": "crypto",
         "source_item_id": "signal-1",
         "signal_type": "crypto_worker_multistrat",
-        "strategy_type": "btc_eth_highfreq",
+        "strategy_type": "btc_eth_maker_quote",
         "market_id": "market-1",
         "market_question": "Will BTC close higher?",
         "direction": "buy_yes",
@@ -5032,7 +5032,7 @@ async def test_run_trader_once_trigger_cycle_fetches_full_live_context_when_stri
         "source": "crypto",
         "source_item_id": "signal-1",
         "signal_type": "crypto_worker_multistrat",
-        "strategy_type": "btc_eth_highfreq",
+        "strategy_type": "btc_eth_maker_quote",
         "market_id": "market-1",
         "market_question": "Will BTC close higher?",
         "direction": "buy_yes",

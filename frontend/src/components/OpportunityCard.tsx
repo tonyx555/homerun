@@ -65,7 +65,9 @@ const STRATEGY_COLORS: Record<string, string> = {
   weather_distribution: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20',
   // Pipeline detectors
   news_edge: 'bg-amber-500/10 text-amber-400 border-amber-500/20',
-  btc_eth_highfreq: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  btc_eth_maker_quote: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  btc_eth_directional_edge: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
+  btc_eth_convergence: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
   traders_confluence: 'bg-orange-500/10 text-orange-400 border-orange-500/20',
   sports_overreaction_fader: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
 }
@@ -94,7 +96,9 @@ const STRATEGY_ABBREV: Record<string, string> = {
   weather_ensemble_edge: 'WEN',
   weather_distribution: 'WDI',
   news_edge: 'NEW',
-  btc_eth_highfreq: 'BTC',
+  btc_eth_maker_quote: 'BTC',
+  btc_eth_directional_edge: 'BTD',
+  btc_eth_convergence: 'BTC',
   traders_confluence: 'TRD',
   sports_overreaction_fader: 'SFD',
 }
@@ -123,7 +127,9 @@ const STRATEGY_NAMES: Record<string, string> = {
   weather_ensemble_edge: 'Weather Ensemble',
   weather_distribution: 'Weather Distribution',
   news_edge: 'News Edge',
-  btc_eth_highfreq: 'Crypto HF',
+  btc_eth_maker_quote: 'Crypto Maker Quote',
+  btc_eth_directional_edge: 'Crypto Directional Edge',
+  btc_eth_convergence: 'Crypto Convergence',
   traders_confluence: 'Traders Flow',
   sports_overreaction_fader: 'Sports Fader',
 }

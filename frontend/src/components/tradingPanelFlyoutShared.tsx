@@ -3,7 +3,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { Card } from './ui/card'
 
-export const DEFAULT_STRATEGY_KEY = 'btc_eth_highfreq'
+export const DEFAULT_STRATEGY_KEY = 'btc_eth_maker_quote'
 
 export type TradingScheduleDay = 'mon' | 'tue' | 'wed' | 'thu' | 'fri' | 'sat' | 'sun'
 

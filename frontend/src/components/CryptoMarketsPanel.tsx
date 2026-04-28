@@ -229,7 +229,7 @@ function resolveCryptoStrategySdk(market: CryptoMarket): string {
     || '',
   ).trim().toLowerCase()
   if (explicit) return explicit
-  return 'btc_eth_highfreq'
+  return 'btc_eth_maker_quote'
 }
 
 function normalizeOracleSourceKey(value: string | null | undefined): string {

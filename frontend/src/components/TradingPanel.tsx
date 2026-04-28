@@ -531,7 +531,9 @@ const CRYPTO_ENTROPY_MAKER_PARAM_FIELDS = [
 ] as const
 
 const CRYPTO_STRATEGY_OPTIONS = [
-  { key: 'btc_eth_highfreq', label: 'Crypto High Frequency', default_params: {}, param_fields: [] },
+  { key: 'btc_eth_maker_quote', label: 'Crypto Maker Quote', default_params: {}, param_fields: [] },
+  { key: 'btc_eth_directional_edge', label: 'Crypto Directional Edge', default_params: {}, param_fields: [] },
+  { key: 'btc_eth_convergence', label: 'Crypto Convergence', default_params: {}, param_fields: [] },
   {
     key: 'crypto_spike_reversion',
     label: 'Crypto Spike Reversion',
@@ -780,7 +782,9 @@ const FALLBACK_TRADER_SOURCES: TraderSource[] = [
 
 const STRATEGY_LABELS: Record<string, string> = {
   basic: 'Opportunity General',
-  btc_eth_highfreq: 'Crypto High-Frequency',
+  btc_eth_maker_quote: 'Crypto Maker Quote',
+  btc_eth_directional_edge: 'Crypto Directional Edge',
+  btc_eth_convergence: 'Crypto Convergence',
   crypto_entropy_maker: 'Crypto Entropy Maker',
   crypto_spike_reversion: 'Crypto Spike Reversion',
   manual_wallet_position: 'Manual Manage Hold',
@@ -793,7 +797,7 @@ const STRATEGY_LABELS: Record<string, string> = {
 }
 
 const DEFAULT_STRATEGY_BY_SOURCE: Record<string, string> = {
-  crypto: 'btc_eth_highfreq',
+  crypto: 'btc_eth_maker_quote',
   manual: 'manual_wallet_position',
   scanner: 'basic',
   news: 'news_edge',

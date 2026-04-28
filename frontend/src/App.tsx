@@ -206,12 +206,15 @@ const STRATEGY_SUBTYPE_LABELS: Record<string, Record<string, string>> = {
     certainty_shock: 'Certainty Shock',
     decay_curve: 'Decay Curve',
   },
-  btc_eth_highfreq: {
+  btc_eth_maker_quote: {
     pure_arb: 'Pure Arb',
-    dump_hedge: 'Dump Hedge',
     pre_placed_limits: 'Pre-Placed Limits',
-    directional_edge: 'Directional Edge',
   },
+  btc_eth_directional_edge: {
+    directional_edge: 'Directional Edge',
+    dump_hedge: 'Dump Hedge',
+  },
+  btc_eth_convergence: {},
   news_edge: {
     buy_yes: 'Buy YES',
     buy_no: 'Buy NO',

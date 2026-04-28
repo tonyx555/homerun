@@ -56,7 +56,7 @@ from utils.converters import coerce_bool as _coerce_bool
 from services.strategy_helpers.crypto_scope import (
     CRYPTO_SCOPE_DEFAULTS,
     crypto_scope_config_schema as _crypto_scope_config_schema,
-    normalize_crypto_legacy_config as _normalize_crypto_legacy_config,
+    merge_crypto_defaults as _merge_crypto_defaults,
 )
 from services.strategy_helpers.price_window import PriceWindow
 from services.strategy_helpers.cycle_tracker import CycleTracker
@@ -119,14 +119,14 @@ class StrategySDK:
         return _crypto_scope_config_schema()
 
     @staticmethod
-    def normalize_crypto_legacy_config(config: Any) -> dict[str, Any]:
+    def merge_crypto_defaults(config: Any) -> dict[str, Any]:
         """Apply legacy-config migrations to any crypto strategy's config.
 
         Idempotent — safe to call repeatedly. Migrates deprecated oracle-gate
         defaults and removed sub-strategy tokens; passes current configs
         through unchanged.
         """
-        return _normalize_crypto_legacy_config(config)
+        return _merge_crypto_defaults(config)
 
     # Crypto-strategy utility namespace.
     #

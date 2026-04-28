@@ -9,17 +9,18 @@ rebates (0% taker fee). When fresh Chainlink oracle data is available,
 the quotes are skewed toward the predicted winner for additional
 directional edge while staying inventory-neutral.
 
-This is the PRIMARY layer of the legacy three-layer high-frequency
-architecture, now split into its own independent strategy.
+Independent crypto strategy — pairs with btc_eth_directional_edge and
+btc_eth_convergence as a complementary trio if you want full coverage.
 """
 
 from __future__ import annotations
 
 import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from enum import Enum
+from typing import Any, Callable, Optional
 
 import math
 
@@ -27,30 +28,16 @@ from models import Market, Event, Opportunity
 from config import settings as _cfg
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, _trader_size_limits
 from services.strategy_helpers.crypto_strategy_utils import (
-    CryptoCandidate,
-    SubStrategy,
-    SubStrategyScore,
-    as_list,
-    coerce_float,
-    crypto_param_value,
-    extract_oracle_status,
-    first_present,
-    get_crypto_market_fetcher,
-    normalize_crypto_asset,
-    normalize_regime,
-    normalize_regime_scope,
-    normalize_scope,
-    normalize_strategy_mode,
-    normalize_timeframe,
     parse_datetime_utc,
-    resolve_enabled_active_modes,
-    resolve_enabled_sub_strategies,
-    resolve_oracle_availability,
-    timeframe_override,
+    first_present as _first_present,
+    resolve_oracle_availability as _resolve_oracle_availability,
+    extract_oracle_status as _extract_oracle_status,
+    normalize_timeframe,
 )
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
 from utils.converters import clamp, coerce_bool as _coerce_bool, safe_float, to_bool, to_confidence, to_float
+from utils.kelly import polymarket_taker_fee as polymarket_fee_curve, polymarket_taker_fee_pct as polymarket_fee_pct
 from utils.signal_helpers import signal_payload
 from services.quality_filter import QualityFilterOverrides
 from utils.logger import get_logger
@@ -61,6 +48,9 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Evaluate-method constants (ported from BaseCryptoTimeframeStrategy)
 # ---------------------------------------------------------------------------
+
+_ALLOWED_MODES = {"auto", "directional", "maker_quote", "convergence"}
+_REGIMES = {"opening", "mid", "closing"}
 
 _EDGE_MODE_FACTORS: dict[str, dict[str, float]] = {
     "opening": {"auto": 1.0, "directional": 1.05, "maker_quote": 0.90, "convergence": 0.95},
@@ -100,10 +90,25 @@ _REGIME_SIZE_FACTORS: dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 
+def _normalize_mode(value: Any) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode not in _ALLOWED_MODES:
+        return "auto"
+    return mode
 
 
+def _normalize_regime(value: Any) -> str:
+    regime = str(value or "mid").strip().lower()
+    if regime not in _REGIMES:
+        return "mid"
+    return regime
 
 
+def _normalize_asset(value: Any) -> str:
+    asset = str(value or "").strip().upper()
+    if asset == "XBT":
+        return "BTC"
+    return asset
 
 
 
@@ -138,27 +143,50 @@ def _market_ml_probability_yes(market: dict[str, Any]) -> float | None:
 
 
 
+def _coerce_float(value: Any, default: float, lo: float, hi: float) -> float:
+    try:
+        parsed = float(value)
+    except Exception:
+        parsed = default
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        parsed = default
+    return max(lo, min(hi, parsed))
 
 
+def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any) -> Any:
+    timeframe_value = _normalize_timeframe(timeframe)
+    tf_value = _timeframe_override(config, base_key, timeframe_value)
+    if tf_value is not None:
+        return tf_value
+    return config.get(base_key)
+def _as_list(value: Any) -> list[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",")]
+    return []
 
 
+def _normalize_scope(value: Any, normalizer: Callable[[Any], str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in _as_list(value):
+        normalized = normalizer(raw)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+    return out
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+def _normalize_regime_scope(value: Any) -> set[str]:
+    allowed = set(_REGIMES)
+    normalized: set[str] = set()
+    for raw in _as_list(value):
+        regime = _normalize_regime(raw)
+        if regime in allowed:
+            normalized.add(regime)
+    return normalized
 
 
 
@@ -342,6 +370,27 @@ _SLUG_REGEX = re.compile(
 # in the series.  Querying /events?series_id=X&active=true&closed=false
 # reliably returns the currently-live and upcoming 15-minute markets.
 # Series IDs are configurable via the Settings UI (persisted in DB).
+def _get_crypto_series() -> list[tuple[str, str, str]]:
+    """Return crypto series configs, reading IDs from the live config singleton."""
+    return [
+        # (series_id, asset, timeframe)
+        (_cfg.BTC_ETH_HF_SERIES_BTC_15M, "BTC", "15min"),
+        (_cfg.BTC_ETH_HF_SERIES_ETH_15M, "ETH", "15min"),
+        (_cfg.BTC_ETH_HF_SERIES_SOL_15M, "SOL", "15min"),
+        (_cfg.BTC_ETH_HF_SERIES_XRP_15M, "XRP", "15min"),
+        (_cfg.BTC_ETH_HF_SERIES_BTC_5M, "BTC", "5min"),
+        (_cfg.BTC_ETH_HF_SERIES_ETH_5M, "ETH", "5min"),
+        (_cfg.BTC_ETH_HF_SERIES_SOL_5M, "SOL", "5min"),
+        (_cfg.BTC_ETH_HF_SERIES_XRP_5M, "XRP", "5min"),
+        (_cfg.BTC_ETH_HF_SERIES_BTC_1H, "BTC", "1hr"),
+        (_cfg.BTC_ETH_HF_SERIES_ETH_1H, "ETH", "1hr"),
+        (_cfg.BTC_ETH_HF_SERIES_SOL_1H, "SOL", "1hr"),
+        (_cfg.BTC_ETH_HF_SERIES_XRP_1H, "XRP", "1hr"),
+        (_cfg.BTC_ETH_HF_SERIES_BTC_4H, "BTC", "4hr"),
+        (_cfg.BTC_ETH_HF_SERIES_ETH_4H, "ETH", "4hr"),
+        (_cfg.BTC_ETH_HF_SERIES_SOL_4H, "SOL", "4hr"),
+        (_cfg.BTC_ETH_HF_SERIES_XRP_4H, "XRP", "4hr"),
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +429,257 @@ _MAX_HISTORY_ENTRIES = 200  # Maximum price snapshots per market
 # ---------------------------------------------------------------------------
 
 
+class _CryptoMarketFetcher:
+    """Sync HTTP fetcher that queries Polymarket's Gamma API for crypto markets
+    using series_id-based discovery (the same approach used by
+    PolymarketBTC15mAssistant and other production bots).
+
+    Each crypto asset/timeframe has a stable ``series_id`` on the Gamma API.
+    Querying ``GET /events?series_id=X&active=true&closed=false`` reliably
+    returns the currently-live and upcoming 15-minute (or hourly) markets
+    with correct ``endDate`` values, real-time ``bestBid``/``bestAsk``
+    pricing, CLOB token IDs, and liquidity data.
+
+    Results are cached for ``ttl_seconds`` to avoid hammering the API.
+    """
+
+    def __init__(self, gamma_url: str = "", ttl_seconds: int = 15):
+        self._gamma_url = gamma_url or _cfg.GAMMA_API_URL
+        self._ttl = ttl_seconds
+        self._markets: list[Market] = []
+        self._last_fetch: float = 0.0
+        self._shared_client = None
+
+    @property
+    def is_stale(self) -> bool:
+        return (time.monotonic() - self._last_fetch) > self._ttl
+
+    def get_markets(self) -> list[Market]:
+        """Return cached crypto markets, refreshing if stale."""
+        if self.is_stale:
+            fetched = self._fetch()
+            if fetched is not None:
+                self._markets = fetched
+                self._last_fetch = time.monotonic()
+                # Subscribe new market tokens to the WS feed for real-time prices
+                self._subscribe_tokens_to_ws(fetched)
+        return self._markets
+
+    @staticmethod
+    def _subscribe_tokens_to_ws(markets: list[Market]) -> None:
+        """Fire-and-forget: subscribe crypto market CLOB tokens to the
+        WebSocket price feed so we get real-time bid/ask updates instead
+        of relying on stale HTTP polling."""
+        import asyncio
+
+        token_ids = []
+        for m in markets:
+            token_ids.extend(t for t in m.clob_token_ids if len(t) > 20)
+        if not token_ids:
+            return
+
+        try:
+            from services.ws_feeds import get_feed_manager
+
+            feed_mgr = get_feed_manager()
+            if not feed_mgr._started:
+                return
+
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(feed_mgr.polymarket_feed.subscribe(token_ids=token_ids))
+            else:
+                loop.run_until_complete(feed_mgr.polymarket_feed.subscribe(token_ids=token_ids))
+            logger.debug(
+                "BtcEthMakerQuote: subscribed %d crypto tokens to WS feed",
+                len(token_ids),
+            )
+        except Exception as e:
+            logger.debug("BtcEthMakerQuote: WS subscription failed (non-critical): %s", e)
+
+    @staticmethod
+    def _is_currently_live(event: dict, now_ms: float) -> bool:
+        """Check if an event's market window is currently live.
+
+        A 15-minute market is live when:
+          startTime <= now < endDate
+        The event-level ``startTime`` is when the 15-min window opens;
+        ``endDate`` is when it resolves.
+        """
+        start_str = event.get("startTime") or event.get("startDate")
+        end_str = event.get("endDate")
+        if not end_str:
+            return False
+
+        try:
+            end_ms = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp() * 1000
+        except (ValueError, AttributeError):
+            return False
+
+        if now_ms >= end_ms:
+            return False  # Already resolved
+
+        if start_str:
+            try:
+                start_ms = datetime.fromisoformat(start_str.replace("Z", "+00:00")).timestamp() * 1000
+                if now_ms < start_ms:
+                    return False  # Not started yet
+            except (ValueError, AttributeError):
+                pass
+
+        return True
+
+    @staticmethod
+    def _pick_live_and_upcoming(events: list[dict], max_upcoming: int = 2) -> list[dict]:
+        """From a list of events, return the currently-live one plus next upcoming.
+
+        This mirrors the reference bot's ``pickLatestLiveMarket`` logic but
+        returns multiple events so we can show upcoming opportunities too.
+        """
+        now_ms = time.time() * 1000
+        live: list[dict] = []
+        upcoming: list[dict] = []
+
+        for evt in events:
+            if evt.get("closed"):
+                continue
+            start_str = evt.get("startTime") or evt.get("startDate")
+            end_str = evt.get("endDate")
+            if not end_str:
+                continue
+            try:
+                end_ms = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp() * 1000
+            except (ValueError, AttributeError):
+                continue
+            if end_ms <= now_ms:
+                continue  # Already resolved
+
+            start_ms = None
+            if start_str:
+                try:
+                    start_ms = datetime.fromisoformat(start_str.replace("Z", "+00:00")).timestamp() * 1000
+                except (ValueError, AttributeError):
+                    pass
+
+            if start_ms is not None and start_ms <= now_ms:
+                live.append((end_ms, evt))
+            else:
+                upcoming.append((end_ms, evt))
+
+        # Sort by end time (soonest first)
+        live.sort(key=lambda x: x[0])
+        upcoming.sort(key=lambda x: x[0])
+
+        result = [e for _, e in live]
+        result.extend(e for _, e in upcoming[:max_upcoming])
+        return result
+
+    def _fetch(self) -> list[Market]:
+        """Fetch live crypto markets from Gamma API using series_id.
+
+        For each crypto series (BTC 15m, ETH 15m, etc.), queries the
+        events endpoint to get active events, then picks the currently-live
+        and next-upcoming markets.
+        """
+        import httpx
+
+        all_markets: list[Market] = []
+        seen_ids: set[str] = set()
+
+        def _market_id(mkt: dict) -> str:
+            return str(mkt.get("conditionId") or mkt.get("condition_id") or mkt.get("id", ""))
+
+        try:
+            series = _get_crypto_series()
+            now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            if self._shared_client is None or self._shared_client.is_closed:
+                self._shared_client = httpx.Client(timeout=10.0, follow_redirects=True)
+            client = self._shared_client
+            for series_id, asset, timeframe in series:
+                try:
+                    resp = client.get(
+                        f"{self._gamma_url}/events",
+                        params={
+                            "series_id": series_id,
+                            "active": "true",
+                            "closed": "false",
+                            # Exclude stale unresolved history and walk forward
+                            # from now for live/nearest-upcoming selection.
+                            "end_date_min": now_iso,
+                            "order": "endDate",
+                            "ascending": "true",
+                            "limit": 10,
+                        },
+                    )
+                    if resp.status_code != 200:
+                        logger.debug(
+                            "BtcEthMakerQuote: Gamma series_id=%s returned %s",
+                            series_id,
+                            resp.status_code,
+                        )
+                        continue
+
+                    events = resp.json()
+                    if not isinstance(events, list):
+                        continue
+
+                    # Pick live + upcoming events
+                    selected = self._pick_live_and_upcoming(events)
+
+                    for event_data in selected:
+                        for mkt_data in event_data.get("markets", []):
+                            mid = _market_id(mkt_data)
+                            if mid and mid not in seen_ids:
+                                try:
+                                    m = Market.from_gamma_response(mkt_data)
+                                    all_markets.append(m)
+                                    seen_ids.add(mid)
+                                except Exception as e:
+                                    logger.debug(
+                                        "BtcEthMakerQuote: failed to parse market %s: %s",
+                                        mid,
+                                        e,
+                                    )
+
+                    time.sleep(0.05)  # Rate limit between series
+                except Exception as e:
+                    logger.debug(
+                        "BtcEthMakerQuote: series_id=%s fetch failed: %s",
+                        series_id,
+                        e,
+                    )
+
+        except Exception as exc:
+            logger.warning(
+                "Crypto market fetch failed: %s",
+                str(exc),
+                exc_info=True,
+            )
+
+        if all_markets:
+            logger.info(
+                "BtcEthMakerQuote: fetched %d live crypto markets via Gamma series API (%s)",
+                len(all_markets),
+                ", ".join(f"{a} {tf}" for _, a, tf in series),
+            )
+        else:
+            logger.debug(
+                "BtcEthMakerQuote: no live crypto markets found across %d series",
+                len(series),
+            )
+        return all_markets
+
+
+# Module-level crypto market fetcher (lazy-initialized)
+_crypto_fetcher: Optional[_CryptoMarketFetcher] = None
+
+
+def _get_crypto_fetcher() -> _CryptoMarketFetcher:
+    """Get or create the singleton crypto market fetcher."""
+    global _crypto_fetcher
+    if _crypto_fetcher is None:
+        _crypto_fetcher = _CryptoMarketFetcher()
+    return _crypto_fetcher
 
 
 # ---------------------------------------------------------------------------
@@ -387,10 +687,70 @@ _MAX_HISTORY_ENTRIES = 200  # Maximum price snapshots per market
 # ---------------------------------------------------------------------------
 
 
+class SubStrategy(str, Enum):
+    MAKER_QUOTE = "maker_quote"           # Two-sided maker quoting (Layer 1 - PRIMARY)
+    DIRECTIONAL_EDGE = "directional_edge"  # Oracle-gated directional (Layer 2 - skew amplifier)
+    CONVERGENCE = "convergence"            # Near-expiry convergence (Layer 3)
 
 
+_SUB_STRATEGY_ALIASES: dict[str, SubStrategy] = {
+    "maker_quote": SubStrategy.MAKER_QUOTE,
+    "makerquote": SubStrategy.MAKER_QUOTE,
+    "maker": SubStrategy.MAKER_QUOTE,
+    "market_make": SubStrategy.MAKER_QUOTE,
+    "passive_quote": SubStrategy.MAKER_QUOTE,
+    "passivequote": SubStrategy.MAKER_QUOTE,
+    "passive": SubStrategy.MAKER_QUOTE,
+    "directional_edge": SubStrategy.DIRECTIONAL_EDGE,
+    "directional": SubStrategy.DIRECTIONAL_EDGE,
+    "edge_directional": SubStrategy.DIRECTIONAL_EDGE,
+    "convergence": SubStrategy.CONVERGENCE,
+    "converge": SubStrategy.CONVERGENCE,
+    "near_expiry": SubStrategy.CONVERGENCE,
+}
 
 
+def _normalize_sub_strategy(value: Any) -> Optional[SubStrategy]:
+    token = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if not token:
+        return None
+    return _SUB_STRATEGY_ALIASES.get(token)
+
+
+def _resolve_enabled_sub_strategies(config: Any) -> set[SubStrategy]:
+    cfg = config if isinstance(config, dict) else {}
+    raw = _first_present(
+        cfg.get("enabled_sub_strategies"),
+        cfg.get("sub_strategy_allowlist"),
+        cfg.get("sub_strategies"),
+    )
+    if raw is None:
+        return set(SubStrategy)
+
+    enabled: set[SubStrategy] = set()
+    for item in _as_list(raw):
+        normalized = _normalize_sub_strategy(item)
+        if normalized is not None:
+            enabled.add(normalized)
+    return enabled
+
+
+def _resolve_enabled_active_modes(config: Any) -> set[str]:
+    enabled_sub_strategies = _resolve_enabled_sub_strategies(config)
+    if not enabled_sub_strategies:
+        return {"directional", "maker_quote", "convergence"}
+
+    enabled_modes: set[str] = set()
+    if SubStrategy.DIRECTIONAL_EDGE in enabled_sub_strategies:
+        enabled_modes.add("directional")
+    if SubStrategy.MAKER_QUOTE in enabled_sub_strategies:
+        enabled_modes.add("maker_quote")
+    if SubStrategy.CONVERGENCE in enabled_sub_strategies:
+        enabled_modes.add("convergence")
+
+    if not enabled_modes:
+        return {"directional", "maker_quote", "convergence"}
+    return enabled_modes
 
 
 
@@ -404,7 +764,7 @@ _MAX_HISTORY_ENTRIES = 200  # Maximum price snapshots per market
 # ---------------------------------------------------------------------------
 
 
-from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot  # noqa: E402,F401
+from services.strategy_helpers.price_window import PriceWindow  # noqa: E402,F401
 
 # Crypto scope helpers + timeframe utilities — moved out of this file
 # to services.strategy_helpers.crypto_scope so other modules can import
@@ -414,7 +774,7 @@ from services.strategy_helpers.crypto_scope import (  # noqa: E402
     _crypto_hf_default_param_value,
     _normalize_timeframe,
     _timeframe_override,
-    normalize_crypto_highfreq_legacy_config,
+    merge_crypto_defaults,
 )
 
 
@@ -424,6 +784,16 @@ from services.strategy_helpers.crypto_scope import (  # noqa: E402
 
 
 @dataclass
+class HighFreqCandidate:
+    """A market identified as a BTC/ETH high-frequency binary market."""
+
+    market: Market
+    asset: str  # "BTC", "ETH", "SOL", or "XRP"
+    timeframe: str  # "5min", "15min", "1hr", or "4hr"
+    yes_price: float
+    no_price: float
+    oracle_price: Optional[float] = None
+    price_to_beat: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -432,6 +802,13 @@ from services.strategy_helpers.crypto_scope import (  # noqa: E402
 
 
 @dataclass
+class SubStrategyScore:
+    """Score and metadata for a candidate sub-strategy."""
+
+    strategy: SubStrategy
+    score: float  # Higher is better (0-100 scale)
+    reason: str
+    params: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -443,10 +820,11 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
     """
     Maker-quote market-making strategy for BTC/ETH/SOL/XRP binary markets.
 
-    Single-layer (maker quote) implementation, split out of the legacy
-    three-layer high-frequency strategy. Places two-sided post_only limit
-    buy orders one tick below each side's current ask, earning the bid-ask
-    spread plus maker rebates while remaining inventory-neutral.
+    Places two-sided post_only limit buy orders one tick below each side's
+    current ask, earning the bid-ask spread plus maker rebates while
+    remaining inventory-neutral. When fresh Chainlink oracle data is
+    available, the quotes are skewed toward the
+    predicted winner for additional directional edge.
 
     Designed for Polymarket's 5m/15m/1h/4h BTC/ETH/SOL/XRP up-or-down markets.
     """
@@ -467,12 +845,11 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         max_resolution_months=0.1,
     )
 
-    default_config = {
-        **dict(CRYPTO_HF_SCOPE_DEFAULTS),
-        "enabled_sub_strategies": ["maker_quote"],
-        "strategy_mode": "maker_quote",
-        "auto_mode_priority": ["maker_quote"],
-    }
+    default_config = dict(CRYPTO_HF_SCOPE_DEFAULTS)
+    # Pin sub-strategy mode for the maker-quote clone.
+    default_config["enabled_sub_strategies"] = ["maker_quote"]
+    default_config["strategy_mode"] = "maker_quote"
+    default_config["auto_mode_priority"] = ["maker_quote"]
 
     def __init__(self) -> None:
         super().__init__()
@@ -489,7 +866,9 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         # so the detect path just needs to pass every market through.
         self.min_profit = 0.0
         # Per-market price history keyed by market ID
-        self._price_histories: dict[str, MarketPriceHistory] = {}
+        self._price_windows: dict[str, PriceWindow] = {}
+        # Keyed by CLOB token id (one window per outcome stream) so a 3+ outcome
+        # market would just track more entries; binary markets get exactly 2.
         # Runtime anti-churn controls used by evaluate().
         self._edge_first_seen_ms: dict[str, int] = {}
         self._last_selected_at_ms_by_market: dict[str, int] = {}
@@ -498,7 +877,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         self._paused_until_ms: int = 0
 
     def configure(self, config: dict) -> None:
-        super().configure(normalize_crypto_highfreq_legacy_config(config))
+        super().configure(merge_crypto_defaults(config))
 
     # ------------------------------------------------------------------
     # Public API
@@ -524,15 +903,15 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
         candidates = self._find_candidates(markets, prices)
         if not candidates:
-            logger.debug("BtcEthHighFreq: no BTC/ETH high-freq candidates found")
+            logger.debug("BtcEthMakerQuote: no BTC/ETH high-freq candidates found")
             return opportunities
 
-        enabled_sub_strategies = resolve_enabled_sub_strategies(getattr(self, "config", {}))
+        enabled_sub_strategies = _resolve_enabled_sub_strategies(getattr(self, "config", {}))
         if not enabled_sub_strategies:
-            logger.info("BtcEthHighFreq: no sub-strategies enabled in config; skipping detection")
+            logger.info("BtcEthMakerQuote: no sub-strategies enabled in config; skipping detection")
             return opportunities
 
-        logger.info(f"BtcEthHighFreq: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
+        logger.info(f"BtcEthMakerQuote: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
 
         for candidate in candidates:
             # Update price history
@@ -543,7 +922,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             if selected is None:
                 reasons = " | ".join(f"{s.strategy.value}: {s.reason}" for s in all_scores)
                 logger.debug(
-                    f"BtcEthHighFreq: no viable sub-strategy for market "
+                    f"BtcEthMakerQuote: no viable sub-strategy for market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"yes={candidate.yes_price:.3f} no={candidate.no_price:.3f} "
                     f"liq=${candidate.market.liquidity:.0f}) — {reasons}"
@@ -552,7 +931,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
             scores_str = ", ".join(f"{s.strategy.value}={s.score:.1f}" for s in all_scores)
             logger.info(
-                f"BtcEthHighFreq: market {candidate.market.id} "
+                f"BtcEthMakerQuote: market {candidate.market.id} "
                 f"({candidate.asset} {candidate.timeframe}) — "
                 f"selected {selected.strategy.value} (score={selected.score:.1f}). "
                 f"All scores: {scores_str}"
@@ -563,13 +942,13 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             if opp is not None:
                 opportunities.append(opp)
                 logger.info(
-                    f"BtcEthHighFreq: opportunity detected — {opp.title} | "
+                    f"BtcEthMakerQuote: opportunity detected — {opp.title} | "
                     f"ROI {opp.roi_percent:.2f}% | sub-strategy={selected.strategy.value} | "
                     f"market={candidate.market.id}"
                 )
             else:
                 logger.debug(
-                    f"BtcEthHighFreq: create_opportunity rejected market "
+                    f"BtcEthMakerQuote: create_opportunity rejected market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"sub={selected.strategy.value}, score={selected.score:.1f}) — "
                     f"hard filters in base strategy blocked it "
@@ -577,7 +956,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                     f"liq=${candidate.market.liquidity:.0f})"
                 )
 
-        logger.info(f"BtcEthHighFreq: scan complete — {len(opportunities)} opportunity(ies) found")
+        logger.info(f"BtcEthMakerQuote: scan complete — {len(opportunities)} opportunity(ies) found")
         return opportunities
 
     # ------------------------------------------------------------------
@@ -588,19 +967,19 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         self,
         markets: list[Market],
         prices: dict[str, dict],
-    ) -> list[CryptoCandidate]:
+    ) -> list[HighFreqCandidate]:
         """Filter the full market list to BTC/ETH high-freq binary markets.
 
         Also queries the Gamma API directly for crypto markets by tag/slug
         to catch BTC/ETH 15-min markets that may not be in the top 500.
         """
-        candidates: list[CryptoCandidate] = []
+        candidates: list[HighFreqCandidate] = []
         seen_ids: set[str] = set()
 
         # Combine scanner markets with directly-fetched crypto markets
         all_markets = list(markets)
         try:
-            fetcher = get_crypto_market_fetcher()
+            fetcher = _get_crypto_fetcher()
             extra = fetcher.get_markets()
             for m in extra:
                 if m.id not in seen_ids:
@@ -612,7 +991,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             pass  # Non-fatal: fall back to scanner markets only
 
         logger.debug(
-            f"BtcEthHighFreq: scanning {len(all_markets)} markets "
+            f"BtcEthMakerQuote: scanning {len(all_markets)} markets "
             f"({len(markets)} from scanner, {len(all_markets) - len(markets)} from Gamma)"
         )
 
@@ -635,7 +1014,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 asset_hit_no_tf += 1
                 if asset_hit_no_tf <= 5:
                     logger.debug(
-                        f"BtcEthHighFreq: asset={asset} but no timeframe — "
+                        f"BtcEthMakerQuote: asset={asset} but no timeframe — "
                         f"slug={market.slug} question={market.question[:80]}"
                     )
                 continue
@@ -644,7 +1023,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             yes_price, no_price = self._resolve_prices(market, prices)
 
             candidates.append(
-                CryptoCandidate(
+                HighFreqCandidate(
                     market=market,
                     asset=asset,
                     timeframe=timeframe,
@@ -724,27 +1103,43 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
     # Price history
     # ------------------------------------------------------------------
 
-    def _update_price_history(self, candidate: CryptoCandidate) -> None:
-        """Record the latest prices into the rolling window for this market."""
-        mid = candidate.market.id
-        if mid not in self._price_histories:
-            if candidate.timeframe == "4hr":
-                window = _4HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "1hr":
-                window = _1HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "5min":
-                window = 120  # 2 min for 5-min markets
-            else:
-                window = _DEFAULT_HISTORY_WINDOW_SEC
-            self._price_histories[mid] = MarketPriceHistory(window_seconds=window)
+    def _update_price_history(self, candidate: HighFreqCandidate) -> None:
+        """Record latest outcome prices into per-token PriceWindows.
 
-        self._price_histories[mid].record(
-            candidate.yes_price,
-            candidate.no_price,
-        )
+        One :class:`PriceWindow` per CLOB token id. Binary markets get two
+        windows (yes + no); a future 3+ outcome market would naturally
+        produce N windows without any code change.
+        """
+        if candidate.timeframe == "4hr":
+            window = _4HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "1hr":
+            window = _1HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "5min":
+            window = 120  # 2 min for 5-min markets
+        else:
+            window = _DEFAULT_HISTORY_WINDOW_SEC
 
-    def _get_history(self, market_id: str) -> Optional[MarketPriceHistory]:
-        return self._price_histories.get(market_id)
+        token_ids = list(candidate.market.clob_token_ids or [])
+        prices = [candidate.yes_price, candidate.no_price]
+        for token_id, price in zip(token_ids, prices):
+            if not token_id:
+                continue
+            existing = self._price_windows.get(token_id)
+            if existing is None or existing.window_seconds != window:
+                existing = PriceWindow(window_seconds=window)
+                self._price_windows[token_id] = existing
+            existing.record(price)
+
+    def _get_price_window(self, token_id: str) -> Optional[PriceWindow]:
+        """Return the rolling :class:`PriceWindow` for a specific token id.
+
+        Returns None when no observations have been recorded for that
+        token. Strategies that need yes-side or no-side stats should
+        look up the relevant token id (``market.clob_token_ids[0]`` for
+        YES, ``[1]`` for NO on a binary market) and call methods on the
+        returned window.
+        """
+        return self._price_windows.get(token_id)
 
     # ------------------------------------------------------------------
     # Dynamic strategy selector
@@ -752,45 +1147,32 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
     def _select_sub_strategy(
         self,
-        candidate: CryptoCandidate,
+        candidate: HighFreqCandidate,
         enabled_sub_strategies: set[SubStrategy],
     ) -> tuple[Optional[SubStrategyScore], list[SubStrategyScore]]:
-        """Score the maker-quote sub-strategy and return it.
+        """Always select the maker-quote sub-strategy.
 
-        This strategy is pinned to the MAKER_QUOTE sub-strategy; the other
-        layers were split out into separate strategies. Returns
-        (best_score_or_None, all_scores). A score <= 0 is non-viable.
+        This clone is pinned to the maker-quote sub-strategy. The
+        score is still computed so the diagnostic ``reason`` and
+        ``params`` propagate to logging and downstream consumers. A
+        non-viable score (<=0) yields ``(None, [score])`` exactly like
+        the original multi-mode selector did.
         """
-        score = self._score_maker_quote(candidate)
+        maker_score = self._score_maker_quote(candidate)
         if SubStrategy.MAKER_QUOTE not in enabled_sub_strategies:
-            score = SubStrategyScore(
-                strategy=SubStrategy.MAKER_QUOTE,
+            disabled = SubStrategyScore(
+                strategy=maker_score.strategy,
                 score=0.0,
                 reason="disabled_by_config",
-                params=score.params,
+                params=maker_score.params,
             )
-        scores = [score]
-        best = score if score.score > 0 else None
-        return best, scores
-
-    # -- Helper: remaining seconds until resolution --
-
-    def _remaining_seconds(self, c: CryptoCandidate) -> Optional[float]:
-        if c.market.end_date:
-            try:
-                if hasattr(c.market.end_date, "timestamp"):
-                    end_ts = c.market.end_date.timestamp()
-                else:
-                    end_str = str(c.market.end_date)
-                    end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
-                return max(0.0, end_ts - time.time())
-            except (ValueError, AttributeError):
-                pass
-        return None
+            return None, [disabled]
+        best = maker_score if maker_score.score > 0 else None
+        return best, [maker_score]
 
     # -- Sub-strategy: Maker Quote scoring (Layer 1 - PRIMARY) --
 
-    def _score_maker_quote(self, c: CryptoCandidate) -> SubStrategyScore:
+    def _score_maker_quote(self, c: HighFreqCandidate) -> SubStrategyScore:
         """Score two-sided maker quoting opportunity (Layer 1).
 
         Places post_only limit buy orders on BOTH YES and NO sides.
@@ -912,13 +1294,27 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             },
         )
 
+    # -- Helper: remaining seconds until resolution --
+
+    def _remaining_seconds(self, c: HighFreqCandidate) -> Optional[float]:
+        if c.market.end_date:
+            try:
+                if hasattr(c.market.end_date, "timestamp"):
+                    end_ts = c.market.end_date.timestamp()
+                else:
+                    end_str = str(c.market.end_date)
+                    end_ts = datetime.fromisoformat(end_str.replace("Z", "+00:00")).timestamp()
+                return max(0.0, end_ts - time.time())
+            except (ValueError, AttributeError):
+                pass
+        return None
     # ------------------------------------------------------------------
     # Opportunity generation
     # ------------------------------------------------------------------
 
     def _generate_opportunity(
         self,
-        candidate: CryptoCandidate,
+        candidate: HighFreqCandidate,
         selected: SubStrategyScore,
     ) -> Optional[Opportunity]:
         """Turn a scored sub-strategy into an Opportunity via the base
@@ -940,7 +1336,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
     def _generate_maker_quote(
         self,
-        c: CryptoCandidate,
+        c: HighFreqCandidate,
         params: dict,
     ) -> Optional[Opportunity]:
         """Generate opportunity for Layer 1: Maker Quote.
@@ -1009,7 +1405,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
         if opp is not None:
             opp.max_position_size = max(opp.max_position_size, size_usd * 2.0)
-            self._attach_highfreq_metadata(
+            self._attach_substrategy_metadata(
                 opp,
                 c,
                 SubStrategy.MAKER_QUOTE,
@@ -1021,15 +1417,14 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 "single-side fill creates directional exposure",
             )
         return opp
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _attach_highfreq_metadata(
+    def _attach_substrategy_metadata(
         opp: Opportunity,
-        candidate: CryptoCandidate,
+        candidate: HighFreqCandidate,
         sub_strategy: SubStrategy,
         params: dict,
     ) -> None:
@@ -1039,7 +1434,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         # of dicts). We append a metadata entry at the end.
         opp.positions_to_take.append(
             {
-                "_highfreq_metadata": True,
+                "_substrategy_metadata": True,
                 "asset": candidate.asset,
                 "timeframe": candidate.timeframe,
                 "sub_strategy": sub_strategy.value,
@@ -1095,7 +1490,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         no_market_price = self._float(outcome_prices[1]) if len(outcome_prices) > 1 else None
 
         yes_price = self._float(
-            first_present(
+            _first_present(
                 live_market.get("yes_price"),
                 market.get("current_yes_price"),
                 market.get("yes_price"),
@@ -1105,7 +1500,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             )
         )
         no_price = self._float(
-            first_present(
+            _first_present(
                 live_market.get("no_price"),
                 market.get("current_no_price"),
                 market.get("no_price"),
@@ -1142,7 +1537,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 min(
                     900,
                     to_float(
-                        first_present(
+                        _first_present(
                             params.get("session_timeout_seconds"),
                             params.get("maker_session_timeout_seconds"),
                             300,
@@ -1158,7 +1553,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 min(
                     120,
                     to_float(
-                        first_present(
+                        _first_present(
                             params.get("hedge_timeout_seconds"),
                             params.get("maker_hedge_timeout_seconds"),
                             20,
@@ -1229,23 +1624,27 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         }
 
     # ── Inlined direction + resolution-risk guardrails ──
+    #
+    # These two helpers were previously module-level functions in this
+    # file. They are now private methods on the maker-quote clone
+    # so this strategy owns its own copies and can evolve independently
+    # of the original three-mode strategy. The ``active_mode`` argument
+    # is gone — this strategy is hardcoded to ``maker_quote``.
 
     def _direction_allowed(
         self,
-        params: Any,
+        params,
         *,
-        regime: Any,
-        direction: Any,
-        timeframe: Any = None,
-        seconds_left: Optional[float] = None,
+        regime,
+        direction,
+        timeframe=None,
+        seconds_left=None,
     ) -> tuple[bool, str]:
-        """Decide whether ``direction`` is allowed under the configured
-        opening-directional rules for this strategy's pinned ``maker_quote``
-        active mode.
+        """Decide whether ``direction`` is allowed under ``regime``.
 
         Returns ``(allowed, detail)``. The ``detail`` is suitable for
-        surfacing in a DecisionCheck. Reads opening-directional gates from
-        ``params`` (with fallback to :attr:`default_config`).
+        surfacing in a DecisionCheck. Reads opening-directional gates
+        from ``params`` with fallback to ``self.default_config``.
         """
         cfg = params if isinstance(params, dict) else {}
         defaults = self.default_config
@@ -1281,19 +1680,29 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                         "4h": 14400.0,
                     }[normalized_timeframe]
                 )
-            if timeframe_seconds_value is not None and seconds_left is not None and seconds_left >= 0.0:
-                elapsed_ratio = clamp(1.0 - (float(seconds_left) / timeframe_seconds_value), 0.0, 1.0)
+            if (
+                timeframe_seconds_value is not None
+                and seconds_left is not None
+                and seconds_left >= 0.0
+            ):
+                elapsed_ratio = clamp(
+                    1.0 - (float(seconds_left) / timeframe_seconds_value), 0.0, 1.0
+                )
 
-            gate_ratio_raw = timeframe_override(cfg, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe)
+            gate_ratio_raw = _timeframe_override(
+                cfg, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe
+            )
             if gate_ratio_raw is None:
                 gate_ratio_raw = cfg.get("opening_directional_buy_yes_block_elapsed_pct")
             if gate_ratio_raw is None:
-                gate_ratio_raw = timeframe_override(
-                    defaults, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe
+                gate_ratio_raw = _timeframe_override(
+                    defaults,
+                    "opening_directional_buy_yes_block_elapsed_pct",
+                    normalized_timeframe,
                 )
             if gate_ratio_raw is None:
                 gate_ratio_raw = defaults.get("opening_directional_buy_yes_block_elapsed_pct")
-            gate_ratio = coerce_float(gate_ratio_raw, 0.10, 0.0, 1.0)
+            gate_ratio = _coerce_float(gate_ratio_raw, 0.10, 0.0, 1.0)
 
             if elapsed_ratio is None:
                 if normalized_regime == "opening":
@@ -1318,45 +1727,47 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
     def _should_flatten_resolution_risk(
         self,
-        params: Any,
+        params,
         *,
-        timeframe: Any = None,
-        seconds_left: Optional[float] = None,
-        pnl_percent: Optional[float] = None,
-        exit_headroom_ratio: Optional[float] = None,
+        timeframe=None,
+        seconds_left=None,
+        pnl_percent=None,
+        exit_headroom_ratio=None,
         take_profit_armed: bool = False,
     ) -> tuple[bool, str]:
-        """Decide whether to force-flatten a position to avoid resolution-time risk.
+        """Decide whether to force-flatten to avoid resolution-time risk.
 
         Returns ``(should_flatten, detail)``. Reads gating thresholds
-        (seconds-left budget, max-profit ceiling, min-loss floor, headroom
-        ratio) from ``params`` via :func:`crypto_param_value` so
-        timeframe-suffixed overrides apply.
+        (seconds-left budget, max-profit ceiling, min-loss floor,
+        headroom ratio) from ``params`` via :func:`_crypto_hf_param_value`
+        so timeframe-suffixed overrides apply.
         """
         cfg = params if isinstance(params, dict) else {}
         enabled = _coerce_bool(cfg.get("resolution_risk_flatten_enabled"), True)
         if not enabled:
             return False, "disabled"
 
-        if take_profit_armed and _coerce_bool(cfg.get("resolution_risk_disable_when_take_profit_armed"), True):
+        if take_profit_armed and _coerce_bool(
+            cfg.get("resolution_risk_disable_when_take_profit_armed"), True
+        ):
             return False, "take_profit_armed"
 
         if seconds_left is None or seconds_left < 0.0:
             return False, "seconds_left_unavailable"
 
-        seconds_budget_raw = crypto_param_value(cfg, "resolution_risk_seconds_left", timeframe)
+        seconds_budget_raw = _crypto_hf_param_value(cfg, "resolution_risk_seconds_left", timeframe)
         if seconds_budget_raw is None:
-            seconds_budget_raw = crypto_param_value(cfg, "force_flatten_seconds_left", timeframe)
-        seconds_budget = coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
+            seconds_budget_raw = _crypto_hf_param_value(cfg, "force_flatten_seconds_left", timeframe)
+        seconds_budget = _coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
         if seconds_left > seconds_budget:
             return False, f"seconds_left={seconds_left:.1f} > budget={seconds_budget:.1f}"
 
-        max_profit_raw = crypto_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
-        max_profit_pct = coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
-        min_loss_raw = crypto_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
-        min_loss_pct = coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
-        min_headroom_raw = crypto_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
-        min_headroom_ratio = coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
+        max_profit_raw = _crypto_hf_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
+        max_profit_pct = _coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
+        min_loss_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
+        min_loss_pct = _coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
+        min_headroom_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
+        min_headroom_ratio = _coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
 
         loss_pressure = False
         if pnl_percent is not None:
@@ -1366,10 +1777,15 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 loss_pressure = True
 
         if exit_headroom_ratio is not None and exit_headroom_ratio < min_headroom_ratio:
-            return False, f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x"
+            return (
+                False,
+                f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x",
+            )
 
         pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
-        headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
+        headroom_text = (
+            f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
+        )
         detail = (
             f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, pnl={pnl_text}, "
             f"headroom={headroom_text}, loss_pressure={loss_pressure}"
@@ -1405,19 +1821,19 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             0.5,
             min(1.0, to_float(params.get("direction_guardrail_price_floor", 0.80), 0.80)),
         )
-        guardrail_regimes = normalize_regime_scope(params.get("direction_guardrail_regimes", ["mid", "closing"]))
+        guardrail_regimes = _normalize_regime_scope(params.get("direction_guardrail_regimes", ["mid", "closing"]))
         if not guardrail_regimes:
             guardrail_regimes = {"mid", "closing"}
 
         # --- Mode selection ---
-        requested_mode = normalize_strategy_mode(params.get("strategy_mode") or params.get("mode"))
+        requested_mode = _normalize_mode(params.get("strategy_mode") or params.get("mode"))
         direction = str(getattr(signal, "direction", "") or "").strip().lower()
-        regime = normalize_regime(payload.get("regime"))
-        enabled_active_modes = resolve_enabled_active_modes(params)
+        regime = _normalize_regime(payload.get("regime"))
+        enabled_active_modes = _resolve_enabled_active_modes(params)
 
         # --- Asset / timeframe extraction ---
-        signal_asset = normalize_crypto_asset(
-            first_present(
+        signal_asset = _normalize_asset(
+            _first_present(
                 live_market.get("asset"),
                 live_market.get("coin"),
                 live_market.get("symbol"),
@@ -1427,7 +1843,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             )
         )
         signal_timeframe = _normalize_timeframe(
-            first_present(
+            _first_present(
                 live_market.get("timeframe"),
                 live_market.get("cadence"),
                 live_market.get("interval"),
@@ -1438,22 +1854,22 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         # --- Asset/timeframe include+exclude filtering ---
-        include_assets = normalize_scope(
+        include_assets = _normalize_scope(
             params.get("include_assets"),
-            normalize_crypto_asset,
+            _normalize_asset,
         )
-        exclude_assets = normalize_scope(
-            first_present(
+        exclude_assets = _normalize_scope(
+            _first_present(
                 params.get("exclude_assets"),
             ),
-            normalize_crypto_asset,
+            _normalize_asset,
         )
-        include_timeframes = normalize_scope(
+        include_timeframes = _normalize_scope(
             params.get("include_timeframes"),
             _normalize_timeframe,
         )
-        exclude_timeframes = normalize_scope(
-            first_present(
+        exclude_timeframes = _normalize_scope(
+            _first_present(
                 params.get("exclude_timeframes"),
             ),
             _normalize_timeframe,
@@ -1474,8 +1890,8 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         active_mode = "maker_quote"
         requested_mode = "maker_quote"
         enabled_active_modes = {"maker_quote"}
-        dominant_mode = "maker_quote"
         mode_allowlist_ok = True
+        dominant_mode = "maker_quote"
 
         trader_context = context.get("trader")
         risk_limits_context = (
@@ -1499,19 +1915,19 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         ).strip().lower() == "crypto_worker" or signal_type.startswith("crypto_worker")
 
         live_window_required = to_bool(params.get("live_window_required"), True)
-        signal_is_live_raw = first_present(live_market.get("is_live"), payload.get("is_live"))
+        signal_is_live_raw = _first_present(live_market.get("is_live"), payload.get("is_live"))
         signal_is_live = signal_is_live_raw if isinstance(signal_is_live_raw, bool) else None
-        signal_is_current_raw = first_present(live_market.get("is_current"), payload.get("is_current"))
+        signal_is_current_raw = _first_present(live_market.get("is_current"), payload.get("is_current"))
         signal_is_current = signal_is_current_raw if isinstance(signal_is_current_raw, bool) else None
         signal_seconds_left = to_float(
-            first_present(
+            _first_present(
                 live_market.get("seconds_left"),
                 payload.get("seconds_left"),
             ),
             -1.0,
         )
         signal_end_time = str(
-            first_present(
+            _first_present(
                 live_market.get("market_end_time"),
                 live_market.get("end_time"),
                 payload.get("end_time"),
@@ -1540,7 +1956,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             if live_context_floor is not None:
                 max_live_context_age_seconds = max(max_live_context_age_seconds, live_context_floor)
         live_context_fetched_at = parse_datetime_utc(
-            first_present(
+            _first_present(
                 live_market.get("fetched_at"),
                 payload.get("live_market_fetched_at"),
             )
@@ -1556,7 +1972,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         signal_timestamp_used = parse_datetime_utc(
-            first_present(
+            _first_present(
                 live_market.get("signal_updated_at"),
                 live_market.get("updated_at"),
                 live_market.get("fetched_at"),
@@ -1597,14 +2013,14 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         signal_fresh_ok = signal_age_seconds is None or signal_age_seconds <= max_signal_age_seconds
 
         market_data_age_ms = self._float(
-            first_present(
+            _first_present(
                 live_market.get("market_data_age_ms"),
                 payload.get("market_data_age_ms"),
             )
         )
         if market_data_age_ms is None:
             observed_at = parse_datetime_utc(
-                first_present(
+                _first_present(
                     live_market.get("source_observed_at"),
                     payload.get("source_observed_at"),
                     live_market.get("fetched_at"),
@@ -1635,7 +2051,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 max_market_data_age_ms = max(max_market_data_age_ms, market_data_floor)
         require_market_data_age_for_sources = {
             str(item or "").strip().lower()
-            for item in as_list(first_present(params.get("require_market_data_age_for_sources"), ["crypto"]))
+            for item in _as_list(_first_present(params.get("require_market_data_age_for_sources"), ["crypto"]))
             if str(item or "").strip()
         }
         require_market_data_age = (
@@ -1716,7 +2132,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         net_edge = _get_net_edge(payload, direction, edge)
 
         signal_liquidity_usd = self._float(
-            first_present(
+            _first_present(
                 live_market.get("liquidity_usd"),
                 live_market.get("liquidity"),
                 payload.get("liquidity_usd"),
@@ -1746,7 +2162,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         signal_volume_usd = self._float(
-            first_present(
+            _first_present(
                 live_market.get("volume_usd"),
                 live_market.get("volume"),
                 payload.get("volume_usd"),
@@ -1764,7 +2180,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         signal_spread = self._float(
-            first_present(
+            _first_present(
                 live_market.get("spread"),
                 payload.get("spread"),
                 payload.get("market_spread"),
@@ -1787,7 +2203,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             history_summary = {}
 
         move_5m_pct = self._float(
-            first_present(
+            _first_present(
                 (
                     (history_summary.get("move_5m") or {}).get("percent")
                     if isinstance(history_summary.get("move_5m"), dict)
@@ -1798,7 +2214,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             )
         )
         move_30m_pct = self._float(
-            first_present(
+            _first_present(
                 (
                     (history_summary.get("move_30m") or {}).get("percent")
                     if isinstance(history_summary.get("move_30m"), dict)
@@ -1809,7 +2225,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             )
         )
         move_2h_pct = self._float(
-            first_present(
+            _first_present(
                 (
                     (history_summary.get("move_2h") or {}).get("percent")
                     if isinstance(history_summary.get("move_2h"), dict)
@@ -1843,7 +2259,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         spread_widening_bps = self._float(
-            first_present(
+            _first_present(
                 live_market.get("spread_widening_bps"),
                 live_market.get("spread_delta_bps"),
                 payload.get("spread_widening_bps"),
@@ -1887,7 +2303,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             orderbook_imbalance_source = "live_cache"
         else:
             raw_orderbook_imbalance = self._float(
-                first_present(
+                _first_present(
                     live_market.get("orderbook_imbalance"),
                     live_market.get("book_imbalance"),
                     live_market.get("imbalance"),
@@ -1916,7 +2332,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         )
 
         raw_orderflow_imbalance = self._float(
-            first_present(
+            _first_present(
                 live_market.get("orderflow_imbalance"),
                 live_market.get("flow_imbalance"),
                 payload.get("orderflow_imbalance"),
@@ -1933,9 +2349,9 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
         orderflow_alignment_enabled = to_bool(params.get("orderflow_alignment_enabled"), True)
         orderflow_alignment_modes = {
-            normalize_strategy_mode(item)
-            for item in as_list(first_present(params.get("orderflow_alignment_modes"), ["maker_quote", "convergence"]))
-            if normalize_strategy_mode(item) in {"directional", "maker_quote", "convergence"}
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("orderflow_alignment_modes"), ["maker_quote", "convergence"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
         }
         if not orderflow_alignment_modes:
             orderflow_alignment_modes = {"maker_quote", "convergence"}
@@ -1968,7 +2384,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             )
 
         cancel_rate_30s = self._float(
-            first_present(
+            _first_present(
                 live_market.get("cancel_rate_30s"),
                 live_market.get("maker_cancel_rate_30s"),
                 payload.get("cancel_rate_30s"),
@@ -1982,9 +2398,9 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             cancel_rate_30s = clamp(cancel_rate_30s, 0.0, 1.0)
         cancel_cluster_guard_enabled = to_bool(params.get("cancel_cluster_guard_enabled"), True)
         cancel_cluster_guard_modes = {
-            normalize_strategy_mode(item)
-            for item in as_list(first_present(params.get("cancel_cluster_guard_modes"), ["maker_quote"]))
-            if normalize_strategy_mode(item) in {"directional", "maker_quote", "convergence"}
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("cancel_cluster_guard_modes"), ["maker_quote"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
         }
         if not cancel_cluster_guard_modes:
             cancel_cluster_guard_modes = {"maker_quote"}
@@ -2006,7 +2422,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         up_price = max(0.0, min(1.0, to_float(payload.get("up_price"), 0.5)))
         down_price = max(0.0, min(1.0, to_float(payload.get("down_price"), 0.5)))
         now_epoch_ms = int(time.time() * 1000.0)
-        oracle_status = extract_oracle_status(
+        oracle_status = _extract_oracle_status(
             live_market=live_market,
             payload=payload,
             now_ms=now_epoch_ms,
@@ -2100,7 +2516,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                     oracle_age_seconds = (oracle_age_ms / 1000.0) if oracle_age_ms is not None else None
                 fallback_price = self._float(oracle_status.get("price"))
                 fallback_updated_at_ms = self._float(oracle_status.get("updated_at_ms"))
-                fallback_availability = resolve_oracle_availability(
+                fallback_availability = _resolve_oracle_availability(
                     price=fallback_price,
                     price_to_beat=fallback_price_to_beat,
                     age_ms=self._float(oracle_status.get("age_ms")),
@@ -2294,7 +2710,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         required_edge *= edge_calibration_threshold_multiplier
 
         entry_price_for_execution = self._float(
-            first_present(
+            _first_present(
                 getattr(signal, "entry_price", None),
                 payload.get("entry_price"),
                 payload.get("selected_price"),
@@ -2305,7 +2721,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         if entry_price_for_execution is None or entry_price_for_execution <= 0.0:
             if direction == "buy_yes":
                 entry_price_for_execution = self._float(
-                    first_present(
+                    _first_present(
                         live_market.get("yes_price"),
                         payload.get("up_price"),
                         payload.get("yes_price"),
@@ -2313,7 +2729,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 )
             elif direction == "buy_no":
                 entry_price_for_execution = self._float(
-                    first_present(
+                    _first_present(
                         live_market.get("no_price"),
                         payload.get("down_price"),
                         payload.get("no_price"),
@@ -2354,9 +2770,9 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         oracle_direction_ok = True
         oracle_direction_detail = "not required for active mode"
         oracle_direction_gate_modes = {
-            normalize_strategy_mode(item)
-            for item in as_list(first_present(params.get("oracle_direction_gate_modes"), ["directional", "convergence"]))
-            if normalize_strategy_mode(item) in {"directional", "maker_quote", "convergence"}
+            _normalize_mode(item)
+            for item in _as_list(_first_present(params.get("oracle_direction_gate_modes"), ["directional", "convergence"]))
+            if _normalize_mode(item) in {"directional", "maker_quote", "convergence"}
         }
         if not oracle_direction_gate_modes:
             oracle_direction_gate_modes = {"directional", "convergence"}
@@ -2496,7 +2912,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             default_entry_exit_ratio_floor -= 0.05
         default_entry_exit_ratio_floor = clamp(default_entry_exit_ratio_floor, 0.16, 0.90)
         configured_entry_exit_ratio_floor = self._float(
-            first_present(
+            _first_present(
                 _timeframe_override(params, "entry_executable_exit_ratio_floor", signal_timeframe),
                 params.get("entry_executable_exit_ratio_floor_closing") if regime == "closing" else None,
                 params.get("entry_executable_exit_ratio_floor"),
@@ -2610,7 +3026,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             else "entry_price unavailable"
         )
         min_execution_adjusted_edge_percent = self._float(
-            first_present(
+            _first_present(
                 _timeframe_override(params, "min_execution_adjusted_edge_percent", signal_timeframe),
                 params.get("min_execution_adjusted_edge_percent_closing") if regime == "closing" else None,
                 params.get("min_execution_adjusted_edge_percent"),
@@ -3389,14 +3805,14 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         #   2. Force-flatten near close (existing logic, via default_exit_check)
         #   3. Market resolution (handled before this method is called)
         binary_hold = to_bool(
-            crypto_param_value(config, "binary_resolution_hold", timeframe),
+            _crypto_hf_param_value(config, "binary_resolution_hold", timeframe),
             timeframe in ("5m", "15m"),
         )
         if binary_hold:
             resolution_tp_pct = max(
                 50.0,
                 to_float(
-                    crypto_param_value(config, "resolution_hold_take_profit_pct", timeframe),
+                    _crypto_hf_param_value(config, "resolution_hold_take_profit_pct", timeframe),
                     85.0 if timeframe == "5m" else 70.0,
                 ),
             )
@@ -3436,7 +3852,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0
 
             # --- HARD stop-loss (unconditional — no time pressure, no activation delay) ---
-            hard_stop_loss_pct_raw = crypto_param_value(config, "hard_stop_loss_pct", timeframe)
+            hard_stop_loss_pct_raw = _crypto_hf_param_value(config, "hard_stop_loss_pct", timeframe)
             if hard_stop_loss_pct_raw is None:
                 hard_stop_loss_pct_raw = config.get("hard_stop_loss_pct", 20.0)
             hard_stop_loss_pct = max(1.0, to_float(hard_stop_loss_pct_raw, 20.0))
@@ -3459,7 +3875,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 }
 
             seconds_left = self._float(
-                first_present(
+                _first_present(
                     state.get("seconds_left"),
                     context_payload.get("seconds_left"),
                     context_payload.get("live_market_context", {}).get("seconds_left")
@@ -4105,7 +4521,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             return None
 
         seconds_left = self._float(
-            first_present(
+            _first_present(
                 market_state.get("seconds_left"),
                 strategy_context.get("seconds_left"),
                 strategy_context.get("live_market_context", {}).get("seconds_left")
@@ -4119,7 +4535,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
         current_direction = (
             str(
-                first_present(
+                _first_present(
                     getattr(position, "direction", None),
                     strategy_context.get("direction"),
                     market_state.get("direction"),
@@ -4148,7 +4564,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         reverse_min_price_headroom = clamp(to_float(config.get("reverse_min_price_headroom"), 0.18), 0.0, 1.0)
 
         token_id = str(
-            first_present(
+            _first_present(
                 rapid_state.get("token_id"),
                 market_state.get("token_id"),
                 strategy_context.get("token_id"),
@@ -4336,14 +4752,14 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         """
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
-        defaults = normalize_crypto_highfreq_legacy_config(self.config)
+        defaults = merge_crypto_defaults(self.config)
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")
             if not market_id:
                 continue
             typed_market = self._market_from_crypto_dict(market)
-            asset = self._detect_asset(typed_market) or normalize_crypto_asset(
+            asset = self._detect_asset(typed_market) or _normalize_asset(
                 market.get("asset") or market.get("symbol") or market.get("coin")
             )
             timeframe = _normalize_timeframe(market.get("timeframe"))
@@ -4359,7 +4775,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
             price_to_beat = self._float(market.get("price_to_beat"))
             oracle_price = self._float(market.get("oracle_price"))
-            oracle_status = extract_oracle_status(
+            oracle_status = _extract_oracle_status(
                 live_market={},
                 payload={
                     "oracle_price": oracle_price,
@@ -4422,8 +4838,8 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
 
             # Gate 1: Minimum oracle move — small moves are noise, not signal.
             min_oracle_move = to_float(
-                crypto_param_value(defaults, "min_oracle_move_pct", timeframe),
-                coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe), 0.30, 0.0, 100.0),
+                _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe),
+                _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe), 0.30, 0.0, 100.0),
             )
             if oracle_move_pct < min_oracle_move:
                 rejection_detail: dict[str, Any] = {
@@ -4446,8 +4862,8 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             # repriced to reflect the oracle move.  If the contract price on our
             # predicted winning side is already expensive, there's no lag to exploit.
             max_repricing = to_float(
-                crypto_param_value(defaults, "max_market_repricing_for_entry", timeframe),
-                coerce_float(
+                _crypto_hf_param_value(defaults, "max_market_repricing_for_entry", timeframe),
+                _coerce_float(
                     _crypto_hf_default_param_value("max_market_repricing_for_entry", timeframe),
                     0.30,
                     0.0,
@@ -4549,8 +4965,8 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         thresholds_percent = {
             timeframe_key: round(
                 to_float(
-                    crypto_param_value(defaults, "min_oracle_move_pct", timeframe_key),
-                    coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe_key), 0.30, 0.0, 100.0),
+                    _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe_key),
+                    _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe_key), 0.30, 0.0, 100.0),
                 ),
                 4,
             )
@@ -4662,7 +5078,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                         "spread": spread,
                         "spread_widening_bps": self._float(market.get("spread_widening_bps")),
                         "orderbook_imbalance": self._float(
-                            first_present(
+                            _first_present(
                                 market.get("orderbook_imbalance"),
                                 market.get("book_imbalance"),
                                 market.get("imbalance"),
@@ -4718,7 +5134,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 "spread": spread,
                 "spread_widening_bps": self._float(market.get("spread_widening_bps")),
                 "orderbook_imbalance": self._float(
-                    first_present(
+                    _first_present(
                         market.get("orderbook_imbalance"),
                         market.get("book_imbalance"),
                         market.get("imbalance"),

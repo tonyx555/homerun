@@ -168,7 +168,7 @@ def market_ml_probability_yes(row: dict[str, Any]) -> float | None:
 # binance_direct first (sub-second receive-time stamp), then chainlink
 # (canonical resolution price), then RTDS-relayed binance, then anything
 # else. Mirrors the ranking already implemented in
-# btc_eth_highfreq._extract_oracle_status so behavior stays consistent.
+# the canonical extract_oracle_status flow used by every crypto strategy.
 _ORACLE_SOURCE_RANK: dict[str, int] = {
     "binance_direct": 0,
     "chainlink": 1,
@@ -306,7 +306,7 @@ def normalize_timeframe(value: Any) -> str:
 def timeframe_seconds(value: Any, default: int = 900) -> int:
     """Return the window length in seconds for a Polymarket crypto timeframe.
 
-    Mirrors ``btc_eth_highfreq._timeframe_seconds`` so all crypto strategies
+    Canonical timeframe-seconds resolution shared across all crypto strategies
     agree on what "5m"/"15m"/"1h"/"4h" mean. Returns ``default`` (15 min) for
     unknown values; callers should also gate on a min-seconds-left check so
     an unrecognised timeframe doesn't silently allow trades through with the
@@ -329,7 +329,7 @@ def fee_aware_min_edge_pct(price: float, multiplier: float = 2.0) -> float:
 # ---------------------------------------------------------------------------
 
 # Per-timeframe minimum seconds-left required to open a new position. Mirrors
-# the values that ``btc_eth_highfreq`` enforces via its
+# the values enforced via
 # ``min_seconds_left_for_entry_*`` config knobs. Goal: don't enter so close
 # to resolution that fills race the Chainlink heartbeat.
 _DEFAULT_MIN_SECONDS_LEFT_FOR_ENTRY: dict[str, float] = {

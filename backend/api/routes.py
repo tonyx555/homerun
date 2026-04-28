@@ -40,7 +40,17 @@ DEFAULT_STRATEGY_META = {
 }
 
 STRATEGY_META_BY_TYPE: dict[str, dict[str, object]] = {
-    "btc_eth_highfreq": {
+    "btc_eth_maker_quote": {
+        "domain": "crypto",
+        "timeframe": "5m/15m",
+        "sources": ["crypto"],
+    },
+    "btc_eth_directional_edge": {
+        "domain": "crypto",
+        "timeframe": "5m/15m",
+        "sources": ["crypto"],
+    },
+    "btc_eth_convergence": {
         "domain": "crypto",
         "timeframe": "5m/15m",
         "sources": ["crypto"],
@@ -126,9 +136,9 @@ def _derive_opportunity_sub_strategy(opportunity: object) -> Optional[str]:
         if title.startswith("temporal decay:"):
             return "decay_curve"
 
-    if strategy == "btc_eth_highfreq":
+    if strategy in {"btc_eth_maker_quote", "btc_eth_directional_edge", "btc_eth_convergence"}:
         for pos in positions:
-            if pos.get("_highfreq_metadata"):
+            if pos.get("_substrategy_metadata"):
                 sub = _normalize_sub_strategy(str(pos.get("sub_strategy") or ""))
                 if sub:
                     return sub
@@ -657,7 +667,7 @@ async def get_opportunities(
     sort_dir: Optional[str] = Query("desc", description="Sort direction: asc or desc"),
     exclude_strategy: Optional[str] = Query(
         None,
-        description="Exclude a strategy type from results (e.g. btc_eth_highfreq)",
+        description="Exclude a strategy type from results (e.g. btc_eth_maker_quote)",
     ),
     sub_strategy: Optional[str] = Query(
         None,
@@ -775,7 +785,7 @@ async def get_opportunity_ids(
     sort_dir: Optional[str] = Query("desc", description="Sort direction: asc or desc"),
     exclude_strategy: Optional[str] = Query(
         None,
-        description="Exclude a strategy type from results (e.g. btc_eth_highfreq)",
+        description="Exclude a strategy type from results (e.g. btc_eth_maker_quote)",
     ),
     sub_strategy: Optional[str] = Query(
         None,

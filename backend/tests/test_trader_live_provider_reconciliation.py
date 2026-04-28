@@ -91,7 +91,7 @@ async def _seed_trader(
             id=trader_id,
             name=name,
             source_configs_json=source_configs
-            or [{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+            or [{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             risk_limits_json={},
             metadata_json={},
             mode="live",

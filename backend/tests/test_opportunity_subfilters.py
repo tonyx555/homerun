@@ -8,22 +8,6 @@ if str(BACKEND_ROOT) not in sys.path:
 from api.routes import _derive_opportunity_sub_strategy  # noqa: E402
 
 
-def test_derive_highfreq_substrategy_from_metadata():
-    opp = {
-        "strategy": "btc_eth_highfreq",
-        "title": "BTC/ETH HF Directional",
-        "positions_to_take": [
-            {"action": "BUY", "outcome": "YES"},
-            {
-                "_highfreq_metadata": True,
-                "sub_strategy": "directional_edge",
-            },
-        ],
-    }
-
-    assert _derive_opportunity_sub_strategy(opp) == "directional_edge"
-
-
 def test_derive_news_edge_direction():
     opp = {
         "strategy": "news_edge",

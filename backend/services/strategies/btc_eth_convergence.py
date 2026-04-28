@@ -166,137 +166,6 @@ def _crypto_hf_param_value(config: dict[str, Any], base_key: str, timeframe: Any
 
 
 
-def crypto_highfreq_direction_allowed(
-    params: Any,
-    *,
-    regime: Any,
-    active_mode: Any,
-    direction: Any,
-    timeframe: Any = None,
-    seconds_left: Optional[float] = None,
-) -> tuple[bool, str]:
-    cfg = params if isinstance(params, dict) else {}
-    defaults = CRYPTO_HF_SCOPE_DEFAULTS
-    normalized_regime = str(regime or "").strip().lower()
-    mode = str(active_mode or "").strip().lower()
-    normalized_direction = str(direction or "").strip().lower()
-    normalized_timeframe = _normalize_timeframe(timeframe)
-
-    if normalized_direction not in {"buy_yes", "buy_no"}:
-        return True, "direction_not_supported"
-
-    yes_enabled = _coerce_bool(
-        cfg.get("opening_directional_buy_yes_enabled"),
-        _coerce_bool(defaults.get("opening_directional_buy_yes_enabled"), False),
-    )
-    no_enabled = _coerce_bool(
-        cfg.get("opening_directional_buy_no_enabled"),
-        _coerce_bool(defaults.get("opening_directional_buy_no_enabled"), True),
-    )
-
-    if normalized_direction == "buy_yes":
-        if yes_enabled:
-            return True, f"opening_{mode}_buy_yes_enabled={yes_enabled}"
-
-        elapsed_ratio: Optional[float] = None
-        timeframe_seconds: Optional[float] = None
-        if normalized_timeframe in {"5m", "15m", "1h", "4h"}:
-            timeframe_seconds = float(
-                {
-                    "5m": 300.0,
-                    "15m": 900.0,
-                    "1h": 3600.0,
-                    "4h": 14400.0,
-                }[normalized_timeframe]
-            )
-        if timeframe_seconds is not None and seconds_left is not None and seconds_left >= 0.0:
-            elapsed_ratio = clamp(1.0 - (float(seconds_left) / timeframe_seconds), 0.0, 1.0)
-
-        gate_ratio_raw = _timeframe_override(cfg, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe)
-        if gate_ratio_raw is None:
-            gate_ratio_raw = cfg.get("opening_directional_buy_yes_block_elapsed_pct")
-        if gate_ratio_raw is None:
-            gate_ratio_raw = _timeframe_override(
-                defaults, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe
-            )
-        if gate_ratio_raw is None:
-            gate_ratio_raw = defaults.get("opening_directional_buy_yes_block_elapsed_pct")
-        gate_ratio = _coerce_float(gate_ratio_raw, 0.10, 0.0, 1.0)
-
-        if elapsed_ratio is None:
-            if normalized_regime == "opening":
-                return False, f"opening_{mode}_buy_yes_enabled={yes_enabled}"
-            return True, "elapsed_unavailable_regime_not_opening"
-        if elapsed_ratio < gate_ratio:
-            return (
-                False,
-                f"opening_{mode}_buy_yes_enabled={yes_enabled} elapsed={elapsed_ratio:.3f} "
-                f"< min_elapsed={gate_ratio:.3f} timeframe={normalized_timeframe or 'unknown'}",
-            )
-        return (
-            True,
-            f"opening_{mode}_buy_yes_enabled={yes_enabled} elapsed={elapsed_ratio:.3f} "
-            f">= min_elapsed={gate_ratio:.3f} timeframe={normalized_timeframe or 'unknown'}",
-        )
-    if no_enabled:
-        return True, f"opening_{mode}_buy_no_enabled={no_enabled}"
-    if normalized_regime == "opening":
-        return False, f"opening_{mode}_buy_no_enabled={no_enabled}"
-    return True, "regime_not_opening"
-
-
-def crypto_highfreq_should_flatten_resolution_risk(
-    params: Any,
-    *,
-    timeframe: Any = None,
-    seconds_left: Optional[float] = None,
-    pnl_percent: Optional[float] = None,
-    exit_headroom_ratio: Optional[float] = None,
-    take_profit_armed: bool = False,
-) -> tuple[bool, str]:
-    cfg = params if isinstance(params, dict) else {}
-    enabled = _coerce_bool(cfg.get("resolution_risk_flatten_enabled"), True)
-    if not enabled:
-        return False, "disabled"
-
-    if take_profit_armed and _coerce_bool(cfg.get("resolution_risk_disable_when_take_profit_armed"), True):
-        return False, "take_profit_armed"
-
-    if seconds_left is None or seconds_left < 0.0:
-        return False, "seconds_left_unavailable"
-
-    seconds_budget_raw = _crypto_hf_param_value(cfg, "resolution_risk_seconds_left", timeframe)
-    if seconds_budget_raw is None:
-        seconds_budget_raw = _crypto_hf_param_value(cfg, "force_flatten_seconds_left", timeframe)
-    seconds_budget = _coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
-    if seconds_left > seconds_budget:
-        return False, f"seconds_left={seconds_left:.1f} > budget={seconds_budget:.1f}"
-
-    max_profit_raw = _crypto_hf_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
-    max_profit_pct = _coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
-    min_loss_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
-    min_loss_pct = _coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
-    min_headroom_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
-    min_headroom_ratio = _coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
-
-    loss_pressure = False
-    if pnl_percent is not None:
-        if pnl_percent > max_profit_pct:
-            return False, f"pnl={pnl_percent:.2f}% > max_profit={max_profit_pct:.2f}%"
-        if pnl_percent < -abs(min_loss_pct):
-            loss_pressure = True
-
-    if exit_headroom_ratio is not None and exit_headroom_ratio < min_headroom_ratio:
-        return False, f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x"
-
-    pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
-    headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
-    detail = (
-        f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, pnl={pnl_text}, "
-        f"headroom={headroom_text}, loss_pressure={loss_pressure}"
-    )
-    return True, detail
-
 
 def _as_list(value: Any) -> list[Any]:
     if isinstance(value, (list, tuple, set)):
@@ -541,37 +410,11 @@ def _get_crypto_series() -> list[tuple[str, str, str]]:
 # Sub-strategy scoring constants
 # ---------------------------------------------------------------------------
 
-# -- Directional Edge scoring (oracle-based) --
-_DIRECTIONAL_EARLY_PHASE_MINUTES = 10.0  # Remaining minutes for early/mid boundary
-_DIRECTIONAL_EARLY_MIN_EDGE = 0.08  # Required edge in early phase
-_DIRECTIONAL_EARLY_SCORE_MULT = 1.0
-_DIRECTIONAL_MID_PHASE_MINUTES = 5.0  # Remaining minutes for mid/late boundary
-_DIRECTIONAL_MID_MIN_EDGE = 0.05  # Required edge in mid phase
-_DIRECTIONAL_MID_SCORE_MULT = 1.5
-_DIRECTIONAL_LATE_MIN_EDGE = 0.03  # Required edge in late phase
-_DIRECTIONAL_LATE_SCORE_MULT = 2.0
-_DIRECTIONAL_EDGE_SCORE_SCALE = 500.0  # Score scale for edge magnitude
-_DIRECTIONAL_MAX_SCORE = 80.0  # Cap on directional score
-_DIRECTIONAL_LATE_PHASE_BONUS = 20.0  # Extra score in late phase
-_DIRECTIONAL_ORACLE_PROB_MIN = 0.03  # Min/max model probability clamp (sigmoid)
-_DIRECTIONAL_ORACLE_PROB_MAX = 0.97
-_DIRECTIONAL_BASE_SCALE = 0.50  # Base sigmoid scale (diff_pct / scale)
-_DIRECTIONAL_MIN_SCALE = 0.08  # Min sigmoid scale (late in window)
-
-# -- Maker Quote (two-sided market-making) scoring --
-_MAKER_QUOTE_MIN_SPREAD = 0.01  # Minimum bid-ask spread ($0.01 — makers get 0% fee)
-_MAKER_QUOTE_MIN_LIQUIDITY = 200.0  # Minimum market liquidity (thin books are BETTER)
-_MAKER_QUOTE_MIN_SECONDS_LEFT = 30.0  # Can quote until near expiry
+# Maker tick size — used by convergence quoting (1 tick below the
+# winning side's current ask) and by the maker-quote execution-plan
+# override that's preserved for backward compatibility on the evaluate()
+# path even though convergence never selects maker_quote.
 _MAKER_QUOTE_TICK_SIZE = 0.01  # 1 tick = $0.01
-_MAKER_QUOTE_BASE_SCORE = 25.0  # PRIMARY strategy — highest base score
-_MAKER_QUOTE_SPREAD_SCORE_SCALE = 400.0  # Score scale for spread width
-_MAKER_QUOTE_MAX_SCORE = 90.0  # Highest possible score
-_MAKER_QUOTE_THIN_BOOK_USD = 1000.0  # Below this, higher fill probability
-_MAKER_QUOTE_THIN_BOOK_BONUS = 15.0
-_MAKER_QUOTE_MIN_SIZE_USD = 5.0  # Minimum position size per side
-_MAKER_QUOTE_MAX_SIZE_USD = 25.0  # Maximum position size per side
-_MAKER_QUOTE_RESOLUTION_RISK_SECONDS = 45.0  # Extra risk near resolution
-_MAKER_QUOTE_SKEW_MAX = 0.03  # Max skew per side from oracle signal ($0.03)
 
 # -- Convergence (near-expiry) scoring --
 _CONVERGENCE_MIN_SECONDS_LEFT = 5.0
@@ -656,11 +499,11 @@ class _CryptoMarketFetcher:
             else:
                 loop.run_until_complete(feed_mgr.polymarket_feed.subscribe(token_ids=token_ids))
             logger.debug(
-                "BtcEthHighFreq: subscribed %d crypto tokens to WS feed",
+                "BtcEthConvergence: subscribed %d crypto tokens to WS feed",
                 len(token_ids),
             )
         except Exception as e:
-            logger.debug("BtcEthHighFreq: WS subscription failed (non-critical): %s", e)
+            logger.debug("BtcEthConvergence: WS subscription failed (non-critical): %s", e)
 
     @staticmethod
     def _is_currently_live(event: dict, now_ms: float) -> bool:
@@ -778,7 +621,7 @@ class _CryptoMarketFetcher:
                     )
                     if resp.status_code != 200:
                         logger.debug(
-                            "BtcEthHighFreq: Gamma series_id=%s returned %s",
+                            "BtcEthConvergence: Gamma series_id=%s returned %s",
                             series_id,
                             resp.status_code,
                         )
@@ -801,7 +644,7 @@ class _CryptoMarketFetcher:
                                     seen_ids.add(mid)
                                 except Exception as e:
                                     logger.debug(
-                                        "BtcEthHighFreq: failed to parse market %s: %s",
+                                        "BtcEthConvergence: failed to parse market %s: %s",
                                         mid,
                                         e,
                                     )
@@ -809,7 +652,7 @@ class _CryptoMarketFetcher:
                     time.sleep(0.05)  # Rate limit between series
                 except Exception as e:
                     logger.debug(
-                        "BtcEthHighFreq: series_id=%s fetch failed: %s",
+                        "BtcEthConvergence: series_id=%s fetch failed: %s",
                         series_id,
                         e,
                     )
@@ -823,13 +666,13 @@ class _CryptoMarketFetcher:
 
         if all_markets:
             logger.info(
-                "BtcEthHighFreq: fetched %d live crypto markets via Gamma series API (%s)",
+                "BtcEthConvergence: fetched %d live crypto markets via Gamma series API (%s)",
                 len(all_markets),
                 ", ".join(f"{a} {tf}" for _, a, tf in series),
             )
         else:
             logger.debug(
-                "BtcEthHighFreq: no live crypto markets found across %d series",
+                "BtcEthConvergence: no live crypto markets found across %d series",
                 len(series),
             )
         return all_markets
@@ -929,7 +772,7 @@ def _resolve_enabled_active_modes(config: Any) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot  # noqa: E402,F401
+from services.strategy_helpers.price_window import PriceWindow  # noqa: E402,F401
 
 # Crypto scope helpers + timeframe utilities — moved out of this file
 # to services.strategy_helpers.crypto_scope so other modules can import
@@ -939,7 +782,7 @@ from services.strategy_helpers.crypto_scope import (  # noqa: E402
     _crypto_hf_default_param_value,
     _normalize_timeframe,
     _timeframe_override,
-    normalize_crypto_highfreq_legacy_config,
+    merge_crypto_defaults,
 )
 
 
@@ -1032,7 +875,9 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         # so the detect path just needs to pass every market through.
         self.min_profit = 0.0
         # Per-market price history keyed by market ID
-        self._price_histories: dict[str, MarketPriceHistory] = {}
+        self._price_windows: dict[str, PriceWindow] = {}
+        # Keyed by CLOB token id (one window per outcome stream) so a 3+ outcome
+        # market would just track more entries; binary markets get exactly 2.
         # Runtime anti-churn controls used by evaluate().
         self._edge_first_seen_ms: dict[str, int] = {}
         self._last_selected_at_ms_by_market: dict[str, int] = {}
@@ -1041,7 +886,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         self._paused_until_ms: int = 0
 
     def configure(self, config: dict) -> None:
-        super().configure(normalize_crypto_highfreq_legacy_config(config))
+        super().configure(merge_crypto_defaults(config))
 
     # ------------------------------------------------------------------
     # Public API
@@ -1067,15 +912,15 @@ class BtcEthConvergenceStrategy(BaseStrategy):
 
         candidates = self._find_candidates(markets, prices)
         if not candidates:
-            logger.debug("BtcEthHighFreq: no BTC/ETH high-freq candidates found")
+            logger.debug("BtcEthConvergence: no BTC/ETH high-freq candidates found")
             return opportunities
 
         enabled_sub_strategies = _resolve_enabled_sub_strategies(getattr(self, "config", {}))
         if not enabled_sub_strategies:
-            logger.info("BtcEthHighFreq: no sub-strategies enabled in config; skipping detection")
+            logger.info("BtcEthConvergence: no sub-strategies enabled in config; skipping detection")
             return opportunities
 
-        logger.info(f"BtcEthHighFreq: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
+        logger.info(f"BtcEthConvergence: found {len(candidates)} candidate market(s) — evaluating sub-strategies")
 
         for candidate in candidates:
             # Update price history
@@ -1086,7 +931,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
             if selected is None:
                 reasons = " | ".join(f"{s.strategy.value}: {s.reason}" for s in all_scores)
                 logger.debug(
-                    f"BtcEthHighFreq: no viable sub-strategy for market "
+                    f"BtcEthConvergence: no viable sub-strategy for market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"yes={candidate.yes_price:.3f} no={candidate.no_price:.3f} "
                     f"liq=${candidate.market.liquidity:.0f}) — {reasons}"
@@ -1095,7 +940,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
 
             scores_str = ", ".join(f"{s.strategy.value}={s.score:.1f}" for s in all_scores)
             logger.info(
-                f"BtcEthHighFreq: market {candidate.market.id} "
+                f"BtcEthConvergence: market {candidate.market.id} "
                 f"({candidate.asset} {candidate.timeframe}) — "
                 f"selected {selected.strategy.value} (score={selected.score:.1f}). "
                 f"All scores: {scores_str}"
@@ -1106,13 +951,13 @@ class BtcEthConvergenceStrategy(BaseStrategy):
             if opp is not None:
                 opportunities.append(opp)
                 logger.info(
-                    f"BtcEthHighFreq: opportunity detected — {opp.title} | "
+                    f"BtcEthConvergence: opportunity detected — {opp.title} | "
                     f"ROI {opp.roi_percent:.2f}% | sub-strategy={selected.strategy.value} | "
                     f"market={candidate.market.id}"
                 )
             else:
                 logger.debug(
-                    f"BtcEthHighFreq: create_opportunity rejected market "
+                    f"BtcEthConvergence: create_opportunity rejected market "
                     f"{candidate.market.id} ({candidate.asset} {candidate.timeframe}, "
                     f"sub={selected.strategy.value}, score={selected.score:.1f}) — "
                     f"hard filters in base strategy blocked it "
@@ -1120,7 +965,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
                     f"liq=${candidate.market.liquidity:.0f})"
                 )
 
-        logger.info(f"BtcEthHighFreq: scan complete — {len(opportunities)} opportunity(ies) found")
+        logger.info(f"BtcEthConvergence: scan complete — {len(opportunities)} opportunity(ies) found")
         return opportunities
 
     # ------------------------------------------------------------------
@@ -1155,7 +1000,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
             pass  # Non-fatal: fall back to scanner markets only
 
         logger.debug(
-            f"BtcEthHighFreq: scanning {len(all_markets)} markets "
+            f"BtcEthConvergence: scanning {len(all_markets)} markets "
             f"({len(markets)} from scanner, {len(all_markets) - len(markets)} from Gamma)"
         )
 
@@ -1178,7 +1023,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
                 asset_hit_no_tf += 1
                 if asset_hit_no_tf <= 5:
                     logger.debug(
-                        f"BtcEthHighFreq: asset={asset} but no timeframe — "
+                        f"BtcEthConvergence: asset={asset} but no timeframe — "
                         f"slug={market.slug} question={market.question[:80]}"
                     )
                 continue
@@ -1268,26 +1113,42 @@ class BtcEthConvergenceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     def _update_price_history(self, candidate: HighFreqCandidate) -> None:
-        """Record the latest prices into the rolling window for this market."""
-        mid = candidate.market.id
-        if mid not in self._price_histories:
-            if candidate.timeframe == "4hr":
-                window = _4HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "1hr":
-                window = _1HR_HISTORY_WINDOW_SEC
-            elif candidate.timeframe == "5min":
-                window = 120  # 2 min for 5-min markets
-            else:
-                window = _DEFAULT_HISTORY_WINDOW_SEC
-            self._price_histories[mid] = MarketPriceHistory(window_seconds=window)
+        """Record latest outcome prices into per-token PriceWindows.
 
-        self._price_histories[mid].record(
-            candidate.yes_price,
-            candidate.no_price,
-        )
+        One :class:`PriceWindow` per CLOB token id. Binary markets get two
+        windows (yes + no); a future 3+ outcome market would naturally
+        produce N windows without any code change.
+        """
+        if candidate.timeframe == "4hr":
+            window = _4HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "1hr":
+            window = _1HR_HISTORY_WINDOW_SEC
+        elif candidate.timeframe == "5min":
+            window = 120  # 2 min for 5-min markets
+        else:
+            window = _DEFAULT_HISTORY_WINDOW_SEC
 
-    def _get_history(self, market_id: str) -> Optional[MarketPriceHistory]:
-        return self._price_histories.get(market_id)
+        token_ids = list(candidate.market.clob_token_ids or [])
+        prices = [candidate.yes_price, candidate.no_price]
+        for token_id, price in zip(token_ids, prices):
+            if not token_id:
+                continue
+            existing = self._price_windows.get(token_id)
+            if existing is None or existing.window_seconds != window:
+                existing = PriceWindow(window_seconds=window)
+                self._price_windows[token_id] = existing
+            existing.record(price)
+
+    def _get_price_window(self, token_id: str) -> Optional[PriceWindow]:
+        """Return the rolling :class:`PriceWindow` for a specific token id.
+
+        Returns None when no observations have been recorded for that
+        token. Strategies that need yes-side or no-side stats should
+        look up the relevant token id (``market.clob_token_ids[0]`` for
+        YES, ``[1]`` for NO on a binary market) and call methods on the
+        returned window.
+        """
+        return self._price_windows.get(token_id)
 
     # ------------------------------------------------------------------
     # Dynamic strategy selector
@@ -1500,7 +1361,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         )
 
         if opp is not None:
-            self._attach_highfreq_metadata(opp, c, SubStrategy.CONVERGENCE, params)
+            self._attach_substrategy_metadata(opp, c, SubStrategy.CONVERGENCE, params)
             opp.risk_factors.insert(0, f"Convergence bet: {params['remaining_seconds']:.0f}s to resolution")
         return opp
 
@@ -1509,7 +1370,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _attach_highfreq_metadata(
+    def _attach_substrategy_metadata(
         opp: Opportunity,
         candidate: HighFreqCandidate,
         sub_strategy: SubStrategy,
@@ -1521,7 +1382,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         # of dicts). We append a metadata entry at the end.
         opp.positions_to_take.append(
             {
-                "_highfreq_metadata": True,
+                "_substrategy_metadata": True,
                 "asset": candidate.asset,
                 "timeframe": candidate.timeframe,
                 "sub_strategy": sub_strategy.value,
@@ -1704,11 +1565,165 @@ class BtcEthConvergenceStrategy(BaseStrategy):
                 "leg_fill_tolerance_ratio": 0.02,
             },
             "metadata": {
-                "generated_by": "btc_eth_highfreq.evaluate",
+                "generated_by": "btc_eth_convergence.evaluate",
                 "active_mode": "maker_quote",
                 "regime": regime,
             },
         }
+
+    # ── Inlined direction + resolution-risk guardrails ──
+    #
+    # Standalone gates owned by this strategy — formerly the
+    # original three-layer btc_eth_convergence strategy. The convergence
+    # strategy owns its own copy so the multi-mode helper can shrink to a
+    # single-mode (convergence) form without breaking sibling strategies.
+
+    def _direction_allowed(
+        self,
+        params: Any,
+        *,
+        regime: Any,
+        direction: Any,
+        timeframe: Any = None,
+        seconds_left: Optional[float] = None,
+    ) -> tuple[bool, str]:
+        """Decide whether ``direction`` is allowed under the configured
+        opening-directional gates for the convergence mode + ``regime``.
+
+        Returns ``(allowed, detail)``. The ``detail`` is suitable for
+        surfacing in a DecisionCheck. Reads opening-directional gates from
+        ``params`` with fallback to this strategy's ``default_config``.
+        """
+        cfg = params if isinstance(params, dict) else {}
+        defaults = self.default_config
+        normalized_regime = str(regime or "").strip().lower()
+        mode = "convergence"
+        normalized_direction = str(direction or "").strip().lower()
+        normalized_timeframe = _normalize_timeframe(timeframe)
+
+        if normalized_direction not in {"buy_yes", "buy_no"}:
+            return True, "direction_not_supported"
+
+        yes_enabled = _coerce_bool(
+            cfg.get("opening_directional_buy_yes_enabled"),
+            _coerce_bool(defaults.get("opening_directional_buy_yes_enabled"), False),
+        )
+        no_enabled = _coerce_bool(
+            cfg.get("opening_directional_buy_no_enabled"),
+            _coerce_bool(defaults.get("opening_directional_buy_no_enabled"), True),
+        )
+
+        if normalized_direction == "buy_yes":
+            if yes_enabled:
+                return True, f"opening_{mode}_buy_yes_enabled={yes_enabled}"
+
+            elapsed_ratio: Optional[float] = None
+            timeframe_seconds_value: Optional[float] = None
+            if normalized_timeframe in {"5m", "15m", "1h", "4h"}:
+                timeframe_seconds_value = float(
+                    {
+                        "5m": 300.0,
+                        "15m": 900.0,
+                        "1h": 3600.0,
+                        "4h": 14400.0,
+                    }[normalized_timeframe]
+                )
+            if timeframe_seconds_value is not None and seconds_left is not None and seconds_left >= 0.0:
+                elapsed_ratio = clamp(1.0 - (float(seconds_left) / timeframe_seconds_value), 0.0, 1.0)
+
+            gate_ratio_raw = _timeframe_override(cfg, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe)
+            if gate_ratio_raw is None:
+                gate_ratio_raw = cfg.get("opening_directional_buy_yes_block_elapsed_pct")
+            if gate_ratio_raw is None:
+                gate_ratio_raw = _timeframe_override(
+                    defaults, "opening_directional_buy_yes_block_elapsed_pct", normalized_timeframe
+                )
+            if gate_ratio_raw is None:
+                gate_ratio_raw = defaults.get("opening_directional_buy_yes_block_elapsed_pct")
+            gate_ratio = _coerce_float(gate_ratio_raw, 0.10, 0.0, 1.0)
+
+            if elapsed_ratio is None:
+                if normalized_regime == "opening":
+                    return False, f"opening_{mode}_buy_yes_enabled={yes_enabled}"
+                return True, "elapsed_unavailable_regime_not_opening"
+            if elapsed_ratio < gate_ratio:
+                return (
+                    False,
+                    f"opening_{mode}_buy_yes_enabled={yes_enabled} elapsed={elapsed_ratio:.3f} "
+                    f"< min_elapsed={gate_ratio:.3f} timeframe={normalized_timeframe or 'unknown'}",
+                )
+            return (
+                True,
+                f"opening_{mode}_buy_yes_enabled={yes_enabled} elapsed={elapsed_ratio:.3f} "
+                f">= min_elapsed={gate_ratio:.3f} timeframe={normalized_timeframe or 'unknown'}",
+            )
+        if no_enabled:
+            return True, f"opening_{mode}_buy_no_enabled={no_enabled}"
+        if normalized_regime == "opening":
+            return False, f"opening_{mode}_buy_no_enabled={no_enabled}"
+        return True, "regime_not_opening"
+
+    def _should_flatten_resolution_risk(
+        self,
+        params: Any,
+        *,
+        timeframe: Any = None,
+        seconds_left: Optional[float] = None,
+        pnl_percent: Optional[float] = None,
+        exit_headroom_ratio: Optional[float] = None,
+        take_profit_armed: bool = False,
+    ) -> tuple[bool, str]:
+        """Decide whether to force-flatten a position to avoid
+        resolution-time risk.
+
+        Returns ``(should_flatten, detail)``. Reads gating thresholds
+        (seconds-left budget, max-profit ceiling, min-loss floor, headroom
+        ratio) from ``params`` via :func:`_crypto_hf_param_value` so
+        timeframe-suffixed overrides apply.
+        """
+        cfg = params if isinstance(params, dict) else {}
+        defaults = self.default_config  # noqa: F841 — kept for parity with helper
+        enabled = _coerce_bool(cfg.get("resolution_risk_flatten_enabled"), True)
+        if not enabled:
+            return False, "disabled"
+
+        if take_profit_armed and _coerce_bool(cfg.get("resolution_risk_disable_when_take_profit_armed"), True):
+            return False, "take_profit_armed"
+
+        if seconds_left is None or seconds_left < 0.0:
+            return False, "seconds_left_unavailable"
+
+        seconds_budget_raw = _crypto_hf_param_value(cfg, "resolution_risk_seconds_left", timeframe)
+        if seconds_budget_raw is None:
+            seconds_budget_raw = _crypto_hf_param_value(cfg, "force_flatten_seconds_left", timeframe)
+        seconds_budget = _coerce_float(seconds_budget_raw, 120.0, 0.0, 86_400.0)
+        if seconds_left > seconds_budget:
+            return False, f"seconds_left={seconds_left:.1f} > budget={seconds_budget:.1f}"
+
+        max_profit_raw = _crypto_hf_param_value(cfg, "resolution_risk_max_profit_pct", timeframe)
+        max_profit_pct = _coerce_float(max_profit_raw, 6.0, 0.0, 100.0)
+        min_loss_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_loss_pct", timeframe)
+        min_loss_pct = _coerce_float(min_loss_raw, 2.0, 0.0, 100.0)
+        min_headroom_raw = _crypto_hf_param_value(cfg, "resolution_risk_min_headroom_ratio", timeframe)
+        min_headroom_ratio = _coerce_float(min_headroom_raw, 0.0, 0.0, 100.0)
+
+        loss_pressure = False
+        if pnl_percent is not None:
+            if pnl_percent > max_profit_pct:
+                return False, f"pnl={pnl_percent:.2f}% > max_profit={max_profit_pct:.2f}%"
+            if pnl_percent < -abs(min_loss_pct):
+                loss_pressure = True
+
+        if exit_headroom_ratio is not None and exit_headroom_ratio < min_headroom_ratio:
+            return False, f"headroom={exit_headroom_ratio:.2f}x < min={min_headroom_ratio:.2f}x"
+
+        pnl_text = f"{pnl_percent:.2f}%" if pnl_percent is not None else "unknown"
+        headroom_text = f"{exit_headroom_ratio:.2f}x" if exit_headroom_ratio is not None else "unknown"
+        detail = (
+            f"seconds_left={seconds_left:.1f}s <= {seconds_budget:.1f}s, pnl={pnl_text}, "
+            f"headroom={headroom_text}, loss_pressure={loss_pressure}"
+        )
+        return True, detail
 
     def evaluate(self, signal: Any, context: dict[str, Any]) -> StrategyDecision:
         """Full crypto high-frequency evaluation with multi-mode regime system,
@@ -1804,30 +1819,16 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         timeframe_not_excluded = not (bool(signal_timeframe) and signal_timeframe in exclude_timeframes)
         timeframe_scope_ok = timeframe_in_scope and timeframe_not_excluded
 
-        # --- Active mode resolution ---
+        # --- Active mode (pinned to convergence for this strategy) ---
+        # The directional / maker_quote layers were split out into sibling
+        # strategy modules; this strategy is the convergence layer only.
+        # We preserve ``dominant_mode`` because the rest of evaluate() and the
+        # decision payload still reference it.
         dominant_mode = _normalize_mode(payload.get("dominant_strategy"))
-        active_mode = dominant_mode if requested_mode == "auto" and dominant_mode != "auto" else requested_mode
-        if requested_mode == "auto":
-            priority_seen: set[str] = set()
-            auto_mode_priority: list[str] = []
-            for item in _as_list(params.get("auto_mode_priority")):
-                normalized_mode = _normalize_mode(item)
-                if normalized_mode == "auto":
-                    continue
-                if normalized_mode in priority_seen:
-                    continue
-                priority_seen.add(normalized_mode)
-                auto_mode_priority.append(normalized_mode)
-            if not auto_mode_priority:
-                auto_mode_priority = ["directional", "convergence", "maker_quote"]
-            if active_mode == "auto" or active_mode not in enabled_active_modes:
-                for candidate_mode in auto_mode_priority:
-                    if candidate_mode in enabled_active_modes:
-                        active_mode = candidate_mode
-                        break
-        if active_mode == "auto" or active_mode not in enabled_active_modes:
-            active_mode = "directional"
-        mode_allowlist_ok = active_mode in enabled_active_modes
+        active_mode = "convergence"
+        requested_mode = "convergence"
+        enabled_active_modes = {"convergence"}
+        mode_allowlist_ok = True
 
         trader_context = context.get("trader")
         risk_limits_context = (
@@ -2107,10 +2108,9 @@ class BtcEthConvergenceStrategy(BaseStrategy):
             )
         )
 
-        direction_policy_ok, direction_policy_detail = crypto_highfreq_direction_allowed(
+        direction_policy_ok, direction_policy_detail = self._direction_allowed(
             params,
             regime=regime,
-            active_mode=active_mode,
             direction=direction,
             timeframe=signal_timeframe,
             seconds_left=signal_seconds_left if signal_seconds_left >= 0.0 else None,
@@ -4152,7 +4152,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
                     rapid_state["armed_price"] = current_price
                 rapid_state["armed_peak_price"] = peak_price
 
-            should_flatten_resolution_risk, resolution_risk_detail = crypto_highfreq_should_flatten_resolution_risk(
+            should_flatten_resolution_risk, resolution_risk_detail = self._should_flatten_resolution_risk(
                 config,
                 timeframe=timeframe,
                 seconds_left=seconds_left,
@@ -4689,7 +4689,7 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         """
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
-        defaults = normalize_crypto_highfreq_legacy_config(self.config)
+        defaults = merge_crypto_defaults(self.config)
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")

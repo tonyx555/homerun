@@ -1,22 +1,31 @@
-"""Crypto strategy scope defaults, schema, and config-normalisation helpers.
+"""Crypto strategy scope defaults, config schema, and defaults-merge helper.
 
-Extracted from services.strategies.btc_eth_highfreq so that non-HF modules
-(strategy_sdk, opportunity_strategy_catalog, …) can import them without
-pulling in the full HF strategy file.
+Provides the canonical default values + UI schema that all crypto strategies
+share. Imported from any non-strategy module (SDK, opportunity catalog,
+trader orchestrator) so consumers never need to reach into a specific
+strategy file.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from services.strategies.crypto_strategy_utils import normalize_timeframe
 
-
-# ---------------------------------------------------------------------------
-# Underscore-prefixed aliases used by btc_eth_highfreq internals
-# ---------------------------------------------------------------------------
-
+# Inlined to avoid pulling in services.strategies.* at module-load time
+# (that would trigger services.strategies.__init__.py and circular-import
+# back to strategy_sdk via news_edge). Mirrors the canonical
+# ``services.strategies.crypto_strategy_utils.normalize_timeframe``.
 def _normalize_timeframe(timeframe: Any) -> str:
-    return normalize_timeframe(timeframe)
+    """Canonicalize a timeframe string to ``5m`` / ``15m`` / ``1h`` / ``4h``."""
+    tf = str(timeframe or "").strip().lower()
+    if tf in {"5m", "5min", "5"}:
+        return "5m"
+    if tf in {"15m", "15min", "15"}:
+        return "15m"
+    if tf in {"1h", "1hr", "60m", "60min"}:
+        return "1h"
+    if tf in {"4h", "4hr", "240m", "240min"}:
+        return "4h"
+    return tf
 
 
 def _timeframe_override(config: Any, base_key: str, timeframe: str | None) -> Any:
@@ -133,24 +142,15 @@ def crypto_scope_config_schema() -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Legacy-config normalisation
+# Defaults merge
 # ---------------------------------------------------------------------------
 
-def normalize_crypto_legacy_config(config: Any) -> dict[str, Any]:
-    """Apply legacy field migrations to a generic crypto strategy config.
+def merge_crypto_defaults(config: Any) -> dict[str, Any]:
+    """Overlay a crypto strategy's user-supplied config onto the canonical defaults.
 
-    Idempotent — safe to call repeatedly on the same dict.
-    Returns a (shallow-copied) normalised dict.
-    """
-    cfg: dict[str, Any] = dict(config) if isinstance(config, dict) else {}
-    return cfg
-
-
-def normalize_crypto_highfreq_legacy_config(config: Any) -> dict[str, Any]:
-    """Apply legacy field migrations to a BTC/ETH HF strategy config.
-
-    Merges CRYPTO_HF_SCOPE_DEFAULTS as base, then overlays the provided
-    config so that live config always wins.  Idempotent.
+    Returns ``CRYPTO_HF_SCOPE_DEFAULTS`` with caller-supplied keys taking
+    precedence. Idempotent. Strategies call this in their ``configure``
+    path so any key the user hasn't set falls back to the shipped default.
     """
     base: dict[str, Any] = dict(CRYPTO_HF_SCOPE_DEFAULTS)
     overlay: dict[str, Any] = dict(config) if isinstance(config, dict) else {}

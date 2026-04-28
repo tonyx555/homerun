@@ -74,7 +74,7 @@ async def test_unconsumed_signals_default_to_pending_and_use_cursor(tmp_path):
             trader = Trader(
                 id=trader_id,
                 name="Cursor Trader",
-                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             )
             session.add_all([trader, s1, s2, s3])
             await session.commit()
@@ -431,7 +431,7 @@ async def test_worker_signal_fetch_excludes_submitted_restart_window(tmp_path):
             trader = Trader(
                 id=trader_id,
                 name="Restart Window Trader",
-                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             )
             session.add_all([trader, submitted_signal, selected_signal])
             await session.commit()
@@ -480,7 +480,7 @@ async def test_consumed_selected_signal_requires_new_update_for_reentry(tmp_path
             trader = Trader(
                 id=trader_id,
                 name="Consumption Trader",
-                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}}],
+                source_configs_json=[{"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}}],
             )
             session.add_all([trader, selected_signal])
             await session.commit()
@@ -785,7 +785,7 @@ async def test_unconsumed_signals_require_runtime_release_for_scanner_runtime_ac
                 name="Runtime Release Trader",
                 source_configs_json=[
                     {"source_key": "scanner", "strategy_key": "tail_end_carry", "strategy_params": {}},
-                    {"source_key": "crypto", "strategy_key": "btc_eth_highfreq", "strategy_params": {}},
+                    {"source_key": "crypto", "strategy_key": "btc_eth_maker_quote", "strategy_params": {}},
                 ],
             )
             session.add_all([trader, unreleased_scanner, released_scanner, immediate_crypto])

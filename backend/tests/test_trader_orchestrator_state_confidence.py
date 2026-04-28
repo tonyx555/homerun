@@ -29,7 +29,7 @@ async def test_normalize_trader_payload_converts_percent_min_confidence(tmp_path
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {"min_confidence": 45, "min_edge_percent": 3.0},
             }
         ],
@@ -48,7 +48,7 @@ async def test_normalize_trader_payload_preserves_fraction_min_confidence(tmp_pa
         "source_configs": [
             {
                 "source_key": "crypto",
-                "strategy_key": "btc_eth_highfreq",
+                "strategy_key": "btc_eth_maker_quote",
                 "strategy_params": {"min_confidence": 0.45},
             }
         ],
