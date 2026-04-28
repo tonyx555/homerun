@@ -204,6 +204,108 @@
           "total": 748
         }
       ]
+    },
+    {
+      "at": "2026-04-28T19:30:08.001Z",
+      "sha": "53a5d08cc9f373b2816eb524f59936114d571720",
+      "pr": null,
+      "actor": "braedonsaunders",
+      "files": 780,
+      "functions": 11244,
+      "loc": 451237,
+      "languages": 19,
+      "topLanguages": [
+        {
+          "ext": "py",
+          "pct": 71,
+          "lines": 322496
+        },
+        {
+          "ext": "tsx",
+          "pct": 17,
+          "lines": 74457
+        },
+        {
+          "ext": "jsonl",
+          "pct": 5,
+          "lines": 21783
+        },
+        {
+          "ext": "json",
+          "pct": 3,
+          "lines": 13728
+        },
+        {
+          "ext": "ts",
+          "pct": 2,
+          "lines": 10497
+        }
+      ],
+      "dead": 94,
+      "deadPct": 0.8,
+      "circular": 1,
+      "godObjects": 1,
+      "avgCoupling": 7.7,
+      "securityIssues": 67,
+      "patterns": 12,
+      "duplicates": 94,
+      "layerViolations": 1503,
+      "connections": 6038,
+      "avgFnLines": 10.9,
+      "longestFn": 16,
+      "testFiles": 174,
+      "testRatio": 22.3,
+      "topFolders": [
+        {
+          "name": "backend",
+          "count": 610
+        },
+        {
+          "name": "frontend",
+          "count": 135
+        },
+        {
+          "name": "scripts",
+          "count": 23
+        },
+        {
+          "name": "root",
+          "count": 7
+        },
+        {
+          "name": "docs",
+          "count": 3
+        }
+      ],
+      "folders": 5,
+      "grade": "D",
+      "score": 62,
+      "topBlast": {
+        "path": "backend/tests/test_trader_orchestrator_worker.py",
+        "direct": 399,
+        "transitive": 656,
+        "total": 1055
+      },
+      "fragility": [
+        {
+          "path": "backend/tests/test_trader_orchestrator_worker.py",
+          "direct": 399,
+          "transitive": 656,
+          "total": 1055
+        },
+        {
+          "path": "backend/services/strategies/base.py",
+          "direct": 181,
+          "transitive": 645,
+          "total": 826
+        },
+        {
+          "path": "backend/models/database.py",
+          "direct": 177,
+          "transitive": 571,
+          "total": 748
+        }
+      ]
     }
   ]
 }
