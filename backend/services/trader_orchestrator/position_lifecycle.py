@@ -6388,6 +6388,15 @@ async def reconcile_live_positions(
             # downstream resolution branches will close the row.
             and pending_winning_idx is None
             and wallet_settlement_price is None
+            # Allow through if a post-end extreme mark can close the position.
+            and _infer_post_end_terminal_price(
+                market_info=pending_market_info,
+                current_price=None,
+                current_price_source=None,
+                previous_mark_price=safe_float(_extract_position_state(payload).get("last_mark_price")),
+                wallet_mark_price=None,
+                now=now,
+            )[0] is None
         ):
             held += 1
             skipped_reasons["blocked_terminal_untradable"] = (
