@@ -1352,35 +1352,62 @@ def default_strategy_by_source() -> dict[str, str]:
     return defaults
 
 
+_LEGACY_HIGHFREQ_MODE_TO_SUCCESSOR: dict[str, str] = {
+    "directional": "btc_eth_directional_edge",
+    "maker_quote": "btc_eth_maker_quote",
+    "convergence": "btc_eth_convergence",
+    # "auto" was the legacy multi-mode dispatcher.  Without an explicit
+    # signal mode we pick the directional successor — it's the most
+    # general (oracle-driven, no orderflow / cluster gates), so the
+    # closest behavioural match to "auto".
+    "auto": "btc_eth_directional_edge",
+    "": "btc_eth_directional_edge",
+}
+
+# All 3 successor slugs — used by the heal path to detect duplicate
+# crypto source_configs left behind by an earlier broken migration
+# revision that emitted a 1→3 fan-out.
+_CRYPTO_HIGHFREQ_SUCCESSORS: frozenset[str] = frozenset(
+    {
+        "btc_eth_directional_edge",
+        "btc_eth_maker_quote",
+        "btc_eth_convergence",
+    }
+)
+
+
 async def _migrate_legacy_trader_source_configs(session: AsyncSession) -> int:
     """Rewrite Trader.source_configs_json entries that still target the
-    now-deleted ``btc_eth_highfreq`` slug to its 3 standalone successors.
+    now-deleted ``btc_eth_highfreq`` slug to a single successor strategy.
 
-    The old slug was a multi-mode dispatcher (auto / directional /
-    maker_quote / convergence).  The successors are 3 independently
-    runnable strategies; the safest 1→N rewrite replays the "auto" full
-    stack — one source_config per successor slug, preserving the
-    original ``strategy_params`` and ``source_key`` so every gate the
-    user had tuned continues to apply.
+    The old slug was a multi-mode dispatcher selected via
+    ``strategy_params.mode`` (auto / directional / maker_quote /
+    convergence).  We resolve the same mode to its standalone successor
+    strategy so the user keeps the behaviour they actually configured.
+    "auto" / missing mode maps to ``btc_eth_directional_edge`` — the
+    most general successor.
 
-    Without this, a trader still pointing at ``btc_eth_highfreq`` keeps
-    running but matches zero published signals (because the ``intent_
-    runtime`` filter rejects strategy_types that don't appear in the
-    trader's source_configs), surfacing as "Fast cycle idle: no pending
-    signals" in the trader UI even when the new strategies are firing.
+    The rewrite is **1→1**, not 1→N.  ``_serialize_trader`` enforces a
+    no-duplicate-source_key invariant, so emitting 3 configs all under
+    ``source_key="crypto"`` would make ``list_traders`` raise and the
+    trader list goes empty in the UI.
+
+    Without this migration, a trader still pointing at
+    ``btc_eth_highfreq`` keeps running but matches zero published
+    signals (the ``intent_runtime`` filter rejects strategy_types not
+    in the trader's source_configs), surfacing as "Fast cycle idle:
+    no pending signals" in the trader UI even when the new strategies
+    are firing.
 
     Idempotent — runs every startup and exits silently when there's
     nothing to migrate.  Returns the count of mutated trader rows.
+    Users can switch to a different successor afterwards via the
+    trader-edit UI.
     """
     # Local import to avoid widening this module's import surface.
     from models.database import Trader
 
     legacy_slug = "btc_eth_highfreq"
-    successor_slugs = (
-        "btc_eth_directional_edge",
-        "btc_eth_maker_quote",
-        "btc_eth_convergence",
-    )
 
     rows = list((await session.execute(select(Trader))).scalars().all())
     mutated_count = 0
@@ -1399,16 +1426,51 @@ async def _migrate_legacy_trader_source_configs(session: AsyncSession) -> int:
                 base_params = cfg.get("strategy_params") or {}
                 if not isinstance(base_params, dict):
                     base_params = {}
+                mode_key = str(base_params.get("mode") or "").strip().lower()
+                successor_slug = _LEGACY_HIGHFREQ_MODE_TO_SUCCESSOR.get(
+                    mode_key,
+                    "btc_eth_directional_edge",
+                )
                 source_key = str(cfg.get("source_key") or "crypto").strip().lower()
-                for successor_slug in successor_slugs:
-                    new_cfg = dict(cfg)
-                    new_cfg["strategy_key"] = successor_slug
-                    new_cfg["source_key"] = source_key
-                    new_cfg["strategy_params"] = dict(base_params)
-                    new_configs.append(new_cfg)
+                new_cfg = dict(cfg)
+                new_cfg["strategy_key"] = successor_slug
+                new_cfg["source_key"] = source_key
+                # Preserve user-tuned params except the now-meaningless
+                # ``mode`` selector — the successor is the mode.
+                migrated_params = {k: v for k, v in base_params.items() if k != "mode"}
+                new_cfg["strategy_params"] = migrated_params
+                new_configs.append(new_cfg)
                 changed = True
             else:
                 new_configs.append(cfg)
+
+        # Heal traders mangled by the previous broken revision of this
+        # migration — that revision fanned each legacy config out to 3
+        # successor configs all under source_key="crypto", which fails
+        # the no-duplicate-source_key invariant in
+        # ``_normalize_source_configs`` and makes ``list_traders`` raise
+        # (the trader list goes empty in the UI).  Collapse any group
+        # of >=2 crypto configs whose strategy_keys are all successor
+        # slugs into the FIRST one — keeps the user's earliest choice.
+        seen_crypto_successor_idx: int | None = None
+        healed_configs: list[Any] = []
+        for cfg in new_configs:
+            if (
+                isinstance(cfg, dict)
+                and str(cfg.get("source_key") or "").strip().lower() == "crypto"
+                and str(cfg.get("strategy_key") or "").strip().lower() in _CRYPTO_HIGHFREQ_SUCCESSORS
+            ):
+                if seen_crypto_successor_idx is None:
+                    seen_crypto_successor_idx = len(healed_configs)
+                    healed_configs.append(cfg)
+                else:
+                    # Drop the duplicate.
+                    changed = True
+                    continue
+            else:
+                healed_configs.append(cfg)
+        new_configs = healed_configs
+
         if changed:
             trader.source_configs_json = new_configs
             try:
