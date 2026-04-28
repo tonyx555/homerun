@@ -765,16 +765,14 @@ def _resolve_enabled_active_modes(config: Any) -> set[str]:
 
 from services.strategy_helpers.price_window import PriceWindow  # noqa: E402,F401
 
-# Crypto scope helpers + timeframe utilities — moved out of this file
-# to services.strategy_helpers.crypto_scope so other modules can import
-# them without depending on this strategy file existing.
+# Pure timeframe utilities (no defaults coupling) — imported back for the
+# strategy's evaluate-path normalization. Each strategy owns its own
+# default_config inline — no shared dict consulted.
 from services.strategy_helpers.crypto_scope import (  # noqa: E402
-    CRYPTO_HF_SCOPE_DEFAULTS,
-    _crypto_hf_default_param_value,
     _normalize_timeframe,
     _timeframe_override,
-    merge_crypto_defaults,
 )
+
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +842,50 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         max_resolution_months=0.1,
     )
 
-    default_config = dict(CRYPTO_HF_SCOPE_DEFAULTS)
+    default_config = {
+        # Directional-entry gates
+        "opening_directional_buy_yes_enabled": True,
+        "opening_directional_buy_no_enabled": True,
+        # Exit controls
+        "rapid_take_profit_pct": 10.0,
+        "take_profit_pct": 8.0,
+        "stop_loss_pct": 4.0,
+        "stop_loss_policy": "always",
+        "stop_loss_activation_seconds": 90.0,
+        "trailing_stop_pct": 3.0,
+        "trailing_stop_activation_profit_pct": 4.0,
+        "min_hold_minutes": 1.0,
+        "max_hold_minutes": 60.0,
+        "rapid_exit_window_minutes": 2.0,
+        "rapid_exit_min_increase_pct": 0.0,
+        "rapid_exit_breakeven_buffer_pct": 0.0,
+        # Underwater rebound
+        "underwater_rebound_exit_enabled": True,
+        "underwater_dwell_minutes": 2.5,
+        "underwater_recovery_ratio_min": 0.35,
+        "underwater_rebound_pct_min": 1.2,
+        "underwater_exit_fade_pct": 0.45,
+        "underwater_timeout_minutes": 10.0,
+        "underwater_timeout_loss_pct": 8.0,
+        # Force-flatten
+        "force_flatten_seconds_left": 120.0,
+        "force_flatten_seconds_left_5m": 30.0,
+        "force_flatten_seconds_left_15m": 75.0,
+        "force_flatten_seconds_left_1h": 240.0,
+        "force_flatten_seconds_left_4h": 600.0,
+        "force_flatten_max_profit_pct": 1.0,
+        "force_flatten_headroom_floor": 1.15,
+        "force_flatten_min_loss_pct": 0.0,
+        # Resolution risk
+        "resolution_risk_flatten_enabled": True,
+        "resolution_risk_seconds_left": 180.0,
+        "resolution_risk_max_profit_pct": 6.0,
+        "resolution_risk_min_loss_pct": 2.0,
+        "resolution_risk_min_headroom_ratio": 0.9,
+        "resolution_risk_disable_when_take_profit_armed": True,
+        # Circuit breaker
+        "max_consecutive_losses_before_pause": 3,
+    }
     # Pin sub-strategy mode for the maker-quote clone.
     default_config["enabled_sub_strategies"] = ["maker_quote"]
     default_config["strategy_mode"] = "maker_quote"
@@ -876,7 +917,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         self._paused_until_ms: int = 0
 
     def configure(self, config: dict) -> None:
-        super().configure(merge_crypto_defaults(config))
+        super().configure({**self.default_config, **(config or {})})
 
     # ------------------------------------------------------------------
     # Public API
@@ -1621,6 +1662,30 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 "regime": regime,
             },
         }
+
+
+    def _default_param(self, key: str, timeframe: object = None) -> object:
+        """Lookup ``key`` in this strategy's default_config, preferring a
+        timeframe-suffixed entry (e.g. ``key_5m``) when ``timeframe`` is
+        supplied. Returns None if neither is present.
+
+        Inlined per-strategy so each file owns its own defaults — there is
+        no shared dict consulted.
+        """
+        tf = str(timeframe or "").strip().lower()
+        if tf in {"5min", "5"}:
+            tf = "5m"
+        elif tf in {"15min", "15"}:
+            tf = "15m"
+        elif tf in {"1hr", "60m", "60min"}:
+            tf = "1h"
+        elif tf in {"4hr", "240m", "240min"}:
+            tf = "4h"
+        if tf in {"5m", "15m", "1h", "4h"}:
+            suffixed = f"{key}_{tf}"
+            if suffixed in self.default_config:
+                return self.default_config[suffixed]
+        return self.default_config.get(key)
 
     # ── Inlined direction + resolution-risk guardrails ──
     #
@@ -4751,7 +4816,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         """
         opportunities: list[Opportunity] = []
         rejections: list[dict[str, Any]] = []
-        defaults = merge_crypto_defaults(self.config)
+        defaults = {**self.default_config, **(self.config or {})}
 
         for market in markets:
             market_id = str(market.get("condition_id") or market.get("id") or "")
@@ -4838,7 +4903,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             # Gate 1: Minimum oracle move — small moves are noise, not signal.
             min_oracle_move = to_float(
                 _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe),
-                _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe), 0.30, 0.0, 100.0),
+                _coerce_float(self._default_param("min_oracle_move_pct", timeframe), 0.30, 0.0, 100.0),
             )
             if oracle_move_pct < min_oracle_move:
                 rejection_detail: dict[str, Any] = {
@@ -4863,7 +4928,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             max_repricing = to_float(
                 _crypto_hf_param_value(defaults, "max_market_repricing_for_entry", timeframe),
                 _coerce_float(
-                    _crypto_hf_default_param_value("max_market_repricing_for_entry", timeframe),
+                    self._default_param("max_market_repricing_for_entry", timeframe),
                     0.30,
                     0.0,
                     1.0,
@@ -4965,7 +5030,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
             timeframe_key: round(
                 to_float(
                     _crypto_hf_param_value(defaults, "min_oracle_move_pct", timeframe_key),
-                    _coerce_float(_crypto_hf_default_param_value("min_oracle_move_pct", timeframe_key), 0.30, 0.0, 100.0),
+                    _coerce_float(self._default_param("min_oracle_move_pct", timeframe_key), 0.30, 0.0, 100.0),
                 ),
                 4,
             )

@@ -1181,8 +1181,6 @@ async def get_unified_docs():
                 "StrategySDK.pool_eligibility_config_schema()": "Schema for pool eligibility tuning",
                 "news_edge_defaults()": "Default news strategy filters",
                 "news_edge_config_schema()": "Schema for news strategy filters",
-                "CRYPTO_HF_SCOPE_DEFAULTS": "Default high-frequency crypto scope and exit controls",
-                "crypto_scope_config_schema()": "Schema for high-frequency crypto scope controls",
                 "StrategySDK.strategy_retention_config_schema()": "Schema for max_opportunities and retention_window",
             },
             "validation_helpers": {
@@ -1283,8 +1281,6 @@ async def get_unified_docs():
                 "StrategySDK.get_trader_tags()": "Tag definitions and wallet counts",
                 "StrategySDK.get_traders_by_tag(tag_name, limit)": "Wallets for a tag",
             },
-            "crypto_scope_defaults": _get_crypto_scope_attr("CRYPTO_HF_SCOPE_DEFAULTS"),
-            "crypto_scope_schema": _get_crypto_scope_fn("crypto_scope_config_schema"),
             "news_edge_defaults": news_edge_defaults(),
             "news_edge_schema": news_edge_config_schema(),
             "traders_copy_trade_defaults": traders_copy_trade_defaults(),

@@ -12,9 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from models.database import Strategy
 from services.strategy_sdk import StrategySDK
-from services.strategy_helpers.crypto_scope import (
-    crypto_scope_config_schema,
-)
 from services.strategies.news_edge import news_edge_config_schema
 from services.strategies.traders_copy_trade import traders_copy_trade_config_schema
 from utils.logger import get_logger
@@ -757,7 +754,27 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=190,
         config_schema={
             "param_fields": [
-                *crypto_scope_config_schema().get("param_fields", []),
+                {"key": "take_profit_pct", "label": "Take profit %", "type": "float", "default": 8.0},
+                {"key": "stop_loss_pct", "label": "Stop loss %", "type": "float", "default": 4.0},
+                {"key": "trailing_stop_pct", "label": "Trailing stop %", "type": "float", "default": 3.0},
+                {
+                    "key": "force_flatten_seconds_left",
+                    "label": "Force-flatten seconds left",
+                    "type": "float",
+                    "default": 120.0,
+                },
+                {
+                    "key": "opening_directional_buy_yes_enabled",
+                    "label": "Allow directional BUY YES",
+                    "type": "bool",
+                    "default": True,
+                },
+                {
+                    "key": "opening_directional_buy_no_enabled",
+                    "label": "Allow directional BUY NO",
+                    "type": "bool",
+                    "default": True,
+                },
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
@@ -786,7 +803,27 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=192,
         config_schema={
             "param_fields": [
-                *crypto_scope_config_schema().get("param_fields", []),
+                {"key": "take_profit_pct", "label": "Take profit %", "type": "float", "default": 8.0},
+                {"key": "stop_loss_pct", "label": "Stop loss %", "type": "float", "default": 4.0},
+                {"key": "trailing_stop_pct", "label": "Trailing stop %", "type": "float", "default": 3.0},
+                {
+                    "key": "force_flatten_seconds_left",
+                    "label": "Force-flatten seconds left",
+                    "type": "float",
+                    "default": 120.0,
+                },
+                {
+                    "key": "opening_directional_buy_yes_enabled",
+                    "label": "Allow directional BUY YES",
+                    "type": "bool",
+                    "default": True,
+                },
+                {
+                    "key": "opening_directional_buy_no_enabled",
+                    "label": "Allow directional BUY NO",
+                    "type": "bool",
+                    "default": True,
+                },
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},
@@ -897,7 +934,27 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         sort_order=194,
         config_schema={
             "param_fields": [
-                *crypto_scope_config_schema().get("param_fields", []),
+                {"key": "take_profit_pct", "label": "Take profit %", "type": "float", "default": 8.0},
+                {"key": "stop_loss_pct", "label": "Stop loss %", "type": "float", "default": 4.0},
+                {"key": "trailing_stop_pct", "label": "Trailing stop %", "type": "float", "default": 3.0},
+                {
+                    "key": "force_flatten_seconds_left",
+                    "label": "Force-flatten seconds left",
+                    "type": "float",
+                    "default": 120.0,
+                },
+                {
+                    "key": "opening_directional_buy_yes_enabled",
+                    "label": "Allow directional BUY YES",
+                    "type": "bool",
+                    "default": True,
+                },
+                {
+                    "key": "opening_directional_buy_no_enabled",
+                    "label": "Allow directional BUY NO",
+                    "type": "bool",
+                    "default": True,
+                },
                 {"key": "min_edge_percent", "label": "Min Edge (%)", "type": "number", "min": 0, "max": 100},
                 {"key": "min_confidence", "label": "Min Confidence", "type": "number", "min": 0, "max": 1},
                 {"key": "direction_guardrail_enabled", "label": "Direction Guardrail Enabled", "type": "boolean"},

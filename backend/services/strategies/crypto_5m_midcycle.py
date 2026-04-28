@@ -89,7 +89,7 @@ def crypto_5m_midcycle_config_schema() -> dict[str, Any]:
     """Return the param-fields schema for the strategy-manager UI.
 
     Mirrors the convention used by other crypto strategies — see
-    ``crypto_scope_config_schema()`` for reference. Each field becomes
+    the per-strategy ``config_schema`` declared in opportunity_strategy_catalog for reference. Each field becomes
     an editable input in the strategy detail panel.
     """
     return {

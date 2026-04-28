@@ -53,11 +53,6 @@ import re
 import time
 from typing import Any, Optional
 from utils.converters import coerce_bool as _coerce_bool
-from services.strategy_helpers.crypto_scope import (
-    CRYPTO_SCOPE_DEFAULTS,
-    crypto_scope_config_schema as _crypto_scope_config_schema,
-    merge_crypto_defaults as _merge_crypto_defaults,
-)
 from services.strategy_helpers.price_window import PriceWindow
 from services.strategy_helpers.cycle_tracker import CycleTracker
 from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot
@@ -106,27 +101,6 @@ class StrategySDK:
     # without a separate import from strategy_helpers.price_history.
     MarketPriceHistory = MarketPriceHistory
     PriceSnapshot = PriceSnapshot
-
-    # Re-exports of the crypto-strategy scope helpers, available to any
-    # strategy without a direct import. Use these to honor the same
-    # default config / schema / legacy-migration behavior as the shipped
-    # crypto strategies.
-    CRYPTO_SCOPE_DEFAULTS = CRYPTO_SCOPE_DEFAULTS
-
-    @staticmethod
-    def crypto_scope_config_schema() -> dict[str, Any]:
-        """Return the param-fields schema used by crypto strategy config UIs."""
-        return _crypto_scope_config_schema()
-
-    @staticmethod
-    def merge_crypto_defaults(config: Any) -> dict[str, Any]:
-        """Apply legacy-config migrations to any crypto strategy's config.
-
-        Idempotent — safe to call repeatedly. Migrates deprecated oracle-gate
-        defaults and removed sub-strategy tokens; passes current configs
-        through unchanged.
-        """
-        return _merge_crypto_defaults(config)
 
     # Crypto-strategy utility namespace.
     #
