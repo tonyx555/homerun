@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import importlib
 import re
@@ -1351,10 +1351,81 @@ def default_strategy_by_source() -> dict[str, str]:
     return defaults
 
 
+async def _migrate_legacy_trader_source_configs(session: AsyncSession) -> int:
+    """Rewrite Trader.source_configs_json entries that still target the
+    now-deleted ``btc_eth_highfreq`` slug to its 3 standalone successors.
+
+    The old slug was a multi-mode dispatcher (auto / directional /
+    maker_quote / convergence).  The successors are 3 independently
+    runnable strategies; the safest 1→N rewrite replays the "auto" full
+    stack — one source_config per successor slug, preserving the
+    original ``strategy_params`` and ``source_key`` so every gate the
+    user had tuned continues to apply.
+
+    Without this, a trader still pointing at ``btc_eth_highfreq`` keeps
+    running but matches zero published signals (because the ``intent_
+    runtime`` filter rejects strategy_types that don't appear in the
+    trader's source_configs), surfacing as "Fast cycle idle: no pending
+    signals" in the trader UI even when the new strategies are firing.
+
+    Idempotent — runs every startup and exits silently when there's
+    nothing to migrate.  Returns the count of mutated trader rows.
+    """
+    # Local import to avoid widening this module's import surface.
+    from models.database import Trader
+
+    legacy_slug = "btc_eth_highfreq"
+    successor_slugs = (
+        "btc_eth_directional_edge",
+        "btc_eth_maker_quote",
+        "btc_eth_convergence",
+    )
+
+    rows = list((await session.execute(select(Trader))).scalars().all())
+    mutated_count = 0
+    for trader in rows:
+        configs = trader.source_configs_json
+        if not isinstance(configs, list):
+            continue
+        new_configs: list[Any] = []
+        changed = False
+        for cfg in configs:
+            if not isinstance(cfg, dict):
+                new_configs.append(cfg)
+                continue
+            slug = str(cfg.get("strategy_key") or "").strip().lower()
+            if slug == legacy_slug:
+                base_params = cfg.get("strategy_params") or {}
+                if not isinstance(base_params, dict):
+                    base_params = {}
+                source_key = str(cfg.get("source_key") or "crypto").strip().lower()
+                for successor_slug in successor_slugs:
+                    new_cfg = dict(cfg)
+                    new_cfg["strategy_key"] = successor_slug
+                    new_cfg["source_key"] = source_key
+                    new_cfg["strategy_params"] = dict(base_params)
+                    new_configs.append(new_cfg)
+                changed = True
+            else:
+                new_configs.append(cfg)
+        if changed:
+            trader.source_configs_json = new_configs
+            try:
+                trader.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            except Exception:
+                pass
+            mutated_count += 1
+
+    if mutated_count > 0:
+        await session.commit()
+    return mutated_count
+
+
 async def ensure_all_strategies_seeded(session: AsyncSession) -> dict:
     """Seed all strategies from the single unified catalog."""
     result = await ensure_system_opportunity_strategies_seeded(session)
-    return {"seeded": result}
+    trader_configs_migrated = await _migrate_legacy_trader_source_configs(session)
+    return {"seeded": result, "trader_configs_migrated": trader_configs_migrated}
 
 
 async def reset_strategy_to_factory(session: AsyncSession, slug: str) -> dict:
