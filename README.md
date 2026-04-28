@@ -18,12 +18,6 @@
   <a href="https://github.com/braedonsaunders/codeflow"><img src=".github/codeflow-card.svg" alt="Homerun codebase stats — powered by codeflow" width="100%" /></a>
 </p>
 
-<p align="center">
-  <a href="#-quick-start">Quick Start</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="#-strategy-engine">Strategies</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="#-data-source-engine">Data Sources</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="#-ai--intelligence-layer">AI</a>&nbsp;&nbsp;&bull;&nbsp;&nbsp;<a href="#-key-api-surface">API Docs</a>
-</p>
-
-<br />
-
 ![Homerun Dashboard — Market Scanner](./screenshots/dashboard-scanner.png)
 
 <br />
