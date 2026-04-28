@@ -37,14 +37,20 @@ def _timeframe_override(config: Any, base_key: str, timeframe: str | None) -> An
     return None
 
 
-def _crypto_hf_default_param_value(config: Any, key: str, timeframe: Any) -> Any:
-    """Return ``config[key]``, preferring a timeframe-specific key if present."""
+def _crypto_hf_default_param_value(key: str, timeframe: Any) -> Any:
+    """Return the default value for ``key`` from CRYPTO_HF_SCOPE_DEFAULTS,
+    preferring a timeframe-specific entry (e.g. ``key_5m``) when present.
+
+    Used by the crypto strategies as a fallback lookup when the live
+    user-edited config doesn't supply a value for ``key``. The defaults
+    source is always :data:`CRYPTO_HF_SCOPE_DEFAULTS` — strategies pass
+    only ``(key, timeframe)``.
+    """
     tf = _normalize_timeframe(timeframe)
-    override = _timeframe_override(config, key, tf)
+    override = _timeframe_override(CRYPTO_HF_SCOPE_DEFAULTS, key, tf)
     if override is not None:
         return override
-    cfg = config if isinstance(config, dict) else {}
-    return cfg.get(key)
+    return CRYPTO_HF_SCOPE_DEFAULTS.get(key)
 
 
 # ---------------------------------------------------------------------------
