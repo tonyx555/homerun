@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import select

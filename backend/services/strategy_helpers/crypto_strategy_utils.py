@@ -5,7 +5,6 @@ importing code never needs to distinguish between the two locations.
 """
 from __future__ import annotations
 
-import time as _time
 from typing import Any
 
 # Re-export everything from the canonical location so importers of
