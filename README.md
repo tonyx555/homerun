@@ -26,8 +26,6 @@
 
 ![Homerun Dashboard — Market Scanner](./screenshots/dashboard-scanner.png)
 
-<br />
-
 ## Why Homerun
 
 Most trading bots give you a toy DSL and a rigid pipeline. Homerun gives you **full Python** and gets out of your way.
