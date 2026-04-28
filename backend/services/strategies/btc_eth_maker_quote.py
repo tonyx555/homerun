@@ -17,11 +17,9 @@ from __future__ import annotations
 
 import re
 import time
-from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from enum import Enum
-from typing import Any, Callable, Optional
+from typing import Any, Optional
 
 import math
 
@@ -29,41 +27,30 @@ from models import Market, Event, Opportunity
 from config import settings as _cfg
 from .base import BaseStrategy, DecisionCheck, StrategyDecision, ExitDecision, _trader_size_limits
 from services.strategy_helpers.crypto_strategy_utils import (
-    CRYPTO_REGIMES,
-    CRYPTO_STRATEGY_MODES,
     CryptoCandidate,
-    CryptoMarketFetcher,
-    SUB_STRATEGY_ALIASES,
     SubStrategy,
     SubStrategyScore,
     as_list,
     coerce_float,
-    compute_age_ms,
     crypto_param_value,
     extract_oracle_status,
     first_present,
     get_crypto_market_fetcher,
-    get_crypto_series,
     normalize_crypto_asset,
-    normalize_oracle_source,
     normalize_regime,
     normalize_regime_scope,
     normalize_scope,
     normalize_strategy_mode,
-    normalize_sub_strategy,
     normalize_timeframe,
     parse_datetime_utc,
-    parse_oracle_point,
     resolve_enabled_active_modes,
     resolve_enabled_sub_strategies,
     resolve_oracle_availability,
     timeframe_override,
-    to_epoch_ms,
 )
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
 from utils.converters import clamp, coerce_bool as _coerce_bool, safe_float, to_bool, to_confidence, to_float
-from utils.kelly import polymarket_taker_fee as polymarket_fee_curve, polymarket_taker_fee_pct as polymarket_fee_pct
 from utils.signal_helpers import signal_payload
 from services.quality_filter import QualityFilterOverrides
 from utils.logger import get_logger
@@ -422,16 +409,11 @@ from services.strategy_helpers.price_history import MarketPriceHistory, PriceSna
 # Crypto scope helpers + timeframe utilities — moved out of this file
 # to services.strategy_helpers.crypto_scope so other modules can import
 # them without depending on this strategy file existing.
-from services.strategy_helpers.crypto_scope import (
-    CRYPTO_HF_SCOPE_CONFIG_SCHEMA,
+from services.strategy_helpers.crypto_scope import (  # noqa: E402
     CRYPTO_HF_SCOPE_DEFAULTS,
-    _LEGACY_CRYPTO_HF_ORACLE_GATE_DEFAULTS,
-    _LEGACY_CRYPTO_HF_REMOVED_SUB_STRATEGIES,
     _crypto_hf_default_param_value,
-    _matches_legacy_crypto_hf_oracle_gate,
     _normalize_timeframe,
     _timeframe_override,
-    crypto_highfreq_scope_config_schema,
     normalize_crypto_highfreq_legacy_config,
 )
 

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from services.optimization.vwap import OrderBook, OrderBookLevel
+from services.optimization.vwap import OrderBookLevel
 from services.strategy_sdk import StrategySDK
 from services.ws_feeds import FeedManager, get_feed_manager
 

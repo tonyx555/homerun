@@ -34,7 +34,6 @@ from services.strategy_helpers.crypto_strategy_utils import (
 from services.data_events import DataEvent
 from services.strategy_sdk import StrategySDK
 from utils.converters import clamp, coerce_bool as _coerce_bool, safe_float, to_bool, to_confidence, to_float
-from utils.kelly import polymarket_taker_fee as polymarket_fee_curve, polymarket_taker_fee_pct as polymarket_fee_pct
 from utils.signal_helpers import signal_payload
 from services.quality_filter import QualityFilterOverrides
 from utils.logger import get_logger
