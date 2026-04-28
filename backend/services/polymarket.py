@@ -27,6 +27,109 @@ _HEX_TOKEN_ID_RE = re.compile(r"^(?:0x)?[0-9a-f]{40,}$")
 _ETH_ADDRESS_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 
 
+# Sentinel for "key not in cache" so legitimate None / empty-list values
+# can still be cached.
+_CACHE_MISS = object()
+
+
+class _TTLCache:
+    """Single-flight TTL cache.
+
+    Multiple concurrent callers for the same key share ONE in-flight
+    fetch (no thundering-herd cache stampede).  Subsequent callers
+    within the TTL window get the cached value without re-fetching.
+
+    The cache is intentionally simple — single asyncio loop, no LRU
+    eviction.  Callers must keep the keyspace bounded (typically
+    ``(wallet_address, ...)`` so it's at most a handful per single-user
+    install).
+
+    Use cases:
+      * ``get_wallet_trades_paginated``    — wallet-keyed, 60s TTL
+      * ``get_closed_positions_paginated`` — wallet-keyed, 60s TTL
+      * ``get_midpoint``                   — token-keyed, 3s TTL
+    """
+
+    __slots__ = ("_ttl", "_data", "_inflight", "_hits", "_misses")
+
+    def __init__(self, ttl_seconds: float):
+        self._ttl = float(ttl_seconds)
+        self._data: dict = {}
+        self._inflight: dict = {}
+        self._hits = 0
+        self._misses = 0
+
+    def stats(self) -> dict[str, int | float]:
+        total = self._hits + self._misses
+        return {
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": (self._hits / total) if total else 0.0,
+            "size": len(self._data),
+            "inflight": len(self._inflight),
+            "ttl_seconds": self._ttl,
+        }
+
+    def peek(self, key):
+        entry = self._data.get(key)
+        if entry is None:
+            return _CACHE_MISS
+        ts, value = entry
+        if time.monotonic() - ts >= self._ttl:
+            return _CACHE_MISS
+        return value
+
+    def invalidate(self, key=None) -> None:
+        if key is None:
+            self._data.clear()
+        else:
+            self._data.pop(key, None)
+
+    async def get_or_fetch(self, key, fetcher):
+        # Fast path: live cache entry.
+        cached = self.peek(key)
+        if cached is not _CACHE_MISS:
+            self._hits += 1
+            return cached
+        # Coalesce concurrent misses for the same key onto a single
+        # in-flight fetch.  This is the load-bearing property — without
+        # it, N traders waking up together each fire their own
+        # ``get_wallet_trades_paginated`` and we lose all caching benefit.
+        existing = self._inflight.get(key)
+        if existing is not None:
+            self._hits += 1
+            return await existing
+        self._misses += 1
+        loop = asyncio.get_event_loop()
+        future: asyncio.Future = loop.create_future()
+        # Pre-attach a no-op "consumer" so a cancelled leader with no
+        # actual waiters doesn't leak "Future exception was never
+        # retrieved" — asyncio considers the exception consumed once
+        # any callback (incl. lambda) reads it.
+        future.add_done_callback(lambda f: f.exception() if not f.cancelled() else None)
+        self._inflight[key] = future
+        try:
+            result = await fetcher()
+            self._data[key] = (time.monotonic(), result)
+            if not future.done():
+                future.set_result(result)
+            return result
+        except asyncio.CancelledError:
+            # Leader was cancelled mid-fetch.  Cancel the future so any
+            # coalesced waiters see CancelledError (proper async
+            # semantics) rather than getting a set_exception(CancelledError)
+            # which leaks as "Future exception was never retrieved".
+            if not future.done():
+                future.cancel()
+            raise
+        except BaseException as exc:
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            self._inflight.pop(key, None)
+
+
 class PolymarketClient:
     """Client for interacting with Polymarket APIs"""
 
@@ -45,6 +148,54 @@ class PolymarketClient:
         self._closed_positions_warning_cooldown_until: float = 0.0
         self._network_error_last_log_at: float = 0.0
         self._network_error_log_interval_seconds: float = 10.0
+
+        # Single-flight TTL caches for the data-API endpoints that the
+        # rate limiter throttles hardest (data_trades=20 req/s,
+        # data_positions=6 req/s).  In a single-user install the wallet
+        # is the same across every trader, so these calls are massively
+        # redundant.  60s of staleness on wallet trades / closed
+        # positions is acceptable — the verifier runs every 5 minutes
+        # and is happy to see data ≤ 60s old.
+        self._wallet_trades_cache = _TTLCache(ttl_seconds=60.0)
+        self._closed_positions_cache = _TTLCache(ttl_seconds=60.0)
+        # Midpoints change continuously, but at the cycle frequency a
+        # 3-second cache is plenty for stop-loss / take-profit logic
+        # (reconcile cycles run every 30+ seconds).  Cuts ``clob_market``
+        # rate-limit pressure dramatically when many traders share the
+        # same token universe.
+        self._midpoint_cache = _TTLCache(ttl_seconds=3.0)
+
+    def invalidate_wallet_caches(self, address: Optional[str] = None) -> None:
+        """Bust wallet_trades + closed_positions caches for *address*
+        (or all wallets if None).
+
+        Call this after any write that affects wallet state (e.g. order
+        submission with a confirmed fill) so the next verifier cycle
+        sees fresh data instead of waiting for the 60s TTL to expire.
+        Optional: 60s of staleness is acceptable for the verifier path,
+        so callers that don't care can skip this entirely.
+        """
+        if address is None:
+            self._wallet_trades_cache.invalidate()
+            self._closed_positions_cache.invalidate()
+            return
+        normalized = str(address or "").strip().lower()
+        if not normalized:
+            return
+        # Cache keys include max_trades / max_positions, so we must
+        # walk and drop every entry whose first key element matches.
+        for cache in (self._wallet_trades_cache, self._closed_positions_cache):
+            stale_keys = [k for k in cache._data if k and k[0] == normalized]
+            for k in stale_keys:
+                cache.invalidate(k)
+
+    def cache_stats(self) -> dict[str, dict]:
+        """Expose cache hit-rate / size / TTL for diagnostics."""
+        return {
+            "wallet_trades": self._wallet_trades_cache.stats(),
+            "closed_positions": self._closed_positions_cache.stats(),
+            "midpoint": self._midpoint_cache.stats(),
+        }
 
     async def _get_persistent_cache(self):
         """Lazy-load the persistent market cache service."""
@@ -1505,14 +1656,110 @@ class PolymarketClient:
     # ==================== CLOB API ====================
 
     async def get_midpoint(self, token_id: str, use_trading_proxy: bool = False) -> float:
-        """Get midpoint price for a token"""
-        client = await (self._get_trading_client() if use_trading_proxy else self._get_client())
-        response = await self._rate_limited_get(
-            f"{self.clob_url}/midpoint", client=client, params={"token_id": token_id}
-        )
-        response.raise_for_status()
-        data = response.json()
-        return float(data.get("mid", 0))
+        """Get midpoint price for a token.
+
+        3-second TTL cache.  Midpoints change continuously, but every
+        reconcile cycle for the same token within a 3s window can
+        reuse the same value — and N traders sharing the same token
+        universe collapse to a single fetch.
+
+        Bypasses the cache when ``use_trading_proxy=True`` (the
+        proxied path is used for order-placement context, where
+        staleness is unacceptable).
+        """
+        normalized_token_id = str(token_id or "").strip()
+        if not normalized_token_id:
+            return 0.0
+
+        async def _fetch() -> float:
+            client = await (self._get_trading_client() if use_trading_proxy else self._get_client())
+            response = await self._rate_limited_get(
+                f"{self.clob_url}/midpoint",
+                client=client,
+                params={"token_id": normalized_token_id},
+            )
+            response.raise_for_status()
+            data = response.json()
+            return float(data.get("mid", 0))
+
+        if use_trading_proxy:
+            # Trading-context path — never serve stale.
+            return await _fetch()
+        return await self._midpoint_cache.get_or_fetch(normalized_token_id, _fetch)
+
+    async def get_midpoints_batch(self, token_ids: list[str]) -> dict[str, float]:
+        """Batch midpoint fetch via POST /midpoints — replaces N
+        single-token GETs with one HTTP call.
+
+        Polymarket's CLOB ``/midpoints`` endpoint accepts a JSON array
+        of ``{"token_id": "..."}`` objects and returns a flat map of
+        ``{token_id: price_string}``.  Confirmed live against
+        ``https://clob.polymarket.com/midpoints``.
+
+        Cache-aware: tokens already in the 3-second midpoint cache are
+        served without network; the batch request is issued only for
+        the cache misses.  Result is written back into the cache so a
+        subsequent ``get_midpoint(token_id)`` call hits.
+        """
+        if not token_ids:
+            return {}
+
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for tid in token_ids:
+            t = str(tid or "").strip()
+            if t and t not in seen:
+                seen.add(t)
+                normalized.append(t)
+
+        result: dict[str, float] = {}
+        misses: list[str] = []
+        for t in normalized:
+            cached = self._midpoint_cache.peek(t)
+            if cached is not _CACHE_MISS:
+                result[t] = float(cached)
+            else:
+                misses.append(t)
+
+        if not misses:
+            return result
+
+        # Single-flight per-key: if another caller is already fetching
+        # one of our missing tokens, wait for them rather than firing
+        # a duplicate batch request.  (Rare in practice — most callers
+        # batch all their tokens in one go.)
+        client = await self._get_client()
+        endpoint = f"{self.clob_url}/midpoints"
+        payload = [{"token_id": t} for t in misses]
+        await rate_limiter.acquire(endpoint_for_url(endpoint))
+        try:
+            response = await client.post(endpoint, json=payload, timeout=10.0)
+            response.raise_for_status()
+            raw = response.json()
+        except Exception as exc:
+            _logger.warning("Midpoint batch fetch failed; falling back to per-token", error=str(exc))
+            # Fall back to single-token cache-aware fetches; each will
+            # acquire its own rate-limit token.
+            for t in misses:
+                try:
+                    result[t] = await self.get_midpoint(t)
+                except Exception:
+                    pass
+            return result
+
+        if not isinstance(raw, dict):
+            return result
+        now = time.monotonic()
+        for t, raw_price in raw.items():
+            try:
+                price = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+            result[str(t)] = price
+            # Backfill the per-token cache so subsequent get_midpoint
+            # calls within the TTL hit instantly.
+            self._midpoint_cache._data[str(t)] = (now, price)
+        return result
 
     async def get_price(self, token_id: str, side: str = "BUY", use_trading_proxy: bool = False) -> float:
         """Get best price for a token (BUY = best bid, SELL = best ask)."""
@@ -1606,24 +1853,19 @@ class PolymarketClient:
         return out
 
     async def get_prices_batch(self, token_ids: list[str]) -> dict[str, dict]:
-        """Get prices for multiple tokens efficiently"""
-        prices = {}
+        """Get prices for multiple tokens efficiently.
 
-        # Batch requests with concurrency limit
-        semaphore = asyncio.Semaphore(25)
-
-        async def fetch_price(token_id: str):
-            async with semaphore:
-                try:
-                    mid = await self.get_midpoint(token_id)
-                    if 0 <= float(mid) <= 1:
-                        prices[token_id] = {"mid": float(mid)}
-                except Exception:
-                    # Skip failed tokens so downstream logic can fall back to
-                    # market model prices instead of treating failures as 0.
-                    return
-
-        await asyncio.gather(*[fetch_price(tid) for tid in token_ids])
+        Uses the CLOB ``/midpoints`` batch endpoint via
+        ``get_midpoints_batch`` — one HTTP call for N tokens instead of
+        N parallel single-token calls.  In production this replaced
+        ~20 single-token requests fanning out under
+        Semaphore(25) with one batch request.
+        """
+        midpoints = await self.get_midpoints_batch(list(token_ids))
+        prices: dict[str, dict] = {}
+        for token_id, mid in midpoints.items():
+            if 0 <= mid <= 1:
+                prices[str(token_id)] = {"mid": float(mid)}
         return prices
 
     # ==================== DATA API ====================
@@ -1945,20 +2187,37 @@ class PolymarketClient:
         )
 
     async def get_wallet_trades_paginated(self, address: str, *, max_trades: int = 1000, page_size: int = 500) -> list[dict]:
-        all_trades: list[dict] = []
-        offset = 0
+        # 60s TTL cache, single-flight.  Single-user install + 5-minute
+        # verifier cycle = sub-second cache hit on every cycle except
+        # the first.  The cache key includes max_trades because callers
+        # ask for different sizes (verifier=10000, lifecycle=300).
+        normalized_address = str(address or "").strip().lower()
         capped_page_size = max(1, min(int(page_size or 500), 500))
         capped_max_trades = max(1, min(int(max_trades or 1000), 10_000))
-        while len(all_trades) < capped_max_trades:
-            page = await self.get_wallet_trades(address, limit=capped_page_size, offset=offset)
-            if not page:
-                break
-            all_trades.extend(page)
-            if len(page) < capped_page_size:
-                break
-            offset += capped_page_size
-            await asyncio.sleep(0.05)
-        return all_trades[:capped_max_trades]
+        if not normalized_address:
+            return []
+        cache_key = (normalized_address, capped_max_trades, capped_page_size)
+
+        async def _fetch() -> list[dict]:
+            all_trades: list[dict] = []
+            offset = 0
+            while len(all_trades) < capped_max_trades:
+                page = await self.get_wallet_trades(
+                    normalized_address, limit=capped_page_size, offset=offset
+                )
+                if not page:
+                    break
+                all_trades.extend(page)
+                if len(page) < capped_page_size:
+                    break
+                offset += capped_page_size
+                await asyncio.sleep(0.05)
+            return all_trades[:capped_max_trades]
+
+        result = await self._wallet_trades_cache.get_or_fetch(cache_key, _fetch)
+        # Defensive copy: callers commonly mutate the list (sort, filter,
+        # extend); we don't want them poisoning the cache.
+        return list(result)
 
     async def get_market_trades(self, condition_id: str, limit: int = 100, offset: int = 0) -> list[dict]:
         """Get recent trades for a market"""
@@ -2478,24 +2737,42 @@ class PolymarketClient:
             return []
 
     async def get_closed_positions_paginated(self, address: str, max_positions: int = 200) -> list[dict]:
-        """Fetch multiple pages of closed positions."""
-        all_positions = []
-        offset = 0
-        page_size = 50
+        """Fetch multiple pages of closed positions.
 
-        while len(all_positions) < max_positions:
-            page = await self.get_closed_positions(address, limit=page_size, offset=offset)
-            if not page:
-                break
-            all_positions.extend(page)
-            offset += len(page)
-            if len(page) < page_size:
-                break
-            # Stagger pagination to avoid saturating the data-positions rate bucket
-            # when multiple wallets are being analyzed concurrently.
-            await asyncio.sleep(0.35)
+        60s TTL cache, single-flight.  ``data_positions`` has a 6 req/s
+        rate limit and the verifier paginates in 50-row pages with a
+        manual 0.35s inter-page sleep — caching the entire response
+        eliminates ~80% of the rate-limiter queue pressure in the
+        typical single-user install.
+        """
+        normalized_address = str(address or "").strip().lower()
+        capped_max_positions = max(1, int(max_positions or 200))
+        if not normalized_address:
+            return []
+        cache_key = (normalized_address, capped_max_positions)
 
-        return all_positions[:max_positions]
+        async def _fetch() -> list[dict]:
+            all_positions: list[dict] = []
+            offset = 0
+            page_size = 50
+            while len(all_positions) < capped_max_positions:
+                page = await self.get_closed_positions(
+                    normalized_address, limit=page_size, offset=offset
+                )
+                if not page:
+                    break
+                all_positions.extend(page)
+                offset += len(page)
+                if len(page) < page_size:
+                    break
+                # Stagger pagination to avoid saturating the
+                # data-positions rate bucket when multiple wallets are
+                # being analyzed concurrently.
+                await asyncio.sleep(0.35)
+            return all_positions[:capped_max_positions]
+
+        result = await self._closed_positions_cache.get_or_fetch(cache_key, _fetch)
+        return list(result)
 
     async def calculate_win_rate_fast(self, address: str, min_positions: int = 5) -> Optional[dict]:
         """

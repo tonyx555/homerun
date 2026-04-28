@@ -5465,30 +5465,23 @@ async def reconcile_live_positions(
                 )
             unresolved_token_ids = [token_id for token_id in token_ids_for_prices if token_id not in ws_mid_prices]
             if unresolved_token_ids:
-
-                async def _fetch_clob_midpoint(token_id: str) -> tuple[str, Optional[float]]:
-                    try:
-                        midpoint = await asyncio.wait_for(
-                            polymarket_client.get_midpoint(token_id),
-                            timeout=1.5,
-                        )
-                    except Exception:
-                        return token_id, None
-                    parsed_midpoint = safe_float(midpoint)
-                    if parsed_midpoint is None or parsed_midpoint < 0:
-                        return token_id, None
-                    return token_id, float(parsed_midpoint)
-
-                midpoint_pairs = await asyncio.gather(
-                    *[_fetch_clob_midpoint(token_id) for token_id in unresolved_token_ids],
-                    return_exceptions=True,
-                )
-                for item in midpoint_pairs:
-                    if isinstance(item, Exception):
+                # ONE HTTP request for all unresolved tokens via the
+                # CLOB /midpoints batch endpoint instead of N parallel
+                # single-token GETs.  The client also has a 3s
+                # in-process cache so a follow-up cycle on the same
+                # token universe collapses to zero network calls.
+                try:
+                    batch = await asyncio.wait_for(
+                        polymarket_client.get_midpoints_batch(unresolved_token_ids),
+                        timeout=4.0,
+                    )
+                except Exception:
+                    batch = {}
+                for token_id, midpoint in batch.items():
+                    parsed = safe_float(midpoint)
+                    if parsed is None or parsed < 0:
                         continue
-                    token_id, midpoint = item
-                    if midpoint is not None:
-                        clob_mid_prices[str(token_id).strip()] = midpoint
+                    clob_mid_prices[str(token_id).strip()] = float(parsed)
 
         # Collect parent + child clob_order_ids that we need provider snapshots
         # for. A laddered exit has no provider id on the parent — the venue
