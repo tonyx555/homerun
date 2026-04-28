@@ -1,120 +1,742 @@
 {
-  "runId": 1777340686803,
-  "workflowRunId": 25029102799,
+  "runId": 1777342282424,
+  "workflowRunId": 25030454757,
   "workflowId": 230872278,
   "workflowName": "CI",
-  "workflowUrl": "https://github.com/braedonsaunders/homerun/actions/runs/25029102799",
+  "workflowUrl": "https://github.com/braedonsaunders/homerun/actions/runs/25030064775",
   "branch": "main",
-  "headSha": "a2b3834a31c7c685f6af278ec0b79fc2b62a8599",
+  "headSha": "a272cda1e2d335523ce9b331e5999730688222b4",
   "prNumber": null,
   "passes": [
     {
       "pass": 1,
       "cluster": {
-        "type": "test-failure",
+        "type": "lint",
         "files": [
-          "backend/tests/test_strategy_sdk_price_history.py"
+          "backend/services/opportunity_strategy_catalog.py",
+          "backend/api/routes_strategies.py",
+          "backend/services/strategies/crypto_5m_midcycle.py"
         ],
         "failures": [
           {
-            "type": "test-failure",
-            "file": "backend/tests/test_strategy_sdk_price_history.py",
-            "line": null,
-            "column": null,
-            "message": "AttributeError: type object 'StrategySDK' has no attribute 'MarketPriceHistory'",
-            "rule": null,
-            "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_sdk_class_exposes_dataclasses - AttributeError: type object 'StrategySDK' has no attribute 'MarketPriceHistory'",
-            "confidence": 0.7
+            "type": "lint",
+            "file": "backend/services/opportunity_strategy_catalog.py",
+            "line": 11,
+            "column": 28,
+            "message": "[*] `sqlalchemy.exc.OperationalError` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `sqlalchemy.exc.OperationalError` imported but unused\n  --> services/opportunity_strategy_catalog.py:11:28",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/services/opportunity_strategy_catalog.py",
+            "line": 11,
+            "column": 46,
+            "message": "[*] `sqlalchemy.exc.ProgrammingError` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `sqlalchemy.exc.ProgrammingError` imported but unused\n  --> services/opportunity_strategy_catalog.py:11:46",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/services/opportunity_strategy_catalog.py",
+            "line": 14,
+            "column": 39,
+            "message": "[*] `models.database.StrategyTombstone` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `models.database.StrategyTombstone` imported but unused\n  --> services/opportunity_strategy_catalog.py:14:39",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/services/opportunity_strategy_catalog.py",
+            "line": 18,
+            "column": 5,
+            "message": "[*] `services.strategy_helpers.crypto_scope.merge_crypto_defaults` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `services.strategy_helpers.crypto_scope.merge_crypto_defaults` imported but unused\n  --> services/opportunity_strategy_catalog.py:18:5",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/api/routes_strategies.py",
+            "line": 52,
+            "column": 57,
+            "message": "[*] `services.strategy_loader.strategy_loader` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `services.strategy_loader.strategy_loader` imported but unused\n  --> api/routes_strategies.py:52:57",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/api/routes_strategies.py",
+            "line": 65,
+            "column": 26,
+            "message": "[*] `utils.utcnow.utcnow` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `utils.utcnow.utcnow` imported but unused\n  --> api/routes_strategies.py:65:26",
+            "confidence": 0.95
+          },
+          {
+            "type": "lint",
+            "file": "backend/services/strategies/crypto_5m_midcycle.py",
+            "line": 36,
+            "column": 20,
+            "message": "[*] `models.Event` imported but unused",
+            "rule": "F401",
+            "rawLog": "F401 [*] `models.Event` imported but unused\n  --> services/strategies/crypto_5m_midcycle.py:36:20",
+            "confidence": 0.95
           }
         ],
         "strategy": "llm"
       },
-      "commitSha": "153915ff1b04bcf7e2c5998c48dfa294d3a01af5",
+      "commitSha": "1e6f84a4a2880b450baba57a7b26673f924d95a8",
       "filesChanged": [
-        "backend/services/strategy_helpers/price_history.py",
-        "backend/services/strategy_sdk.py"
+        "backend/api/routes_strategies.py",
+        "backend/services/opportunity_strategy_catalog.py",
+        "backend/services/strategies/crypto_5m_midcycle.py"
       ],
-      "result": "fixed",
-      "newFailures": [],
+      "result": "regression",
+      "newFailures": [
+        {
+          "type": "test-failure",
+          "file": "backend/tests/test_opportunity_strategy_catalog.py",
+          "line": null,
+          "column": null,
+          "message": "AssertionError: assert ''",
+          "rule": null,
+          "rawLog": "FAILED tests/test_opportunity_strategy_catalog.py::test_crypto_strategy_rows_expose_ui_schema - AssertionError: assert ''",
+          "confidence": 0.7
+        },
+        {
+          "type": "test-failure",
+          "file": "backend/tests/test_trader_orchestrator_no_auto_seed.py",
+          "line": null,
+          "column": null,
+          "message": "ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution{\"timestamp\": \"2026-04-28T02:21:33.628091+00:00Z\", \"level\": \"ERROR\", \"logger\": \"asyncio\", \"message\": \"Task was destroyed but it is pending!\\ntask: <Task pending name='Task-3138' coro=<FeedManager._cache_eviction_loop() done, defined at /home/runner/work/homerun/homerun/backend/services/ws_feeds.py:1857> wait_for=<Future pending cb=[Task.task_wakeup()]>>\", \"module\": \"base_events\", \"function\": \"default_exception_handler\", \"line\": 1833}",
+          "rule": null,
+          "rawLog": "FAILED tests/test_trader_orchestrator_no_auto_seed.py::test_overview_stays_empty_after_deleting_last_trader - ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution{\"timestamp\": \"2026-04-28T02:21:33.628091+00:00Z\", \"level\": \"ERROR\", \"logger\": \"asyncio\", \"message\": \"Task was destroyed but it is pending!\\ntask: <Task pending name='Task-3138' coro=<FeedManager._cache_eviction_loop() done, defined at /home/runner/work/homerun/homerun/backend/services/ws_feeds.py:1857> wait_for=<Future pending cb=[Task.task_wakeup()]>>\", \"module\": \"base_events\", \"function\": \"default_exception_handler\", \"line\": 1833}",
+          "confidence": 0.7
+        },
+        {
+          "type": "test-failure",
+          "file": "backend/tests/test_trader_orchestrator_no_auto_seed.py",
+          "line": null,
+          "column": null,
+          "message": "ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution",
+          "rule": null,
+          "rawLog": "FAILED tests/test_trader_orchestrator_no_auto_seed.py::test_create_trader_copies_settings_from_existing_trader - ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution",
+          "confidence": 0.7
+        },
+        {
+          "type": "test-failure",
+          "file": "backend/tests/test_trader_orchestrator_state_confidence.py",
+          "line": null,
+          "column": null,
+          "message": "ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution",
+          "rule": null,
+          "rawLog": "FAILED tests/test_trader_orchestrator_state_confidence.py::test_normalize_trader_payload_converts_percent_min_confidence - ValueError: Unknown strategy_key 'btc_eth_highfreq'. Valid strategy keys: basic, btc_eth_convergence, btc_eth_directional_edge, btc_eth_maker_quote, combinatorial, cross_platform, crypto_5m_midcycle, crypto_entropy_maker, crypto_spike_reversion, ctf_basic_arb, flash_crash_reversion, holding_reward_yield, manual_wallet_position, market_making, negrisk, news_edge, news_momentum_breakout, prob_surface_arb, settlement_lag, sports_overreaction_fader, stat_arb, tail_end_carry, traders_confluence, traders_copy_trade, vpin_toxicity, weather_distribution",
+          "confidence": 0.7
+        }
+      ],
       "costCents": 1,
-      "durationMs": 163646
+      "durationMs": 71669
     }
   ],
   "totalCostCents": 1,
-  "startedAt": "2026-04-28T01:44:46.803Z",
+  "startedAt": "2026-04-28T02:11:22.424Z",
   "result": null,
-  "commits": [
-    "153915ff1b04bcf7e2c5998c48dfa294d3a01af5"
-  ],
+  "commits": [],
   "latestFailures": [
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_events_routes_normalization.py",
       "line": null,
       "column": null,
-      "message": "AttributeError: type object 'StrategySDK' has no attribute 'MarketPriceHistory'",
+      "message": "Collection error: tests/test_events_routes_normalization.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_sdk_class_exposes_dataclasses - AttributeError: type object 'StrategySDK' has no attribute 'MarketPriceHistory'",
+      "rawLog": "ERROR tests/test_events_routes_normalization.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_execution_session_engine.py",
       "line": null,
       "column": null,
-      "message": "assert True is False",
+      "message": "Collection error: tests/test_execution_session_engine.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_has_data_requires_two_snapshots - assert True is False",
+      "rawLog": "ERROR tests/test_execution_session_engine.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_fast_orphan_reconcile.py",
       "line": null,
       "column": null,
-      "message": "AttributeError: 'MarketPriceHistory' object has no attribute 'max_drop_yes'",
+      "message": "Collection error: tests/test_fast_orphan_reconcile.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_max_drop_yes_returns_peak_minus_current - AttributeError: 'MarketPriceHistory' object has no attribute 'max_drop_yes'",
+      "rawLog": "ERROR tests/test_fast_orphan_reconcile.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_fast_trader_runtime.py",
       "line": null,
       "column": null,
-      "message": "AttributeError: 'MarketPriceHistory' object has no attribute 'max_drop_no'",
+      "message": "Collection error: tests/test_fast_trader_runtime.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_max_drop_no_returns_peak_minus_current - AttributeError: 'MarketPriceHistory' object has no attribute 'max_drop_no'",
+      "rawLog": "ERROR tests/test_fast_trader_runtime.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_live_entry_authority_guard.py",
       "line": null,
       "column": null,
-      "message": "assert 0.062360956446232366 == 0.15 ± 1.5e-10",
+      "message": "Collection error: tests/test_live_entry_authority_guard.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_recent_volatility_is_max_minus_min_yes - assert 0.062360956446232366 == 0.15 ± 1.5e-10",
+      "rawLog": "ERROR tests/test_live_entry_authority_guard.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_live_provider_failure_snapshot_cache.py",
       "line": null,
       "column": null,
-      "message": "AttributeError: 'PriceSnapshot' object has no attribute 'yes_price'",
+      "message": "Collection error: tests/test_live_provider_failure_snapshot_cache.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_window_evicts_old_snapshots - AttributeError: 'PriceSnapshot' object has no attribute 'yes_price'",
+      "rawLog": "ERROR tests/test_live_provider_failure_snapshot_cache.py",
       "confidence": 0.7
     },
     {
       "type": "test-failure",
-      "file": "backend/tests/test_strategy_sdk_price_history.py",
+      "file": "backend/tests/test_main_gui_health.py",
       "line": null,
       "column": null,
-      "message": "ImportError: cannot import name 'DEFAULT_WINDOW_SECONDS' from 'services.strategy_helpers.price_history' (/home/runner/work/homerun/homerun/backend/services/strategy_helpers/price_history.py)",
+      "message": "Collection error: tests/test_main_gui_health.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_strategy_sdk_price_history.py::test_default_window_is_300_seconds - ImportError: cannot import name 'DEFAULT_WINDOW_SECONDS' from 'services.strategy_helpers.price_history' (/home/runner/work/homerun/homerun/backend/services/strategy_helpers/price_history.py)",
+      "rawLog": "ERROR tests/test_main_gui_health.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_market_universe_worker.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_market_universe_worker.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_market_universe_worker.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_ml_pipeline_runtime.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_ml_pipeline_runtime.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_ml_pipeline_runtime.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_news_feed_routes.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_news_feed_routes.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_news_feed_routes.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_news_worker_loop.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_news_worker_loop.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_news_worker_loop.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_news_workflow_routes.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_news_workflow_routes.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_news_workflow_routes.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_notifier_message_formatting.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_notifier_message_formatting.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_notifier_message_formatting.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_notifier_telegram_commands.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_notifier_telegram_commands.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_notifier_telegram_commands.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_opportunity_strategy_catalog.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_opportunity_strategy_catalog.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_opportunity_strategy_catalog.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_opportunity_subfilters.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_opportunity_subfilters.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_opportunity_subfilters.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_orchestrator_live_surface.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_orchestrator_live_surface.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_orchestrator_live_surface.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_position_lifecycle_blocked_shortcircuit.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_position_lifecycle_blocked_shortcircuit.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_position_lifecycle_blocked_shortcircuit.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_position_lifecycle_entry_authority.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_position_lifecycle_entry_authority.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_position_lifecycle_entry_authority.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_ai_weather_lookup.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_ai_weather_lookup.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_ai_weather_lookup.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_crypto.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_crypto.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_crypto.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_discovery_pool_members.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_discovery_pool_members.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_discovery_pool_members.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_discovery_trader_network.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_discovery_trader_network.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_discovery_trader_network.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_discovery_trader_signals.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_discovery_trader_signals.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_discovery_trader_signals.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_maintenance_flush.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_maintenance_flush.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_maintenance_flush.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_no_legacy_autotrader.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_no_legacy_autotrader.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_no_legacy_autotrader.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_opportunities_ids.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_opportunities_ids.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_opportunities_ids.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_settings_polymarket_connection.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_settings_polymarket_connection.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_settings_polymarket_connection.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_settings_transfer.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_settings_transfer.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_settings_transfer.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_trader_create_copy.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_trader_create_copy.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_trader_create_copy.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_trader_delete_safety.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_trader_delete_safety.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_trader_delete_safety.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_trader_positions_cleanup.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_trader_positions_cleanup.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_trader_positions_cleanup.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_routes_workers_global_pause.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_routes_workers_global_pause.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_routes_workers_global_pause.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_settings_helpers_llm_local.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_settings_helpers_llm_local.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_settings_helpers_llm_local.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_settings_helpers_maintenance.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_settings_helpers_maintenance.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_settings_helpers_maintenance.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_settings_helpers_search_filters.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_settings_helpers_search_filters.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_settings_helpers_search_filters.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_settings_helpers_trading.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_settings_helpers_trading.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_settings_helpers_trading.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_settings_helpers_ui_lock.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_settings_helpers_ui_lock.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_settings_helpers_ui_lock.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_snapshot_broadcaster_crypto_dedup.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_snapshot_broadcaster_crypto_dedup.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_snapshot_broadcaster_crypto_dedup.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_strategy_backtester.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_strategy_backtester.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_strategy_backtester.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_strategy_catalog_seed_create_only.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_strategy_catalog_seed_create_only.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_strategy_catalog_seed_create_only.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_tracked_traders_worker.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_tracked_traders_worker.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_tracked_traders_worker.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_data_access_and_strategy_sdk.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_data_access_and_strategy_sdk.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_data_access_and_strategy_sdk.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_force_delete_cleanup.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_force_delete_cleanup.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_force_delete_cleanup.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_hot_state_decisions.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_hot_state_decisions.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_hot_state_decisions.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_hot_state_open_order_count.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_hot_state_open_order_count.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_hot_state_open_order_count.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_live_manual_position_adoption.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_live_manual_position_adoption.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_live_manual_position_adoption.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_live_provider_reconciliation.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_live_provider_reconciliation.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_live_provider_reconciliation.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_copy_helpers.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_copy_helpers.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_copy_helpers.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_no_auto_seed.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_no_auto_seed.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_no_auto_seed.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_paper_backfill.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_paper_backfill.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_paper_backfill.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_route_surface.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_route_surface.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_route_surface.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_snapshot_staleness.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_snapshot_staleness.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_snapshot_staleness.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_state_confidence.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_state_confidence.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_state_confidence.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_state_signals.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_state_signals.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_state_signals.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orchestrator_worker.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orchestrator_worker.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orchestrator_worker.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_order_market_links.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_order_market_links.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_order_market_links.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_orders_summary.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_orders_summary.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_orders_summary.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_position_lifecycle_rapid_exit.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_position_lifecycle_rapid_exit.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_position_lifecycle_rapid_exit.py",
       "confidence": 0.7
     },
     {
@@ -122,12 +744,192 @@
       "file": "backend/tests/test_trader_position_lifecycle_resolution.py",
       "line": null,
       "column": null,
-      "message": "assert 0 == 1",
+      "message": "Collection error: tests/test_trader_position_lifecycle_resolution.py",
       "rule": null,
-      "rawLog": "FAILED tests/test_trader_position_lifecycle_resolution.py::test_live_blocked_retry_exhausted_closes_from_post_end_extreme_mark - assert 0 == 1",
+      "rawLog": "ERROR tests/test_trader_position_lifecycle_resolution.py",
       "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_reconciliation_risk_params.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_reconciliation_risk_params.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_reconciliation_risk_params.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_scope_context_cache.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_scope_context_cache.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_scope_context_cache.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_signal_cursor_scanning.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_signal_cursor_scanning.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_signal_cursor_scanning.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_trader_source_schema_and_validation.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_trader_source_schema_and_validation.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_trader_source_schema_and_validation.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_wallet_intelligence_cross_platform.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_wallet_intelligence_cross_platform.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_wallet_intelligence_cross_platform.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_weather_routes.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_weather_routes.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_weather_routes.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_weather_worker_loop.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_weather_worker_loop.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_weather_worker_loop.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_websocket_topics.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_websocket_topics.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_websocket_topics.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_worker_state_orchestrator_snapshot.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_worker_state_orchestrator_snapshot.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_worker_state_orchestrator_snapshot.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_workers_host.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_workers_host.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_workers_host.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "test-failure",
+      "file": "backend/tests/test_workers_host_lock.py",
+      "line": null,
+      "column": null,
+      "message": "Collection error: tests/test_workers_host_lock.py",
+      "rule": null,
+      "rawLog": "ERROR tests/test_workers_host_lock.py",
+      "confidence": 0.7
+    },
+    {
+      "type": "lint",
+      "file": "backend/api/routes_strategies.py",
+      "line": 52,
+      "column": 57,
+      "message": "[*] `services.strategy_loader.strategy_loader` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `services.strategy_loader.strategy_loader` imported but unused\n  --> api/routes_strategies.py:52:57",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/api/routes_strategies.py",
+      "line": 65,
+      "column": 26,
+      "message": "[*] `utils.utcnow.utcnow` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `utils.utcnow.utcnow` imported but unused\n  --> api/routes_strategies.py:65:26",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/services/opportunity_strategy_catalog.py",
+      "line": 11,
+      "column": 28,
+      "message": "[*] `sqlalchemy.exc.OperationalError` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `sqlalchemy.exc.OperationalError` imported but unused\n  --> services/opportunity_strategy_catalog.py:11:28",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/services/opportunity_strategy_catalog.py",
+      "line": 11,
+      "column": 46,
+      "message": "[*] `sqlalchemy.exc.ProgrammingError` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `sqlalchemy.exc.ProgrammingError` imported but unused\n  --> services/opportunity_strategy_catalog.py:11:46",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/services/opportunity_strategy_catalog.py",
+      "line": 14,
+      "column": 39,
+      "message": "[*] `models.database.StrategyTombstone` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `models.database.StrategyTombstone` imported but unused\n  --> services/opportunity_strategy_catalog.py:14:39",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/services/opportunity_strategy_catalog.py",
+      "line": 18,
+      "column": 5,
+      "message": "[*] `services.strategy_helpers.crypto_scope.merge_crypto_defaults` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `services.strategy_helpers.crypto_scope.merge_crypto_defaults` imported but unused\n  --> services/opportunity_strategy_catalog.py:18:5",
+      "confidence": 0.95
+    },
+    {
+      "type": "lint",
+      "file": "backend/services/strategies/crypto_5m_midcycle.py",
+      "line": 36,
+      "column": 20,
+      "message": "[*] `models.Event` imported but unused",
+      "rule": "F401",
+      "rawLog": "F401 [*] `models.Event` imported but unused\n  --> services/strategies/crypto_5m_midcycle.py:36:20",
+      "confidence": 0.95
     }
   ],
-  "latestParserUsed": "pytest",
-  "latestLogPath": ".greencheck/logs/workflow-run-25029102799.log"
+  "latestParserUsed": "pytest, ruff",
+  "latestLogPath": ".greencheck/logs/workflow-run-25030454757.log"
 }
