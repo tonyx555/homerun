@@ -94,6 +94,22 @@ class CTFExecutionService:
             "stateMutability": "view",
         },
         {
+            # CTF stores per-outcome-slot payout numerators after resolution.
+            # For binary markets (slots 0/1), one will be 1 and the other 0
+            # (or scaled so the pair sums to denominator). For scalar
+            # markets the slots can carry fractional weights summing to
+            # the denominator. Used by the redeemer's expected-payout
+            # guard to skip $0-return redemptions that would only burn gas.
+            "name": "payoutNumerators",
+            "type": "function",
+            "inputs": [
+                {"name": "conditionId", "type": "bytes32"},
+                {"name": "outcomeSlot", "type": "uint256"},
+            ],
+            "outputs": [{"name": "", "type": "uint256"}],
+            "stateMutability": "view",
+        },
+        {
             "name": "isApprovedForAll",
             "type": "function",
             "inputs": [
@@ -677,6 +693,74 @@ class CTFExecutionService:
         )
         return result
 
+    @staticmethod
+    def compute_condition_payout_breakdown(
+        *,
+        denominator: int,
+        outcome_balances: dict[int, float],
+        outcome_numerators: dict[int, int],
+    ) -> dict[str, float]:
+        """Pure-function payout math used by the redeemer guard.
+
+        Given the on-chain ``denominator`` and per-outcome-slot
+        ``numerators`` from ``payoutNumerators(conditionId, slot)``,
+        plus the wallet's per-slot ``balances`` (already in human shares,
+        NOT raw uint256), returns a breakdown of expected USDC payout if
+        we redeem now.
+
+        Math (binary or scalar): for each held outcome slot,
+        ``payout_per_share = numerator[slot] / denominator``, and the
+        condition payout is the sum of ``balance[slot] * payout_per_share``
+        across every slot the wallet holds.
+
+        For a fully-losing binary position, the held slot has
+        ``numerator = 0``, so ``expected_payout_usd = 0`` and the redeemer
+        will skip unless the operator force-redeems. Extracted to a static
+        method so the math has unit tests independent of web3/RPC mocks.
+        """
+        denominator_f = float(denominator or 0)
+        if denominator_f <= 0:
+            return {
+                "expected_payout_usd": 0.0,
+                "total_shares": float(sum(outcome_balances.values()) or 0.0),
+                "winning_shares": 0.0,
+                "losing_shares": float(sum(outcome_balances.values()) or 0.0),
+            }
+        expected_payout_usd = 0.0
+        winning_shares = 0.0
+        losing_shares = 0.0
+        for slot, balance in outcome_balances.items():
+            numerator = float(outcome_numerators.get(int(slot), 0) or 0)
+            if numerator > 0:
+                expected_payout_usd += float(balance) * (numerator / denominator_f)
+                winning_shares += float(balance)
+            else:
+                losing_shares += float(balance)
+        return {
+            "expected_payout_usd": expected_payout_usd,
+            "total_shares": winning_shares + losing_shares,
+            "winning_shares": winning_shares,
+            "losing_shares": losing_shares,
+        }
+
+    async def _gas_price_gwei(self, w3) -> float:
+        # Lightweight TTL cache so a busy redeemer doesn't hammer the RPC.
+        # Class-level so cache survives across calls within the process.
+        import time as _time
+
+        cache = getattr(self, "_gas_price_cache", None)
+        ttl_seconds = 30.0
+        now = _time.monotonic()
+        if isinstance(cache, tuple) and (now - cache[0]) < ttl_seconds:
+            return float(cache[1])
+        try:
+            wei = await asyncio.to_thread(lambda: w3.eth.gas_price)
+        except Exception:
+            return 0.0
+        gwei = float(wei or 0) / 1e9
+        self._gas_price_cache = (now, gwei)
+        return gwei
+
     async def redeem_resolved_wallet_positions(
         self,
         *,
@@ -692,7 +776,10 @@ class CTFExecutionService:
                 "positions_scanned": 0,
                 "conditions_checked": 0,
                 "resolved_conditions": 0,
+                "redeemable_value_usd": 0.0,
                 "redeemed": 0,
+                "skipped_low_payout": 0,
+                "skipped_high_gas": 0,
                 "failed": 0,
                 "dry_run": bool(dry_run),
                 "errors": ["missing_execution_wallet"],
@@ -705,16 +792,27 @@ class CTFExecutionService:
                 "positions_scanned": 0,
                 "conditions_checked": 0,
                 "resolved_conditions": 0,
+                "redeemable_value_usd": 0.0,
                 "redeemed": 0,
+                "skipped_low_payout": 0,
+                "skipped_high_gas": 0,
                 "failed": 0,
                 "dry_run": bool(dry_run),
                 "errors": [],
             }
 
-        grouped: dict[str, set[int]] = {}
+        # Group positions by conditionId, keeping per-token outcomeIndex so
+        # the payout math knows which slot each token represents.
+        @dataclass
+        class _HeldOutcome:
+            token_id_uint: int
+            outcome_index: int
+
+        grouped: dict[str, list[_HeldOutcome]] = {}
         for row in positions:
             condition_id_raw = row.get("conditionId") or row.get("condition_id") or row.get("market")
             token_id_raw = row.get("asset") or row.get("asset_id") or row.get("token_id") or row.get("tokenId")
+            outcome_index_raw = row.get("outcomeIndex")
             try:
                 condition_id = self._normalize_condition_id(condition_id_raw)
             except Exception:
@@ -722,7 +820,13 @@ class CTFExecutionService:
             token_id_uint = self._parse_token_id_uint256(token_id_raw)
             if token_id_uint is None:
                 continue
-            grouped.setdefault(condition_id, set()).add(token_id_uint)
+            try:
+                outcome_index = int(outcome_index_raw) if outcome_index_raw is not None else 0
+            except (TypeError, ValueError):
+                outcome_index = 0
+            grouped.setdefault(condition_id, []).append(
+                _HeldOutcome(token_id_uint=token_id_uint, outcome_index=outcome_index)
+            )
 
         if not grouped:
             return {
@@ -730,7 +834,10 @@ class CTFExecutionService:
                 "positions_scanned": len(positions),
                 "conditions_checked": 0,
                 "resolved_conditions": 0,
+                "redeemable_value_usd": 0.0,
                 "redeemed": 0,
+                "skipped_low_payout": 0,
+                "skipped_high_gas": 0,
                 "failed": 0,
                 "dry_run": bool(dry_run),
                 "errors": [],
@@ -740,38 +847,141 @@ class CTFExecutionService:
         ctf = w3.eth.contract(address=w3.to_checksum_address(self.CTF_ADDRESS), abi=self._CTF_ABI)
         checksum_wallet = w3.to_checksum_address(execution_wallet)
 
+        # Operator-tunable policy (config + DB-overridable; see
+        # config.Settings + alembic 202604280001).
+        min_payout_usd = float(getattr(settings, "REDEEMER_MIN_PAYOUT_USD", 0.10) or 0.0)
+        max_gas_price_gwei = float(getattr(settings, "REDEEMER_MAX_GAS_PRICE_GWEI", 200.0) or 0.0)
+        force_losers = bool(getattr(settings, "REDEEMER_FORCE_INCLUDING_LOSERS", False))
+
+        # Snapshot gas price once per cycle (cached) — defers cleanup
+        # to a cheaper window when network is hot, without aborting the
+        # whole cycle (we can still redeem high-value winners).
+        gas_price_gwei = await self._gas_price_gwei(w3) if max_gas_price_gwei > 0 else 0.0
+        gas_too_hot = max_gas_price_gwei > 0 and gas_price_gwei > max_gas_price_gwei
+
         redeemed = 0
+        skipped_low_payout = 0
+        skipped_high_gas = 0
         failed = 0
         resolved = 0
+        redeemable_value_usd = 0.0
         errors: list[str] = []
 
-        for condition_id, token_ids in grouped.items():
+        for condition_id, holdings in grouped.items():
             try:
-                denominator = await asyncio.to_thread(lambda: ctf.functions.payoutDenominator(condition_id).call())
+                denominator = await asyncio.to_thread(
+                    lambda: ctf.functions.payoutDenominator(condition_id).call()
+                )
                 if int(denominator or 0) <= 0:
                     continue
                 resolved += 1
 
-                total_shares = 0.0
-                for token_id in token_ids:
-                    raw_balance = await asyncio.to_thread(
-                        lambda token=token_id: ctf.functions.balanceOf(checksum_wallet, token).call()
-                    )
-                    total_shares += float(raw_balance or 0) / (10**_USDC_DECIMALS)
+                # Read per-outcome numerators only for the slots we hold —
+                # avoids guessing the market's outcome count.
+                slots = sorted({int(h.outcome_index) for h in holdings})
+                outcome_numerators: dict[int, int] = {}
+                for slot in slots:
+                    try:
+                        n = await asyncio.to_thread(
+                            lambda s=slot: ctf.functions.payoutNumerators(condition_id, s).call()
+                        )
+                        outcome_numerators[slot] = int(n or 0)
+                    except Exception as exc:
+                        # Treat unreadable slot as zero-payout; we'd rather
+                        # under-redeem than burn gas on a bad estimate.
+                        outcome_numerators[slot] = 0
+                        errors.append(f"numerator_read_failed:{condition_id}:slot={slot}:{exc}")
 
+                # Per-slot balances (chain truth, not data-API mark).
+                outcome_balances: dict[int, float] = {}
+                for held in holdings:
+                    raw_balance = await asyncio.to_thread(
+                        lambda token=held.token_id_uint: ctf.functions.balanceOf(
+                            checksum_wallet, token
+                        ).call()
+                    )
+                    shares = float(raw_balance or 0) / (10**_USDC_DECIMALS)
+                    outcome_balances[int(held.outcome_index)] = (
+                        outcome_balances.get(int(held.outcome_index), 0.0) + shares
+                    )
+
+                breakdown = self.compute_condition_payout_breakdown(
+                    denominator=int(denominator),
+                    outcome_balances=outcome_balances,
+                    outcome_numerators=outcome_numerators,
+                )
+                expected_payout_usd = breakdown["expected_payout_usd"]
+                total_shares = breakdown["total_shares"]
+                redeemable_value_usd += expected_payout_usd
+
+                # Wallets without dust shouldn't be on the list; if all
+                # balances are zero we already redeemed at some point.
                 if total_shares <= 1e-6:
                     continue
 
-                if dry_run:
-                    redeemed += 1
+                # Decision matrix
+                will_redeem = False
+                skip_reason: str | None = None
+                if expected_payout_usd >= min_payout_usd:
+                    if gas_too_hot:
+                        will_redeem = False
+                        skip_reason = (
+                            f"gas_price_too_high gwei={gas_price_gwei:.2f} ceiling={max_gas_price_gwei:.2f}"
+                        )
+                        skipped_high_gas += 1
+                    else:
+                        will_redeem = True
+                elif force_losers:
+                    if gas_too_hot:
+                        will_redeem = False
+                        skip_reason = (
+                            f"gas_price_too_high (force-losers cycle) gwei={gas_price_gwei:.2f} "
+                            f"ceiling={max_gas_price_gwei:.2f}"
+                        )
+                        skipped_high_gas += 1
+                    else:
+                        will_redeem = True  # dust-cleanup mode, gas burn accepted
+                else:
+                    will_redeem = False
+                    skip_reason = (
+                        f"expected_payout_below_floor "
+                        f"payout=${expected_payout_usd:.4f} floor=${min_payout_usd:.4f} "
+                        f"shares_winning={breakdown['winning_shares']:.4f} "
+                        f"shares_losing={breakdown['losing_shares']:.4f}"
+                    )
+                    skipped_low_payout += 1
+
+                logger.info(
+                    "redeemer.decision condition=%s payout_usd=%.4f total_shares=%.4f "
+                    "winning_shares=%.4f losing_shares=%.4f redeem=%s reason=%s gas_gwei=%.2f dry_run=%s",
+                    condition_id,
+                    expected_payout_usd,
+                    total_shares,
+                    breakdown["winning_shares"],
+                    breakdown["losing_shares"],
+                    bool(will_redeem),
+                    skip_reason or "above_floor",
+                    gas_price_gwei,
+                    bool(dry_run),
+                )
+
+                if not will_redeem or dry_run:
+                    if dry_run and will_redeem:
+                        # In dry-run we still want the "would have redeemed"
+                        # counter so operators see what a requested run will do.
+                        redeemed += 1
                     continue
 
-                redeem_result = await self.redeem_positions(condition_id=condition_id, index_sets=[1, 2])
+                redeem_result = await self.redeem_positions(
+                    condition_id=condition_id, index_sets=[1, 2]
+                )
                 if redeem_result.status == "executed":
                     redeemed += 1
                 else:
                     failed += 1
-                    errors.append(str(redeem_result.error_message or f"redeem_failed:{condition_id}"))
+                    errors.append(
+                        str(redeem_result.error_message or f"redeem_failed:{condition_id}")
+                    )
             except Exception as exc:
                 failed += 1
                 errors.append(str(exc))
@@ -781,8 +991,17 @@ class CTFExecutionService:
             "positions_scanned": len(positions),
             "conditions_checked": len(grouped),
             "resolved_conditions": resolved,
+            "redeemable_value_usd": round(redeemable_value_usd, 4),
             "redeemed": redeemed,
+            "skipped_low_payout": skipped_low_payout,
+            "skipped_high_gas": skipped_high_gas,
             "failed": failed,
+            "gas_price_gwei": round(gas_price_gwei, 2),
+            "policy": {
+                "min_payout_usd": min_payout_usd,
+                "max_gas_price_gwei": max_gas_price_gwei,
+                "force_including_losers": force_losers,
+            },
             "dry_run": bool(dry_run),
             "errors": errors,
         }

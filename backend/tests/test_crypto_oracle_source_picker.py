@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from services.strategies.crypto_strategy_utils import pick_oracle_source
+from services.strategy_helpers.crypto_strategy_utils import pick_oracle_source
 
 
 _NOW_MS = 1_777_220_000_000.0

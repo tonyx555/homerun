@@ -158,6 +158,7 @@ ALLOWED_IMPORT_PREFIXES = {
     "services.fee_model",
     "services.ai",
     "services.strategy_sdk",
+    "services.strategy_helpers",
     "services.quality_filter",
     "services.data_source_sdk",
     "services.traders_sdk",

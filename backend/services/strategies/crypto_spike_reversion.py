@@ -17,7 +17,7 @@ from models import Market, Opportunity
 from services.data_events import DataEvent, EventType
 from services.quality_filter import QualityFilterOverrides
 from services.strategies.base import BaseStrategy, DecisionCheck, ExitDecision, StrategyDecision, _trader_size_limits
-from services.strategies.crypto_strategy_utils import (
+from services.strategy_helpers.crypto_strategy_utils import (
     build_binary_crypto_market,
     default_max_market_data_age_ms,
     default_max_oracle_age_ms,

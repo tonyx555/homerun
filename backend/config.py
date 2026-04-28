@@ -224,6 +224,17 @@ class Settings(BaseSettings):
     REDEEMER_MAX_GAS_PRICE_GWEI: float = 200.0  # Defer redemption when network is hot
     REDEEMER_FORCE_INCLUDING_LOSERS: bool = False  # Operator override: redeem $0-payout dust too
 
+    # Stale-Order Sweeper Policy (live CLOB cleanup)
+    # ----------------------------------------------------------------
+    # The reconciliation worker periodically cancels open CLOB orders
+    # that are clearly abandoned — old enough to be unintentional and
+    # priced far enough off-mid that they cannot fill. Defaults below
+    # are conservative; tighten to be more aggressive about cleanup.
+    STALE_ORDER_AGE_HOURS: float = 6.0  # Minimum age before sweep considers an order
+    STALE_ORDER_PRICE_DRIFT_MULTIPLE: float = 2.5  # Cancel if limit ≥ this × current mid (or BUY × this ≤ mid)
+    STALE_ORDER_RESIDUAL_SHARES: float = 1.0  # Cancel residual size below this (Polymarket min ≈ 5)
+    STALE_ORDER_AGE_HOURS_NO_MID: float = 24.0  # Hard age cutoff when mid lookup fails
+
     # Order Settings
     DEFAULT_ORDER_TYPE: str = "GTC"  # GTC (Good Till Cancel) or FOK (Fill Or Kill)
     MAX_SLIPPAGE_PERCENT: float = 2.0  # Maximum acceptable slippage

@@ -69,15 +69,11 @@ _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
 # unintentional and far enough off-market that they will not fill
 # during their remaining lifetime.  Strategies still re-quote on their
 # normal cadence; the sweeper only handles abandoned residue.
+# Cycle cadence is process-local; the actual thresholds (age, drift,
+# residual) are sourced from ``config.Settings`` so operators can tune
+# them via env vars without an alembic migration.
 _STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS = 300.0
 _last_stale_open_order_sweep_at = 0.0
-_STALE_OPEN_ORDER_AGE_HOURS = 6.0
-# Cancel an exit order if its target price is more than this multiple
-# off the current mid (e.g. SELL @ 0.12 vs mid 0.02 = 6x off-market).
-_STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE = 2.5
-# Always sweep residual size below this threshold — Polymarket's per-
-# order min is 5 shares so anything left below this can never fill.
-_STALE_OPEN_ORDER_RESIDUAL_SHARES = 1.0
 _STALE_OPEN_ORDER_SWEEP_TIMEOUT_SECONDS = 25.0
 # Polymarket-truth realized P&L verification: every 5 minutes, walk all
 # orders closed today, fetch the wallet's actual on-chain SELL trades,
@@ -575,8 +571,23 @@ async def _sweep_stale_open_orders() -> dict[str, Any]:
     if not open_orders:
         return summary
 
+    # Resolve thresholds at call time so env-var changes pick up without
+    # a restart and the test suite can monkey-patch values per run.
+    from config import settings as _live_settings
+
+    age_hours = float(getattr(_live_settings, "STALE_ORDER_AGE_HOURS", 6.0) or 6.0)
+    residual_shares = float(
+        getattr(_live_settings, "STALE_ORDER_RESIDUAL_SHARES", 1.0) or 0.0
+    )
+    drift_multiple = float(
+        getattr(_live_settings, "STALE_ORDER_PRICE_DRIFT_MULTIPLE", 2.5) or 0.0
+    )
+    age_hours_no_mid = float(
+        getattr(_live_settings, "STALE_ORDER_AGE_HOURS_NO_MID", age_hours * 4) or (age_hours * 4)
+    )
+
     summary["scanned"] = len(open_orders)
-    age_cutoff = utcnow() - timedelta(hours=_STALE_OPEN_ORDER_AGE_HOURS)
+    age_cutoff = utcnow() - timedelta(hours=age_hours)
     candidates: list[tuple[Any, str]] = []
     token_ids: set[str] = set()
     for order in open_orders:
@@ -590,7 +601,7 @@ async def _sweep_stale_open_orders() -> dict[str, Any]:
             target = str(order.clob_order_id or order.id or "").strip()
             if not target:
                 continue
-            if remaining < _STALE_OPEN_ORDER_RESIDUAL_SHARES:
+            if residual_shares > 0 and remaining < residual_shares:
                 candidates.append((order, "residual_below_min"))
                 continue
             tid = str(getattr(order, "token_id", "") or "").strip()
@@ -639,21 +650,21 @@ async def _sweep_stale_open_orders() -> dict[str, Any]:
             limit = 0.0
         side = getattr(order, "side", None)
         side_text = str(getattr(side, "value", side) or "").strip().upper()
-        if mid > 0 and limit > 0:
-            if side_text == "SELL" and limit >= mid * _STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE:
+        if mid > 0 and limit > 0 and drift_multiple > 0:
+            if side_text == "SELL" and limit >= mid * drift_multiple:
                 cancellable.append((order, f"sell_far_above_mid mid={mid:.4f}"))
                 continue
-            if side_text == "BUY" and mid >= limit * _STALE_OPEN_ORDER_PRICE_DRIFT_MULTIPLE:
+            if side_text == "BUY" and mid >= limit * drift_multiple:
                 cancellable.append((order, f"buy_far_below_mid mid={mid:.4f}"))
                 continue
         # No mid available — fall back to age-only cancellation if the
-        # order is significantly older than the threshold.
+        # order is significantly older than the configured threshold.
         try:
-            age_hours = (utcnow() - order.created_at).total_seconds() / 3600.0
+            order_age_hours = (utcnow() - order.created_at).total_seconds() / 3600.0
         except Exception:
-            age_hours = 0.0
-        if age_hours >= _STALE_OPEN_ORDER_AGE_HOURS * 4:
-            cancellable.append((order, f"age_only hours={age_hours:.1f}"))
+            order_age_hours = 0.0
+        if order_age_hours >= age_hours_no_mid:
+            cancellable.append((order, f"age_only hours={order_age_hours:.1f}"))
 
     for order, reason in cancellable:
         target = str(order.clob_order_id or order.id or "").strip()

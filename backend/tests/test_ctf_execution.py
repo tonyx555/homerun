@@ -141,3 +141,92 @@ async def test_send_safe_call_uses_pending_owner_nonce(monkeypatch):
     assert ("0xowner", "pending") in w3.eth.nonce_calls
     assert w3._built_txs
     assert w3._built_txs[0]["nonce"] == 13
+
+
+# ── Redeemer guard math ─────────────────────────────────────────────
+#
+# These tests cover the pure-function payout math used by the redeemer
+# guard. They lock in the world-class invariant that the bot never
+# auto-burns gas on $0-payout redemptions, and that fractional / scalar
+# resolutions allocate proceeds proportionally to the slot numerators.
+
+
+def test_redeemer_payout_winning_yes_position_returns_full_balance():
+    # Binary YES win: numerator[0]=1, numerator[1]=0, denominator=1.
+    # Wallet holds 100 shares of slot 0 → payout = 100 * 1/1 = 100.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=1,
+        outcome_balances={0: 100.0},
+        outcome_numerators={0: 1, 1: 0},
+    )
+    assert breakdown["expected_payout_usd"] == pytest.approx(100.0)
+    assert breakdown["winning_shares"] == pytest.approx(100.0)
+    assert breakdown["losing_shares"] == pytest.approx(0.0)
+
+
+def test_redeemer_payout_losing_no_position_returns_zero():
+    # Binary YES win, wallet held NO (slot 1). Payout = 0; this is the
+    # case the guard MUST catch to avoid burning gas to redeem dust.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=1,
+        outcome_balances={1: 50.0},
+        outcome_numerators={0: 1, 1: 0},
+    )
+    assert breakdown["expected_payout_usd"] == 0.0
+    assert breakdown["winning_shares"] == 0.0
+    assert breakdown["losing_shares"] == pytest.approx(50.0)
+
+
+def test_redeemer_payout_split_position_winning_and_losing_legs():
+    # Wallet held both YES and NO (combined-position remnant).
+    # YES wins: payout = balance[0] only.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=1,
+        outcome_balances={0: 30.0, 1: 70.0},
+        outcome_numerators={0: 1, 1: 0},
+    )
+    assert breakdown["expected_payout_usd"] == pytest.approx(30.0)
+    assert breakdown["winning_shares"] == pytest.approx(30.0)
+    assert breakdown["losing_shares"] == pytest.approx(70.0)
+
+
+def test_redeemer_payout_scalar_resolution_proportional_to_numerator():
+    # Scalar / fractional resolution: numerators sum to denominator but
+    # neither is the full payout. Slot 0 paid 0.4, slot 1 paid 0.6.
+    # Holding 50 of slot 0 + 50 of slot 1 => 50*0.4 + 50*0.6 = 50.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=10,
+        outcome_balances={0: 50.0, 1: 50.0},
+        outcome_numerators={0: 4, 1: 6},
+    )
+    assert breakdown["expected_payout_usd"] == pytest.approx(50.0)
+    # Both slots have positive numerator → both count as "winning".
+    assert breakdown["winning_shares"] == pytest.approx(100.0)
+    assert breakdown["losing_shares"] == pytest.approx(0.0)
+
+
+def test_redeemer_payout_unresolved_market_returns_zero_payout():
+    # Denominator <= 0 means the condition isn't resolved yet — math is
+    # undefined; we report zero payout so the guard skips redemption.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=0,
+        outcome_balances={0: 100.0},
+        outcome_numerators={0: 1, 1: 0},
+    )
+    assert breakdown["expected_payout_usd"] == 0.0
+    assert breakdown["total_shares"] == pytest.approx(100.0)
+    assert breakdown["losing_shares"] == pytest.approx(100.0)
+
+
+def test_redeemer_payout_missing_numerator_treated_as_zero():
+    # If we couldn't read a slot numerator (RPC failure → defaulted to
+    # 0), we should under-redeem rather than over-estimate. Held slot
+    # missing from the numerator dict counts as a losing balance.
+    breakdown = CTFExecutionService.compute_condition_payout_breakdown(
+        denominator=1,
+        outcome_balances={0: 100.0, 5: 25.0},  # slot 5 unknown
+        outcome_numerators={0: 1, 1: 0},
+    )
+    assert breakdown["expected_payout_usd"] == pytest.approx(100.0)
+    assert breakdown["winning_shares"] == pytest.approx(100.0)
+    assert breakdown["losing_shares"] == pytest.approx(25.0)

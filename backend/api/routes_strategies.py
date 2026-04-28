@@ -1220,6 +1220,35 @@ async def get_unified_docs():
                 "StrategySDK.get_trade_volume(token_id, lookback_seconds)": "Buy/sell volume summary",
                 "StrategySDK.get_buy_sell_imbalance(token_id, lookback_seconds)": "Order-flow imbalance in [-1, 1]",
             },
+            "crypto_helpers": {
+                # Surface backed by services/strategy_helpers/crypto_strategy_utils.py.
+                # Strategies access these via the StrategySDK.crypto namespace —
+                # no direct import of the helpers module needed.
+                "StrategySDK.crypto.pick_oracle_source(row, prefer=...)": "Pick the freshest oracle source from a payload row, with binance_direct preferred by default",
+                "StrategySDK.crypto.extract_oracle_status(live_market=..., payload=..., now_ms=...)": "Layered oracle status extraction (price, age, source, freshness flags) from live + payload candidates",
+                "StrategySDK.crypto.parse_oracle_point(raw, source_hint=..., now_ms=...)": "Normalize a single by-source oracle entry into {source, price, updated_at_ms, age_ms}",
+                "StrategySDK.crypto.normalize_oracle_source(value)": "Canonicalize labels to chainlink / binance_direct / binance / lowercase passthrough",
+                "StrategySDK.crypto.resolve_oracle_availability(price=, price_to_beat=, age_ms=, updated_at_ms=)": "Compute freshness + directional availability flags from oracle components",
+                "StrategySDK.crypto.to_epoch_ms(value)": "Coerce numeric timestamp to epoch ms (seconds auto-detected by magnitude)",
+                "StrategySDK.crypto.compute_age_ms(age_ms=, age_seconds=, updated_at_ms=, now_ms=)": "Resolve oracle age in ms from any of three input shapes",
+                "StrategySDK.crypto.normalize_timeframe(value)": "Canonicalize 5m/15m/1h/4h variants",
+                "StrategySDK.crypto.timeframe_seconds(value)": "Window length in seconds for a Polymarket crypto timeframe",
+                "StrategySDK.crypto.default_min_seconds_left_for_entry(timeframe)": "Per-timeframe minimum seconds-left runway for a fresh entry",
+                "StrategySDK.crypto.default_max_market_data_age_ms(timeframe)": "Per-timeframe market-data freshness cap",
+                "StrategySDK.crypto.default_max_oracle_age_ms(timeframe)": "Per-timeframe oracle staleness cap",
+                "StrategySDK.crypto.build_binary_crypto_market(row)": "Construct a typed Market from a crypto_update worker row",
+                "StrategySDK.crypto.seconds_left_from_row(row, fallback_seconds=...)": "Time-to-resolution from a worker row",
+                "StrategySDK.crypto.spread_pct_from_row(row)": "Bid-ask spread as a fraction from a worker row",
+                "StrategySDK.crypto.market_ml_probability_yes(row)": "Extract clipped ML-predicted YES probability from a row",
+                "StrategySDK.crypto.history_cancel_peak(history_tail)": "Peak cancel rate observed in a maker history tail",
+                "StrategySDK.crypto.taker_fee_pct(entry_price)": "Polymarket taker fee as a fraction of price",
+                "StrategySDK.crypto.fee_aware_min_edge_pct(price, multiplier=2.0)": "Minimum edge-percent threshold needed to clear taker fees by multiplier",
+                "StrategySDK.crypto.first_present(*values)": "First non-None value (skips None only — preserves 0/empty/False)",
+                "StrategySDK.crypto.normalize_ratio(value)": "Coerce to a [0, 1] ratio, or None",
+                "StrategySDK.crypto.normalize_signed_ratio(value)": "Coerce to a [-1, +1] ratio, or None",
+                "StrategySDK.crypto.bounded_sigmoid(z)": "Sigmoid clamped to safe range",
+                "StrategySDK.crypto.parse_datetime_utc(value)": "Best-effort datetime parsing, always tz-aware UTC",
+            },
             "llm_and_news_helpers": {
                 "StrategySDK.ask_llm(...)": "Text LLM call with strategy-safe fallback",
                 "StrategySDK.ask_llm_json(...)": "Structured JSON LLM call",
@@ -1262,7 +1291,12 @@ async def get_unified_docs():
                 "services.ws_feeds": "WebSocket market data feeds",
                 "services.chainlink_feed": "Chainlink oracle price feeds",
                 "services.fee_model": "Fee calculation model",
-                "services.strategy_sdk": ("Strategy utilities including full data-source workflows via StrategySDK.*"),
+                "services.strategy_sdk": (
+                    "Strategy utilities and the canonical entry point for all helpers. "
+                    "StrategySDK.* covers orderbook, sizing, news, AI, fees, traders, and more. "
+                    "StrategySDK.crypto.* re-exports services.strategy_helpers.crypto_strategy_utils — "
+                    "use this for crypto oracle/timeframe/fee helpers without a direct import."
+                ),
                 "services.data_source_sdk": (
                     "Full source SDK: list/get/validate/create/update/delete/reload/run and record access"
                 ),

@@ -7,6 +7,30 @@ Import it in your strategy code with:
     from services.strategy_sdk import StrategySDK
 
 All methods are designed to be safe and handle missing data gracefully.
+
+Live orderbook access (sub-200ms p50 via Polymarket CLOB WebSocket):
+
+    StrategySDK.get_best_bid_ask(market, side)
+    StrategySDK.get_book_levels(market, side, max_levels)
+    StrategySDK.get_order_book_depth(market, side, size_usd)  # VWAP + slippage
+    StrategySDK.get_book_imbalance(market, side, levels)      # signed [-1, +1]
+
+These read from the WS-fed PriceCache in services.ws_feeds.FeedManager.
+The token must be subscribed; production strategies should call
+``feed_manager.polymarket_feed.subscribe(token_ids=...)`` once on market
+discovery to keep the cache warm.
+
+Rolling per-market price history:
+
+    StrategySDK.MarketPriceHistory  # @dataclass, window-evicting deque
+    StrategySDK.PriceSnapshot       # single (yes, no) observation
+
+Both are available as class attributes; instantiate directly:
+
+    history = StrategySDK.MarketPriceHistory(window_seconds=60)
+    history.record(yes_price=0.55, no_price=0.45)
+    if history.has_data:
+        vol = history.recent_volatility()
 """
 
 from __future__ import annotations
@@ -19,6 +43,13 @@ import re
 import time
 from typing import Any, Optional
 from utils.converters import coerce_bool as _coerce_bool
+from services.strategy_helpers.crypto_scope import (
+    CRYPTO_SCOPE_DEFAULTS,
+    crypto_scope_config_schema as _crypto_scope_config_schema,
+    normalize_crypto_legacy_config as _normalize_crypto_legacy_config,
+)
+from services.strategy_helpers.price_history import MarketPriceHistory, PriceSnapshot
+from services.strategy_helpers import crypto_strategy_utils as _crypto_utils
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +71,61 @@ class StrategySDK:
             StrategySDK.ask_llm("Analyze this market situation...")
         )
     """
+
+    # Re-exports of the price-history dataclasses so any strategy can do
+    # ``StrategySDK.MarketPriceHistory(window_seconds=60)`` without
+    # importing from the helpers module directly.
+    MarketPriceHistory = MarketPriceHistory
+    PriceSnapshot = PriceSnapshot
+
+    # Re-exports of the crypto-strategy scope helpers, available to any
+    # strategy without a direct import. Use these to honor the same
+    # default config / schema / legacy-migration behavior as the shipped
+    # crypto strategies.
+    CRYPTO_SCOPE_DEFAULTS = CRYPTO_SCOPE_DEFAULTS
+
+    @staticmethod
+    def crypto_scope_config_schema() -> dict[str, Any]:
+        """Return the param-fields schema used by crypto strategy config UIs."""
+        return _crypto_scope_config_schema()
+
+    @staticmethod
+    def normalize_crypto_legacy_config(config: Any) -> dict[str, Any]:
+        """Apply legacy-config migrations to any crypto strategy's config.
+
+        Idempotent — safe to call repeatedly. Migrates deprecated oracle-gate
+        defaults and removed sub-strategy tokens; passes current configs
+        through unchanged.
+        """
+        return _normalize_crypto_legacy_config(config)
+
+    # Crypto-strategy utility namespace.
+    #
+    # All public functions in services.strategies.crypto_strategy_utils are
+    # accessible via ``StrategySDK.crypto.<name>(...)`` so a strategy never
+    # needs to import that file directly. This is the canonical entry point
+    # for crypto helpers — anything that lives there is fair game from any
+    # strategy.
+    #
+    # Examples:
+    #     pick = StrategySDK.crypto.pick_oracle_source(row, prefer="binance_direct")
+    #     status = StrategySDK.crypto.extract_oracle_status(
+    #         live_market=lm, payload=p, now_ms=int(time.time() * 1000),
+    #     )
+    #     tf = StrategySDK.crypto.normalize_timeframe(row["timeframe"])
+    #     fee_pct = StrategySDK.crypto.taker_fee_pct(entry_price)
+    #
+    # Surface includes: oracle (pick_oracle_source, extract_oracle_status,
+    # parse_oracle_point, normalize_oracle_source, resolve_oracle_availability,
+    # to_epoch_ms, compute_age_ms), timeframe (normalize_timeframe,
+    # timeframe_seconds, default_min_seconds_left_for_entry,
+    # default_max_market_data_age_ms, default_max_oracle_age_ms), market
+    # construction (build_binary_crypto_market, build_binary_market_from_row),
+    # row helpers (seconds_left_from_row, spread_pct_from_row,
+    # market_ml_probability_yes, history_cancel_peak), fee (taker_fee_pct,
+    # fee_aware_min_edge_pct), and generic (first_present, normalize_ratio,
+    # normalize_signed_ratio, bounded_sigmoid, parse_datetime_utc).
+    crypto = _crypto_utils
 
     _ai_instance = None
 
@@ -2205,6 +2291,46 @@ class StrategySDK:
         return None
 
     # ── Order book depth ───────────────────────────────────────
+    #
+    # Both methods read the live orderbook from the WebSocket-fed PriceCache
+    # in services.ws_feeds.FeedManager. The CLOB WS handler in ws_feeds.py
+    # ingests `book` snapshots and `price_change` deltas in real time
+    # (measured ~176ms p50 send-to-receive); calls here are O(1) reads
+    # against that in-process cache.
+    #
+    # Token must already be subscribed (FeedManager.polymarket_feed.subscribe).
+    # Strategies that operate on transient markets should subscribe once on
+    # discovery; the global runtime keeps the subscription alive until
+    # eviction.
+
+    @staticmethod
+    def _resolve_token_id(market: Any, side: str) -> Optional[str]:
+        """Return the CLOB token id for the requested side, or None.
+
+        Side semantics: YES → index 0, NO → index 1 (Polymarket convention
+        for binary markets). Accepts either a Market-shaped object (uses
+        ``getattr``) or a raw dict (uses ``.get``) — strategies that work
+        from worker payloads commonly pass dicts; opportunity strategies
+        pass typed Market objects.
+
+        Returns None when the market lacks token ids for the requested
+        side; logs at debug since this is usually a not-yet-loaded market
+        rather than a bug.
+        """
+        if isinstance(market, dict):
+            token_ids = market.get("clob_token_ids") or []
+            market_label = market.get("id") or market.get("condition_id") or "?"
+        else:
+            token_ids = getattr(market, "clob_token_ids", None) or []
+            market_label = getattr(market, "id", "?")
+        token_idx = 0 if str(side).upper() == "YES" else 1
+        if len(token_ids) <= token_idx:
+            logger.debug(
+                "StrategySDK orderbook lookup: market %s has no token id for side=%s",
+                market_label, side,
+            )
+            return None
+        return str(token_ids[token_idx])
 
     @staticmethod
     def get_order_book_depth(
@@ -2212,51 +2338,67 @@ class StrategySDK:
         side: str = "YES",
         size_usd: float = 100.0,
     ) -> Optional[dict]:
-        """Get order book depth analysis for a market side.
+        """Estimate execution cost for a target buy size on one side.
 
-        Uses the internal VWAP calculator to estimate execution cost,
-        slippage, and fill probability for a given position size.
+        Walks the live ask book from the PriceCache and runs it through
+        VWAPCalculator (services.optimization.vwap) to produce VWAP,
+        slippage, and fill probability for ``size_usd`` of buying pressure.
 
         Args:
-            market: A Market object.
-            side: 'YES' or 'NO'.
-            size_usd: Position size in USD to estimate execution for.
+            market: A Market object with ``clob_token_ids``.
+            side: 'YES' or 'NO' — which side's ask book to walk.
+            size_usd: Notional buy size in USD.
 
         Returns:
-            Dict with depth analysis, or None if unavailable:
+            Dict with execution estimate, or None when the orderbook is
+            unavailable (token not subscribed, cache empty, or feed down):
             {
-                "vwap_price": float,       # Volume-weighted avg price
-                "slippage_bps": float,     # Slippage in basis points
-                "fill_probability": float, # Estimated fill probability (0-1)
-                "available_liquidity": float,  # Liquidity at this level
+                "vwap_price": float,        # weighted avg fill price
+                "slippage_bps": float,      # slippage from best ask in bps
+                "fill_probability": float,  # 0..1
+                "available_liquidity": float,  # USD of book reachable
+                "is_fresh": bool,           # PriceCache staleness check
+                "staleness_ms": float,      # age of the cached book
             }
         """
-        try:
-            from services.optimization.vwap import vwap_calculator
-
-            if not vwap_calculator:
-                return None
-
-            token_idx = 0 if side.upper() == "YES" else 1
-            token_ids = getattr(market, "clob_token_ids", None) or []
-            if len(token_ids) <= token_idx:
-                return None
-
-            result = vwap_calculator.estimate_execution(
-                token_id=token_ids[token_idx],
-                size_usd=size_usd,
-            )
-            if result is None:
-                return None
-
-            return {
-                "vwap_price": result.get("vwap_price", 0),
-                "slippage_bps": result.get("slippage_bps", 0),
-                "fill_probability": result.get("fill_probability", 1.0),
-                "available_liquidity": result.get("available_liquidity", 0),
-            }
-        except Exception:
+        token_id = StrategySDK._resolve_token_id(market, side)
+        if token_id is None:
             return None
+        try:
+            from services.ws_feeds import get_feed_manager
+            from services.optimization.vwap import VWAPCalculator
+        except ImportError as e:
+            logger.error("StrategySDK orderbook deps unavailable: %s", e)
+            return None
+
+        cache = get_feed_manager().cache
+        order_book = cache.get_order_book(token_id)
+        if order_book is None:
+            logger.debug(
+                "StrategySDK.get_order_book_depth: no cached book for token %s "
+                "(market %s, side %s) — token may not be subscribed",
+                token_id[:18], getattr(market, "id", "?"), side,
+            )
+            return None
+
+        try:
+            result = VWAPCalculator().calculate_buy_vwap(order_book, size_usd)
+        except Exception as e:
+            logger.exception(
+                "StrategySDK.get_order_book_depth: VWAP failed for token %s: %s",
+                token_id[:18], e,
+            )
+            return None
+
+        staleness_s = cache.staleness(token_id) or 0.0
+        return {
+            "vwap_price": float(result.vwap),
+            "slippage_bps": float(result.slippage_bps),
+            "fill_probability": float(result.fill_probability),
+            "available_liquidity": float(result.total_available),
+            "is_fresh": cache.is_fresh(token_id),
+            "staleness_ms": round(staleness_s * 1000.0, 1),
+        }
 
     @staticmethod
     def get_book_levels(
@@ -2264,33 +2406,99 @@ class StrategySDK:
         side: str = "YES",
         max_levels: int = 10,
     ) -> Optional[list[dict]]:
-        """Get raw order book levels (bids or asks) for a market side.
+        """Read raw orderbook levels for a market side from the live cache.
+
+        Returns the *bids* side when ``side="YES"`` would be reading the
+        YES token's book — but here we follow the historical SDK contract
+        which returns *asks* (i.e. the side a buyer would lift). This
+        matches what callers reading "what's available to buy at this
+        side" expect.
 
         Args:
-            market: A Market object.
+            market: A Market object with ``clob_token_ids``.
             side: 'YES' or 'NO'.
-            max_levels: Maximum number of price levels to return.
+            max_levels: Cap on returned levels.
 
         Returns:
-            List of {price, size} dicts sorted by best price, or None.
+            List of ``{"price": float, "size": float}`` sorted from best
+            (lowest ask) outward, or None when the book is unavailable.
         """
-        try:
-            from services.optimization.vwap import vwap_calculator
-
-            if not vwap_calculator:
-                return None
-
-            token_idx = 0 if side.upper() == "YES" else 1
-            token_ids = getattr(market, "clob_token_ids", None) or []
-            if len(token_ids) <= token_idx:
-                return None
-
-            return vwap_calculator.get_book_levels(
-                token_id=token_ids[token_idx],
-                max_levels=max_levels,
-            )
-        except Exception:
+        token_id = StrategySDK._resolve_token_id(market, side)
+        if token_id is None:
             return None
+        try:
+            from services.ws_feeds import get_feed_manager
+        except ImportError as e:
+            logger.error("StrategySDK orderbook deps unavailable: %s", e)
+            return None
+
+        cache = get_feed_manager().cache
+        order_book = cache.get_order_book(token_id)
+        if order_book is None:
+            logger.debug(
+                "StrategySDK.get_book_levels: no cached book for token %s "
+                "(market %s, side %s) — token may not be subscribed",
+                token_id[:18], getattr(market, "id", "?"), side,
+            )
+            return None
+
+        levels = order_book.asks[: max(0, int(max_levels))]
+        return [{"price": float(lvl.price), "size": float(lvl.size)} for lvl in levels]
+
+    @staticmethod
+    def get_best_bid_ask(market: Any, side: str = "YES") -> Optional[tuple[float, float]]:
+        """Return ``(best_bid, best_ask)`` for one side from the live cache.
+
+        Returns None when the token isn't subscribed or the cache is empty.
+        """
+        token_id = StrategySDK._resolve_token_id(market, side)
+        if token_id is None:
+            return None
+        try:
+            from services.ws_feeds import get_feed_manager
+        except ImportError as e:
+            logger.error("StrategySDK orderbook deps unavailable: %s", e)
+            return None
+        return get_feed_manager().cache.get_best_bid_ask(token_id)
+
+    @staticmethod
+    def get_book_imbalance(
+        market: Any,
+        side: str = "YES",
+        levels: int = 5,
+    ) -> Optional[float]:
+        """Compute live book imbalance from the WS-fed cache.
+
+        Returns ``(bid_size_top_N - ask_size_top_N) / (bid_size_top_N + ask_size_top_N)``
+        in [-1, +1] using the top ``levels`` price levels of each side.
+        Positive values mean a heavier bid side (buy-pressure leaning),
+        negative values mean a heavier ask side. None when the book is
+        unavailable or both sides are empty.
+
+        Computed against live data — preferred over scanner-emitted
+        ``orderbook_imbalance`` payload fields, which are stale by one
+        scanner cycle (typically 1-5s). Sub-200ms freshness via the WS
+        cache.
+        """
+        token_id = StrategySDK._resolve_token_id(market, side)
+        if token_id is None:
+            return None
+        try:
+            from services.ws_feeds import get_feed_manager
+        except ImportError as e:
+            logger.error("StrategySDK orderbook deps unavailable: %s", e)
+            return None
+
+        order_book = get_feed_manager().cache.get_order_book(token_id)
+        if order_book is None:
+            return None
+        n = max(1, int(levels))
+        bid_size = sum(float(lvl.size) for lvl in order_book.bids[:n])
+        ask_size = sum(float(lvl.size) for lvl in order_book.asks[:n])
+        denom = bid_size + ask_size
+        if denom <= 0.0:
+            return None
+        return (bid_size - ask_size) / denom
 
     # ── Historical price access ────────────────────────────────
 

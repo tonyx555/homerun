@@ -81,13 +81,15 @@ _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _POST_END_EXTREME_MARK_GRACE_SECONDS = 900.0
 _TERMINAL_EXTREME_MARK_THRESHOLD = 0.001
-_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 12.0
-# Retries specifically exist because the provider is slow/flaky; giving them
-# a tighter budget than the primary path guaranteed TimeoutErrors whenever
-# Polymarket took >3s to acknowledge a sell.  Match the primary's budget so
-# retries actually complete instead of burning retry_count on timeouts that
-# the provider would have answered in 5-8s.
-_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 10.0
+_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 5.0
+# Retries: same 5s budget.  Polymarket's CLOB submit acknowledges in
+# ~200-800ms when the market is healthy.  A request that hasn't come
+# back in 5s is going to time out anyway — the prior 12s budget just
+# burned more wall-time per stuck attempt without changing the outcome.
+# This bounds the worst-case per-candidate processing on stuck-exit
+# orders (e.g. orders on untradable markets) so they can't blow a
+# 30s reconcile cycle by themselves.
+_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 5.0
 # Cap the number of exits we submit per reconcile pass.  With 20+ stuck
 # retry candidates each taking up to 10s sequentially, a single pass can
 # burn 200+ seconds — blowing the reconciliation worker's 30s per-trader
@@ -6351,6 +6353,48 @@ async def reconcile_live_positions(
         pending_market_info = market_info_by_id.get(str(row.market_id or ""))
         pending_market_tradable = polymarket_client.is_market_tradable(pending_market_info, now=now)
         pending_winning_idx = _extract_winning_outcome_index(pending_market_info)
+
+        # ── Permanent-block short-circuit ──────────────────────────────
+        # Order 350ebe8b on 2026-04-27 spent 18.4s of every reconcile
+        # cycle re-attempting a SELL into a market the CLOB no longer
+        # accepts (market_tradable=false), eating the 5s execute_live_order
+        # timeout twice (allowance prep + submit) plus retry-state
+        # bookkeeping.  Each attempt failed with TimeoutError, the
+        # blocked-streak counter ratcheted to N, status was set to
+        # blocked_persistent_timeout — but the trigger evaluation
+        # at the END of the loop kept re-firing "Max hold exceeded"
+        # and creating a fresh pending_live_exit on every cycle,
+        # effectively bypassing the persistent-timeout guard.
+        #
+        # Short-circuit here: if the CURRENT pending_exit is in any
+        # terminal-blocked state AND we have market info AND the
+        # market is no longer tradable, just hold the row and skip
+        # the rest of the per-candidate work.  An operator (or a
+        # market resolution → the resolution branches at line 8005
+        # and 7635 will pick it up on a future cycle when wallet/
+        # market data confirms settlement) can clear this state.
+        _pending_exit_now = payload.get("pending_live_exit")
+        if (
+            isinstance(_pending_exit_now, dict)
+            and str(_pending_exit_now.get("status") or "").strip().lower() in {
+                "blocked_persistent_timeout",
+                "blocked_no_inventory",
+                "blocked_retry_exhausted",
+                "blocked_retry_exhausted_hard",
+            }
+            and pending_market_info is not None
+            and not pending_market_tradable
+            # No pending resolution evidence — if there is, the
+            # downstream resolution branches will close the row.
+            and pending_winning_idx is None
+            and wallet_settlement_price is None
+        ):
+            held += 1
+            skipped_reasons["blocked_terminal_untradable"] = (
+                int(skipped_reasons.get("blocked_terminal_untradable", 0)) + 1
+            )
+            continue
+
         pending_winning_idx_inferred = False
         if pending_winning_idx is None and resolution_infer_from_prices:
             inferred_pending_idx = _extract_winning_outcome_index_from_prices(

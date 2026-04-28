@@ -349,6 +349,25 @@ def scanner_payload(settings: AppSettings) -> dict[str, Any]:
     }
 
 
+def redeemer_payload(settings: AppSettings) -> dict[str, Any]:
+    """CTF redeemer policy — what to do with resolved on-chain positions.
+
+    Defaults match config.Settings so unconfigured rows render clean
+    values in the UI without requiring a backfill migration.
+    """
+    return {
+        "min_payout_usd": _with_default(getattr(settings, "redeemer_min_payout_usd", None), 0.10),
+        "max_gas_price_gwei": _with_default(
+            getattr(settings, "redeemer_max_gas_price_gwei", None),
+            200.0,
+        ),
+        "force_including_losers": _with_default(
+            getattr(settings, "redeemer_force_including_losers", None),
+            False,
+        ),
+    }
+
+
 def live_execution_payload(settings: AppSettings) -> dict[str, Any]:
     return {
         "max_trade_size_usd": settings.max_trade_size_usd,
@@ -803,6 +822,15 @@ def apply_update_request(settings: AppSettings, request: Any) -> dict[str, bool]
         settings.max_slippage_percent = trade.max_slippage_percent
         if getattr(trade, "min_account_balance_usd", None) is not None:
             settings.min_account_balance_usd = trade.min_account_balance_usd
+
+    redeemer = getattr(request, "redeemer", None)
+    if redeemer is not None:
+        if getattr(redeemer, "min_payout_usd", None) is not None:
+            settings.redeemer_min_payout_usd = float(redeemer.min_payout_usd)
+        if getattr(redeemer, "max_gas_price_gwei", None) is not None:
+            settings.redeemer_max_gas_price_gwei = float(redeemer.max_gas_price_gwei)
+        if getattr(redeemer, "force_including_losers", None) is not None:
+            settings.redeemer_force_including_losers = bool(redeemer.force_including_losers)
 
     if maintenance:
         maint = maintenance

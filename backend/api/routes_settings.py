@@ -42,6 +42,7 @@ from api.settings_helpers import (
     notifications_payload,
     oracle_payload,
     polymarket_payload,
+    redeemer_payload,
     scanner_payload,
     search_filters_payload,
     live_execution_payload,
@@ -229,6 +230,31 @@ class LiveExecutionSettings(BaseModel):
         default=0.0,
         ge=0.0,
         description="Minimum USDC balance to keep in Polymarket account after buy orders",
+    )
+
+
+class RedeemerSettings(BaseModel):
+    """CTF redeemer policy — when to claim resolved on-chain positions.
+
+    The redeemer worker scans the wallet every 2 minutes and, on operator
+    request, calls ``redeemPositions`` to convert resolved conditional
+    tokens into USDC. Winning outcomes pay $1/share; losing outcomes pay
+    $0/share (gas-only burn). These settings make that trade-off explicit.
+    """
+
+    min_payout_usd: float = Field(
+        default=0.10,
+        ge=0.0,
+        description="Skip redemption when expected USDC payout for the condition is below this floor",
+    )
+    max_gas_price_gwei: float = Field(
+        default=200.0,
+        ge=1.0,
+        description="Skip redemption when network gas price exceeds this ceiling (defer to cheaper window)",
+    )
+    force_including_losers: bool = Field(
+        default=False,
+        description="Operator override: redeem $0-payout positions too (gas burn for wallet hygiene)",
     )
 
 
@@ -761,6 +787,7 @@ class AllSettings(BaseModel):
     notifications: NotificationSettings
     scanner: ScannerSettingsModel
     live_execution: LiveExecutionSettings
+    redeemer: RedeemerSettings
     maintenance: MaintenanceSettings
     discovery: DiscoverySettings
     trading_proxy: TradingProxySettings
@@ -781,6 +808,7 @@ class UpdateSettingsRequest(BaseModel):
     notifications: Optional[NotificationSettings] = None
     scanner: Optional[ScannerSettingsModel] = None
     live_execution: Optional[LiveExecutionSettings] = None
+    redeemer: Optional[RedeemerSettings] = None
     maintenance: Optional[MaintenanceSettings] = None
     discovery: Optional[DiscoverySettings] = None
     trading_proxy: Optional[TradingProxySettings] = None
@@ -2344,6 +2372,7 @@ async def get_settings():
             notifications=NotificationSettings(**notifications_payload(settings)),
             scanner=ScannerSettingsModel(**scanner_payload(settings)),
             live_execution=LiveExecutionSettings(**live_execution_payload(settings)),
+            redeemer=RedeemerSettings(**redeemer_payload(settings)),
             maintenance=MaintenanceSettings(**maintenance_payload(settings)),
             discovery=DiscoverySettings(**discovery_payload(settings)),
             trading_proxy=TradingProxySettings(**trading_proxy_payload(settings)),
@@ -2564,6 +2593,19 @@ async def get_live_execution_settings():
 async def update_live_execution_settings(request: LiveExecutionSettings):
     """Update live execution settings only"""
     return await update_settings(UpdateSettingsRequest(live_execution=request))
+
+
+@router.get("/redeemer")
+async def get_redeemer_settings():
+    """Get CTF redeemer policy."""
+    settings = await get_or_create_settings()
+    return RedeemerSettings(**redeemer_payload(settings))
+
+
+@router.put("/redeemer")
+async def update_redeemer_settings(request: RedeemerSettings):
+    """Update CTF redeemer policy."""
+    return await update_settings(UpdateSettingsRequest(redeemer=request))
 
 
 @router.get("/maintenance")
