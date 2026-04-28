@@ -2607,6 +2607,23 @@ class TelegramNotifier:
     def _record_send(self) -> None:
         self._send_timestamps.append(time.monotonic())
 
+    async def send_operator_alert(self, text: str, *, category: str = "operator") -> None:
+        """Public API for non-trading-flow components to surface
+        operator-facing alerts via Telegram.
+
+        ``category`` is a free-form tag for log/observability — the
+        existing internal alert paths (issue_alerts, position_close,
+        websocket health) call ``_enqueue`` directly.  This wrapper
+        gives external callers a stable surface without needing to
+        reach into the underscore-prefixed internals.
+        """
+        if not text:
+            return
+        normalized = str(text).strip()
+        if not normalized:
+            return
+        await self._enqueue(normalized)
+
     async def _enqueue(self, text: str) -> None:
         if not self._bot_token or not self._chat_id:
             return

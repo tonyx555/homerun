@@ -743,6 +743,185 @@ class CTFExecutionService:
             "losing_shares": losing_shares,
         }
 
+    async def fetch_position_chain_status(
+        self,
+        *,
+        wallet_address: str,
+        token_id: str,
+        condition_id: str,
+        outcome_index: int,
+    ) -> dict[str, Any]:
+        """Read-only on-chain truth for a single conditional-token holding.
+
+        Returns a structured dict with the wallet's CTF balance, the
+        market's resolution state, and the deterministic redeemable
+        payout if redemption fired right now.
+
+        This is the institutional-grade truth primitive: it talks to
+        Polygon mainnet directly (NOT Polymarket's data API), so the
+        answer is exactly what an auditor would compute from on-chain
+        evidence.  Callers (the stuck-position monitor, the
+        manual-writeoff API, the verifier's resolution path) should
+        prefer this over polymarket_client when they need certainty
+        rather than UI-grade freshness.
+
+        Returned shape::
+
+          {
+            "wallet_address":        str (lowercase),
+            "token_id":              str,
+            "condition_id":          str (0x-prefixed bytes32),
+            "outcome_index":         int,
+            "wallet_balance_shares": float,   # ERC1155 balanceOf / 1e6
+            "market_resolved":       bool,    # payoutDenominator > 0
+            "payout_denominator":    int,
+            "payout_numerator":      int,     # for THIS outcome slot
+            "winning":               bool|None,  # numerator > 0
+            "expected_payout_usdc":  float,   # balance * num/den
+            "block_number":          int,     # for audit traceability
+            "error":                 str|None,
+          }
+
+        ALL numerical values come from chain reads, NOT data-API.  No
+        caching at this layer — the caller is responsible for not
+        spamming this method.
+        """
+        normalized_wallet = (wallet_address or "").strip().lower()
+        normalized_token = (token_id or "").strip()
+        normalized_condition = (condition_id or "").strip().lower()
+        if not normalized_wallet or not normalized_token or not normalized_condition:
+            return {
+                "wallet_address": normalized_wallet,
+                "token_id": normalized_token,
+                "condition_id": normalized_condition,
+                "outcome_index": int(outcome_index),
+                "wallet_balance_shares": 0.0,
+                "market_resolved": False,
+                "payout_denominator": 0,
+                "payout_numerator": 0,
+                "winning": None,
+                "expected_payout_usdc": 0.0,
+                "block_number": 0,
+                "error": "missing_required_input",
+            }
+        if not normalized_condition.startswith("0x") or len(normalized_condition) != 66:
+            return {
+                "wallet_address": normalized_wallet,
+                "token_id": normalized_token,
+                "condition_id": normalized_condition,
+                "outcome_index": int(outcome_index),
+                "wallet_balance_shares": 0.0,
+                "market_resolved": False,
+                "payout_denominator": 0,
+                "payout_numerator": 0,
+                "winning": None,
+                "expected_payout_usdc": 0.0,
+                "block_number": 0,
+                "error": "invalid_condition_id_format",
+            }
+        try:
+            token_id_uint = int(normalized_token)
+        except (TypeError, ValueError):
+            return {
+                "wallet_address": normalized_wallet,
+                "token_id": normalized_token,
+                "condition_id": normalized_condition,
+                "outcome_index": int(outcome_index),
+                "wallet_balance_shares": 0.0,
+                "market_resolved": False,
+                "payout_denominator": 0,
+                "payout_numerator": 0,
+                "winning": None,
+                "expected_payout_usdc": 0.0,
+                "block_number": 0,
+                "error": "invalid_token_id_format",
+            }
+
+        try:
+            w3 = await self._get_web3()
+        except Exception as exc:
+            return {
+                "wallet_address": normalized_wallet,
+                "token_id": normalized_token,
+                "condition_id": normalized_condition,
+                "outcome_index": int(outcome_index),
+                "wallet_balance_shares": 0.0,
+                "market_resolved": False,
+                "payout_denominator": 0,
+                "payout_numerator": 0,
+                "winning": None,
+                "expected_payout_usdc": 0.0,
+                "block_number": 0,
+                "error": f"rpc_unavailable:{exc}",
+            }
+
+        ctf = w3.eth.contract(
+            address=w3.to_checksum_address(self.CTF_ADDRESS),
+            abi=self._CTF_ABI,
+        )
+        checksum_wallet = w3.to_checksum_address(normalized_wallet)
+
+        try:
+            block_number, raw_balance, denominator, numerator = await asyncio.gather(
+                asyncio.to_thread(lambda: int(w3.eth.block_number)),
+                asyncio.to_thread(
+                    lambda: int(ctf.functions.balanceOf(checksum_wallet, token_id_uint).call())
+                ),
+                asyncio.to_thread(
+                    lambda: int(ctf.functions.payoutDenominator(normalized_condition).call())
+                ),
+                asyncio.to_thread(
+                    lambda: int(
+                        ctf.functions.payoutNumerators(
+                            normalized_condition, int(outcome_index)
+                        ).call()
+                    )
+                ),
+            )
+        except Exception as exc:
+            return {
+                "wallet_address": normalized_wallet,
+                "token_id": normalized_token,
+                "condition_id": normalized_condition,
+                "outcome_index": int(outcome_index),
+                "wallet_balance_shares": 0.0,
+                "market_resolved": False,
+                "payout_denominator": 0,
+                "payout_numerator": 0,
+                "winning": None,
+                "expected_payout_usdc": 0.0,
+                "block_number": 0,
+                "error": f"rpc_call_failed:{type(exc).__name__}:{exc}",
+            }
+
+        balance_shares = float(raw_balance) / float(10**_USDC_DECIMALS)
+        market_resolved = denominator > 0
+        winning: bool | None
+        if not market_resolved:
+            winning = None
+            expected_payout = 0.0
+        else:
+            winning = numerator > 0
+            if denominator > 0 and balance_shares > 0:
+                expected_payout = balance_shares * (float(numerator) / float(denominator))
+            else:
+                expected_payout = 0.0
+
+        return {
+            "wallet_address": normalized_wallet,
+            "token_id": normalized_token,
+            "condition_id": normalized_condition,
+            "outcome_index": int(outcome_index),
+            "wallet_balance_shares": balance_shares,
+            "market_resolved": market_resolved,
+            "payout_denominator": denominator,
+            "payout_numerator": numerator,
+            "winning": winning,
+            "expected_payout_usdc": expected_payout,
+            "block_number": block_number,
+            "error": None,
+        }
+
     async def _gas_price_gwei(self, w3) -> float:
         # Lightweight TTL cache so a busy redeemer doesn't hammer the RPC.
         # Class-level so cache survives across calls within the process.

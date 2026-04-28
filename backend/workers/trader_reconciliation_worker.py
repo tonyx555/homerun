@@ -74,6 +74,13 @@ _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
 # them via env vars without an alembic migration.
 _STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS = 300.0
 _last_stale_open_order_sweep_at = 0.0
+# Stuck-position surveillance: scan every 5 minutes for orders whose
+# exit retry has been circuit-broken (blocked_persistent_timeout etc.)
+# and where the underlying position can be verified directly on-chain.
+# Pure observation; never writes.  Tunable via env if 5m proves too
+# noisy or too coarse in practice.
+_STUCK_POSITION_SCAN_INTERVAL_SECONDS = 300.0
+_last_stuck_position_scan_at = 0.0
 _STALE_OPEN_ORDER_SWEEP_TIMEOUT_SECONDS = 25.0
 # Polymarket-truth realized P&L verification: every 5 minutes, walk all
 # orders closed today, fetch the wallet's actual on-chain SELL trades,
@@ -529,6 +536,23 @@ async def _sync_live_wallet_positions() -> None:
         )
     except Exception as exc:
         logger.warning("live wallet positions sync failed", exc_info=exc)
+
+
+async def _scan_stuck_positions_throttled() -> None:
+    """Run the stuck-position surveillance pass once per
+    ``_STUCK_POSITION_SCAN_INTERVAL_SECONDS``.  No-ops if not yet due.
+    """
+    global _last_stuck_position_scan_at
+    now_mono = time.monotonic()
+    if (now_mono - _last_stuck_position_scan_at) < _STUCK_POSITION_SCAN_INTERVAL_SECONDS:
+        return
+    _last_stuck_position_scan_at = now_mono
+    try:
+        from services.stuck_position_monitor import run_stuck_position_scan_once
+
+        await run_stuck_position_scan_once()
+    except Exception as exc:
+        logger.warning("stuck_position_monitor pass failed", exc_info=exc)
 
 
 async def _sweep_stale_open_orders() -> dict[str, Any]:
@@ -1503,6 +1527,17 @@ async def run_worker_loop() -> None:
                     await _sweep_stale_open_orders()
                 except Exception as exc:
                     logger.warning("stale-order sweep failed", exc_info=exc)
+                # Surveillance pass: scan for orders in
+                # blocked-terminal exit states whose underlying position
+                # is verifiable on-chain.  Pure observation — never
+                # writes to trader_orders.  Emits Telegram alerts for
+                # operator-intervention rows; rows that the redeemer
+                # or verifier will recover automatically are silent.
+                # Throttled internally to once per scan interval.
+                try:
+                    await _scan_stuck_positions_throttled()
+                except Exception as exc:
+                    logger.warning("stuck-position monitor failed", exc_info=exc)
                 # Reconcile reported realized P&L against Polymarket truth.
                 # Walks today's closed orders, fetches actual on-chain SELL
                 # trades from the data API, FIFO-matches and writes the

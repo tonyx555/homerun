@@ -16,6 +16,14 @@ TRADER_ORDER_VERIFICATION_VENUE_ORDER = "venue_order"
 TRADER_ORDER_VERIFICATION_VENUE_FILL = "venue_fill"
 TRADER_ORDER_VERIFICATION_WALLET_POSITION = "wallet_position"
 TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY = "wallet_activity"
+# Operator-asserted close.  The system cannot self-assign this status —
+# only the manual-writeoff API path (backed by an immutable
+# TraderOrderVerificationEvent + operator identity) does.  Used when a
+# position is genuinely unrecoverable (illiquid market that won't
+# resolve, contract bug, etc.) and the operator has externally
+# accounted for the loss.  Distinct from wallet_activity so an auditor
+# can grep operator-touched rows.
+TRADER_ORDER_VERIFICATION_MANUAL_WRITEOFF = "manual_writeoff"
 TRADER_ORDER_VERIFICATION_SUMMARY_ONLY = "summary_only"
 TRADER_ORDER_VERIFICATION_DISPUTED = "disputed"
 
@@ -58,6 +66,7 @@ def normalize_trader_order_verification_status(value: Any) -> str:
         TRADER_ORDER_VERIFICATION_VENUE_FILL,
         TRADER_ORDER_VERIFICATION_WALLET_POSITION,
         TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY,
+        TRADER_ORDER_VERIFICATION_MANUAL_WRITEOFF,
         TRADER_ORDER_VERIFICATION_SUMMARY_ONLY,
         TRADER_ORDER_VERIFICATION_DISPUTED,
     }:
@@ -81,6 +90,9 @@ def trader_order_verification_rank(value: Any) -> int:
         return 30
     if normalized == TRADER_ORDER_VERIFICATION_WALLET_ACTIVITY:
         return 40
+    if normalized == TRADER_ORDER_VERIFICATION_MANUAL_WRITEOFF:
+        # Higher than wallet_activity — operator override is final.
+        return 50
     return 0
 
 

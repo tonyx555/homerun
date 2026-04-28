@@ -3362,7 +3362,15 @@ class TraderOrder(Base):
 # It is the only architecture that gives the financial accuracy
 # guarantee the user requires (UI numbers must equal Polymarket).
 
-_VERIFIED_PNL_STATUSES = frozenset({"wallet_activity"})
+# wallet_activity is the only VERIFIED status that the system itself
+# can produce (verifier matches a real on-chain trade record).
+# manual_writeoff is operator-asserted: it can only be written via the
+# manual-writeoff API path (which requires an explicit reason + creates
+# an immutable TraderOrderVerificationEvent).  Both are acceptable
+# carriers of non-NULL actual_profit; everything else still gets the
+# value coerced to None.  See services/operator_writeoff.py for the
+# operator-side helper that enforces the audit trail.
+_VERIFIED_PNL_STATUSES = frozenset({"wallet_activity", "manual_writeoff"})
 
 
 def _enforce_pnl_verification_guard(mapper, connection, target):  # noqa: ANN001
