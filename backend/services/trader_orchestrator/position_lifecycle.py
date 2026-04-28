@@ -55,6 +55,18 @@ _FAILED_EXIT_HARD_RETRY_CEILING = 100
 # orders.
 _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD = 3
 
+# How long a ``blocked_persistent_timeout`` entry must sit before we
+# auto-reset it to ``failed`` and let the normal retry path try once
+# more.  Three consecutive submission timeouts can be caused by a
+# transient event-loop stall (heavy strategy bursts, GC, RPC hiccup);
+# pinning the row in blocked-terminal forever and waking an operator
+# is the wrong response when the underlying cause has cleared.  The
+# hard retry ceiling (_FAILED_EXIT_HARD_RETRY_CEILING = 100) still
+# protects against truly persistent failures — those eventually
+# escalate to ``blocked_retry_exhausted_hard`` which still requires
+# operator action.
+_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS = 30 * 60
+
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
 _WALLET_CACHE_TTL_SECONDS = 15.0
@@ -502,6 +514,48 @@ def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: d
     pending_exit["retry_count"] = retry_count
     _bump_allowance_error_counter(pending_exit, error_text)
     pending_exit["next_retry_at"] = _iso_utc(now + timedelta(seconds=_failed_exit_retry_delay_seconds(error_text)))
+
+
+def _maybe_clear_persistent_timeout(pending_exit: dict[str, Any], now: datetime) -> bool:
+    """Auto-recover a ``blocked_persistent_timeout`` row whose cooldown elapsed.
+
+    Three consecutive ``asyncio.TimeoutError`` on exit submission can be
+    caused by transient event-loop saturation (heavy strategy bursts,
+    GC, RPC slowness) — once that clears, the same exit will usually
+    submit cleanly.  Pinning the row forever forces an unnecessary
+    operator alert and leaves real money sitting idle.
+
+    On reset we flip the status back to ``"failed"`` so the normal
+    failed-exit retry path picks it up on the next reconcile cycle.
+    The retry counter is preserved (so the hard ceiling still binds);
+    the consecutive-streak counters are zeroed so transient timeouts
+    don't immediately re-latch the blocked state on the first new
+    failure.
+
+    Returns True iff the row was reset.
+    """
+    if str(pending_exit.get("status") or "").strip().lower() != "blocked_persistent_timeout":
+        return False
+    exhausted_at = _parse_iso_utc_naive(pending_exit.get("exhausted_at"))
+    if exhausted_at is None:
+        # No exhaustion timestamp — fall back to ``last_attempt_at``.
+        exhausted_at = _parse_iso_utc_naive(pending_exit.get("last_attempt_at"))
+    if exhausted_at is None:
+        return False
+    now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
+    elapsed_seconds = (now_naive - exhausted_at).total_seconds()
+    if elapsed_seconds < _BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS:
+        return False
+    prior_error = str(pending_exit.get("last_error") or "").strip() or "unknown"
+    pending_exit["status"] = "failed"
+    pending_exit["consecutive_blocked_failure_count"] = 0
+    pending_exit["consecutive_timeout_count"] = 0
+    pending_exit["next_retry_at"] = _iso_utc(now)
+    pending_exit["last_error"] = (
+        f"persistent_timeout_auto_recovery_after_{int(elapsed_seconds)}s "
+        f"(prior: {prior_error[:80]})"
+    )
+    return True
 
 
 def _take_profit_price_floor(pending_exit: dict[str, Any]) -> Optional[float]:
@@ -6374,6 +6428,15 @@ async def reconcile_live_positions(
         # and 7635 will pick it up on a future cycle when wallet/
         # market data confirms settlement) can clear this state.
         _pending_exit_now = payload.get("pending_live_exit")
+        # Auto-recover transient blocked_persistent_timeout rows whose
+        # cooldown has elapsed.  Three timeouts during an event-loop
+        # stall should not pin a position forever — the hard retry
+        # ceiling still bounds true-permanent failures.
+        if isinstance(_pending_exit_now, dict) and not dry_run:
+            if _maybe_clear_persistent_timeout(_pending_exit_now, now):
+                payload["pending_live_exit"] = _pending_exit_now
+                row.payload_json = payload
+                row.updated_at = now
         if (
             isinstance(_pending_exit_now, dict)
             and str(_pending_exit_now.get("status") or "").strip().lower() in {
