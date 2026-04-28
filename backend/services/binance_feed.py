@@ -39,7 +39,7 @@ _BINANCE_SYMBOL_MAP = {
 
 
 def _stale_data_timeout_s() -> float:
-    raw = float(getattr(settings, "BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS", 3.0) or 3.0)
+    raw = float(getattr(settings, "BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS", 8.0) or 8.0)
     # Floor at 0.5s to avoid pathologically short windows that would
     # treat any normal tick gap as "stale" and reconnect-storm.
     return max(0.5, raw)
@@ -158,9 +158,23 @@ class BinanceFeed:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=stale_timeout)
                         except asyncio.TimeoutError:
+                            # The wait_for timer fired, but the event loop may
+                            # have been stalled (heavy strategy bursts, GC) —
+                            # use wall-clock time vs the last *handled* message
+                            # to confirm the feed is genuinely silent before
+                            # tearing the socket down.  Suppresses false-positive
+                            # reconnect storms under load.
+                            now_ms = int(time.time() * 1000)
+                            last_ms = self._last_update_ms
+                            actual_age_ms = (now_ms - last_ms) if last_ms > 0 else None
+                            stale_threshold_ms = int(stale_timeout * 1000)
+                            if last_ms > 0 and actual_age_ms is not None and actual_age_ms < stale_threshold_ms:
+                                # Data has actually arrived recently — keep waiting.
+                                continue
                             logger.warning(
-                                "BinanceFeed: no bookTicker data for %.1fs — forcing reconnect (per-asset: %s)",
+                                "BinanceFeed: no bookTicker data for %.1fs — forcing reconnect (actual_age_ms=%s, per-asset: %s)",
                                 stale_timeout,
+                                actual_age_ms,
                                 self.get_per_asset_status(),
                             )
                             stale_reconnect = True
