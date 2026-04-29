@@ -38,13 +38,51 @@ _ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win3
     "off",
 }
 
-try:
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    from sentence_transformers import SentenceTransformer
+# Pre-2026-04-29 this was an unconditional top-level import:
+#
+#     from sentence_transformers import SentenceTransformer
+#
+# That alone pulled in ``transformers`` and ``torch``, adding ~2 GB
+# of C-extension memory + ~3 million Python objects to the worker
+# process at IMPORT TIME — before any embedding work was actually
+# requested.  Confirmed via tracemalloc (08:40 UTC dump): the worker
+# was at 4.6 GB RSS / 1.83 GB tracked Python heap just three
+# minutes after startup, with the C-extension gap dominated by
+# torch's tensor allocator + transformers' tokenizer registries
+# (~3,000 entries each visible in ``sys.modules`` walk).
+#
+# Worse: the resulting heap grew Python's GC-tracked object count
+# past 3.8 M, putting full-GC pauses in the 15-20 s range — the
+# direct cause of the chronic "cascade" pattern where the event
+# loop froze and every socket/timer fired at once.
+#
+# This module's ML path is only used when the news workflow
+# actually runs an embedding pass (``initialize`` -> ``rebuild``).
+# Defer the import to ``_lazy_load_sentence_transformer`` so a
+# worker that never runs news embedding never pays the 2 GB
+# baseline + GC overhead.
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+SentenceTransformer = None  # type: ignore[assignment]
+_HAS_TRANSFORMERS: bool | None = None
 
-    _HAS_TRANSFORMERS = True
-except ImportError:
-    SentenceTransformer = None  # type: ignore
+
+def _lazy_load_sentence_transformer() -> bool:
+    """Import ``sentence_transformers`` on first use.
+
+    Caches the result so repeat calls are free.  Returns True iff
+    the import succeeded; callers gate ML-mode logic on this.
+    """
+    global SentenceTransformer, _HAS_TRANSFORMERS
+    if _HAS_TRANSFORMERS is not None:
+        return _HAS_TRANSFORMERS
+    try:
+        from sentence_transformers import SentenceTransformer as _ST  # noqa: WPS433
+
+        SentenceTransformer = _ST  # type: ignore[assignment]
+        _HAS_TRANSFORMERS = True
+    except ImportError:
+        _HAS_TRANSFORMERS = False
+    return _HAS_TRANSFORMERS
 
 if _ENABLE_FAISS:
     try:
@@ -248,7 +286,7 @@ class MarketWatcherIndex:
             except Exception:
                 pass  # Fall through to standalone load
 
-            if _HAS_TRANSFORMERS:
+            if _lazy_load_sentence_transformer():
                 try:
                     # Avoid startup hangs when DNS/network is unavailable.
                     os.environ.setdefault("HF_HUB_OFFLINE", "1")

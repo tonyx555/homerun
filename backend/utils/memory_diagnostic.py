@@ -159,20 +159,39 @@ def _enumerate_singleton_containers() -> list[tuple[str, int, str]]:
         "tracemalloc",
         "linecache",
     )
+    # App-code prefixes get a much lower noise floor — a 50-entry
+    # leak in services/workers code is more interesting than a
+    # 1000-entry stdlib constant table.
+    app_prefixes = ("services.", "workers.", "models.", "api.", "utils.", "strategies.", "main", "config")
+    # Snapshot module list once.  Iterating ``sys.modules.items()``
+    # while modules import (background tasks may import on the fly)
+    # would otherwise dispatch to the dict's hot path and slow the
+    # walk dramatically.
+    snapshot = tuple(sys.modules.items())
     out: list[tuple[str, int, str]] = []
-    for mod_name, mod in list(sys.modules.items()):
+    for mod_name, mod in snapshot:
         if not mod or any(mod_name.startswith(p) for p in skip_prefixes):
             continue
-        for attr_name, value in list(vars(mod).items() if hasattr(mod, "__dict__") else []):
+        try:
+            mod_dict = vars(mod)
+        except TypeError:
+            continue
+        is_app = any(mod_name == p.rstrip(".") or mod_name.startswith(p) for p in app_prefixes)
+        floor = 10 if is_app else 100
+        # Snapshot the dict items so live mutation during the walk
+        # doesn't corrupt iteration.
+        for attr_name, value in tuple(mod_dict.items()):
             if attr_name.startswith("__"):
                 continue
+            t = type(value)
+            if t not in (dict, list, set, frozenset, deque):
+                continue
             try:
-                if isinstance(value, (dict, list, set, frozenset, deque)):
-                    n = len(value)
-                    if n >= 100:  # noise floor
-                        out.append((f"{mod_name}.{attr_name}", n, type(value).__name__))
+                n = len(value)
             except Exception:
                 continue
+            if n >= floor:
+                out.append((f"{mod_name}.{attr_name}", n, t.__name__))
     out.sort(key=lambda t: t[1], reverse=True)
     return out
 

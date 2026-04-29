@@ -49,12 +49,13 @@ if not os.environ.get("HF_TOKEN"):
     logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 logger = get_logger("workers.host")
 
-# Enable tracemalloc as the very first thing the worker does so it
-# captures every subsequent allocation.  The flag is opt-in via
-# ``HOMERUN_TRACE_MEMORY=1`` so the steady-state worker doesn't pay
-# the ~10% allocation overhead — flip it on when chasing a leak,
-# trigger dumps via ``backend/.runtime/memory_dump_request``, and
-# turn it off when done.  See ``utils/memory_diagnostic.py``.
+# Tracemalloc is OFF by default — the snapshot phase scales with
+# the number of live blocks, and a worker carrying tens of millions
+# of small objects (post-leak) takes 20+ minutes to dump, defeating
+# the purpose of a real-time diagnostic.  Set ``HOMERUN_TRACE_MEMORY=1``
+# to opt in for targeted leak hunts; the file-trigger dump still
+# works without it (psutil + GC + module-singleton sections are
+# always available, and tell us the singleton-leak shape directly).
 if os.environ.get("HOMERUN_TRACE_MEMORY") == "1":
     from utils.memory_diagnostic import start_tracemalloc
 

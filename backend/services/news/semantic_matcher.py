@@ -31,7 +31,6 @@ logger = logging.getLogger(__name__)
 # Try to import optional ML dependencies
 # ---------------------------------------------------------------------------
 
-_HAS_TRANSFORMERS = False
 _HAS_FAISS = False
 # FAISS remains enabled by default; set NEWS_ENABLE_FAISS=0 only for emergency fallback.
 _ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win32" else "1").strip().lower() not in {
@@ -41,15 +40,31 @@ _ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win3
     "off",
 }
 
-try:
-    # Disable tokenizer parallelism to avoid segfaults when called from
-    # multiple threads (e.g. asyncio.to_thread in news_edge + API routes).
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    from sentence_transformers import SentenceTransformer
+# Disable tokenizer parallelism to avoid segfaults when called from
+# multiple threads (e.g. asyncio.to_thread in news_edge + API routes).
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
-    _HAS_TRANSFORMERS = True
-except ImportError:
-    SentenceTransformer = None  # type: ignore
+# Lazy import — see ``market_watcher_index._lazy_load_sentence_transformer``
+# for the full rationale.  TL;DR: importing ``sentence_transformers`` at
+# module load adds ~2 GB of C-extension memory + 3 M Python objects to
+# every worker process that just *imports* this module, even if it never
+# calls ``get_model()``.  Defer until actually needed.
+SentenceTransformer = None  # type: ignore[assignment]
+_HAS_TRANSFORMERS: bool | None = None
+
+
+def _lazy_load_sentence_transformer() -> bool:
+    global SentenceTransformer, _HAS_TRANSFORMERS
+    if _HAS_TRANSFORMERS is not None:
+        return _HAS_TRANSFORMERS
+    try:
+        from sentence_transformers import SentenceTransformer as _ST  # noqa: WPS433
+
+        SentenceTransformer = _ST  # type: ignore[assignment]
+        _HAS_TRANSFORMERS = True
+    except ImportError:
+        _HAS_TRANSFORMERS = False
+    return _HAS_TRANSFORMERS
 
 if _ENABLE_FAISS:
     try:
@@ -143,7 +158,7 @@ class SemanticMatcher:
         with self._lock:
             if self._initialized:
                 return self._model is not None
-            if _HAS_TRANSFORMERS:
+            if _lazy_load_sentence_transformer():
                 try:
                     # Force local-cache/offline model loading so DNS/network
                     # failures never block startup.
