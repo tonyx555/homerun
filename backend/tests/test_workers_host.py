@@ -77,8 +77,12 @@ async def test_initialize_services_schedules_live_execution_in_background(monkey
     async def fake_watchdog():
         await release.wait()
 
+    async def fake_memory_loop():
+        await release.wait()
+
     monkeypatch.setattr(host.live_execution_service, "initialize", fake_live_initialize)
     monkeypatch.setattr(database_module, "start_pool_watchdog", lambda: asyncio.create_task(fake_watchdog()))
+    monkeypatch.setattr("utils.memory_diagnostic.memory_diagnostic_loop", fake_memory_loop)
 
     await worker_host._initialize_services()
 
@@ -130,6 +134,9 @@ async def test_initialize_services_schedules_runtime_bootstrap_in_background(mon
     async def fake_watchdog():
         await release.wait()
 
+    async def fake_memory_loop():
+        await release.wait()
+
     fake_intent_runtime = _FakeIntentRuntime()
     fake_feed_manager = _FakeStartable()
     fake_market_runtime = _FakeStartable()
@@ -138,6 +145,7 @@ async def test_initialize_services_schedules_runtime_bootstrap_in_background(mon
     monkeypatch.setattr(host, "get_feed_manager", lambda: fake_feed_manager)
     monkeypatch.setattr(host, "get_market_runtime", lambda: fake_market_runtime)
     monkeypatch.setattr(database_module, "start_pool_watchdog", lambda: asyncio.create_task(fake_watchdog()))
+    monkeypatch.setattr("utils.memory_diagnostic.memory_diagnostic_loop", fake_memory_loop)
 
     await worker_host._initialize_services()
 
