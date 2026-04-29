@@ -1188,6 +1188,91 @@ class LiveExecutionService:
             )
             return False
 
+    @staticmethod
+    def _parse_balance_rejection(error_text: str) -> Optional[dict[str, float]]:
+        """Extract structured numbers from Polymarket's balance rejection.
+
+        The venue formats it as::
+
+            balance: 156452220, sum of active orders: 122020000,
+            sum of matched orders: 0, order amount (inc. fees): 61010000
+
+        All values are USDC base-units (× 10^6).  Returns None when
+        the format doesn't match — keeps the caller decoupled from
+        venue copy changes.
+        """
+        if not error_text:
+            return None
+        text = error_text.lower()
+        try:
+            import re
+
+            m = re.search(
+                r"balance:\s*(\d+).*?sum of active orders:\s*(\d+).*?"
+                r"sum of matched orders:\s*(\d+).*?order amount.*?:\s*(\d+)",
+                text,
+                flags=re.DOTALL,
+            )
+            if not m:
+                return None
+            return {
+                "balance_usdc": float(m.group(1)) / 1_000_000.0,
+                "active_orders_usdc": float(m.group(2)) / 1_000_000.0,
+                "matched_orders_usdc": float(m.group(3)) / 1_000_000.0,
+                "order_amount_usdc": float(m.group(4)) / 1_000_000.0,
+            }
+        except Exception:
+            return None
+
+    def _emit_balance_rejection_diagnostic(
+        self, *, side_text: str, token_id: str, error_text: str
+    ) -> None:
+        """Surface the venue's balance rejection as an interpretive warning.
+
+        The raw SDK error tells you the numbers; this line tells the
+        operator what they mean and points to the manual remediation
+        paths.  No automated mutations — placing/cancelling orders is
+        a user action and the system surfaces the diagnostic for the
+        operator to decide.
+        """
+        parsed = self._parse_balance_rejection(error_text)
+        if not parsed:
+            return
+        free = parsed["balance_usdc"] - parsed["active_orders_usdc"]
+        shortfall = parsed["order_amount_usdc"] - free
+        active_pct = (
+            (parsed["active_orders_usdc"] / parsed["balance_usdc"]) * 100.0
+            if parsed["balance_usdc"] > 0
+            else 0.0
+        )
+        # Three remediation paths the operator can take, in order of
+        # increasing scope.  We do NOT pick one for them — auto-cancel
+        # of user orders to make a SELL go through is not institutional-
+        # grade behavior, even with safety heuristics.
+        logger.warning(
+            "Balance rejection diagnosed: %s blocked by collateral reservation. "
+            "venue_balance=$%.2f active_orders=$%.2f (%.1f%% of balance) "
+            "order_needs=$%.2f free_margin=$%.2f shortfall=$%.2f. "
+            "Remediation: (a) wait for periodic stale-order sweep "
+            "(STALE_ORDER_AGE_HOURS=%.1fh, every "
+            "%.0fs); (b) operator cancel specific open orders via "
+            "POST /api/operator/orders/{order_id}/cancel; "
+            "(c) deposit additional USDC to the funder wallet. "
+            "Note: the per-signature_type balance snapshot follows; "
+            "compare ``balance snapshot`` rows against ``venue_balance`` "
+            "to confirm whether the venue's view matches the wallet "
+            "the SDK is signing under.",
+            side_text,
+            parsed["balance_usdc"],
+            parsed["active_orders_usdc"],
+            active_pct,
+            parsed["order_amount_usdc"],
+            free,
+            max(0.0, shortfall),
+            float(getattr(settings, "STALE_ORDER_AGE_HOURS", 2.0)),
+            60.0,  # _STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS — kept inline to avoid worker import
+        )
+
     async def _log_balance_snapshot_per_signature_type(self, *, context: str) -> None:
         """Log the venue's balance + active-order view for every supported
         signature_type so an operator can see *which wallet* the SDK was
@@ -3464,6 +3549,11 @@ class LiveExecutionService:
                                 continue
                         if not balance_snapshot_logged:
                             balance_snapshot_logged = True
+                            self._emit_balance_rejection_diagnostic(
+                                side_text="SELL",
+                                token_id=token_key,
+                                error_text=error_text,
+                            )
                             await self._log_balance_snapshot_per_signature_type(
                                 context=f"sell_balance_rejection:{token_key}"
                             )
@@ -3494,6 +3584,11 @@ class LiveExecutionService:
                                 continue
                         if not balance_snapshot_logged:
                             balance_snapshot_logged = True
+                            self._emit_balance_rejection_diagnostic(
+                                side_text="BUY",
+                                token_id=token_key,
+                                error_text=error_text,
+                            )
                             await self._log_balance_snapshot_per_signature_type(
                                 context=f"buy_balance_rejection:{token_key}"
                             )
@@ -3646,6 +3741,11 @@ class LiveExecutionService:
                             continue
                     if not balance_snapshot_logged:
                         balance_snapshot_logged = True
+                        self._emit_balance_rejection_diagnostic(
+                            side_text="SELL",
+                            token_id=token_key,
+                            error_text=error_message,
+                        )
                         await self._log_balance_snapshot_per_signature_type(
                             context=f"sell_balance_rejection:{token_key}"
                         )
@@ -3674,6 +3774,11 @@ class LiveExecutionService:
                             continue
                     if not balance_snapshot_logged:
                         balance_snapshot_logged = True
+                        self._emit_balance_rejection_diagnostic(
+                            side_text="BUY",
+                            token_id=token_key,
+                            error_text=error_message,
+                        )
                         await self._log_balance_snapshot_per_signature_type(
                             context=f"buy_balance_rejection:{token_key}"
                         )
