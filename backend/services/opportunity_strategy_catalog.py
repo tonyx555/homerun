@@ -247,16 +247,44 @@ _SCANNER_SCHEMA_STAT_ARB = {
     "param_fields": [
         *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
         {"key": "enable_stat_signals", "label": "Enable Statistical Signals", "type": "boolean", "phase": "signal"},
-        {"key": "enable_certainty_shock", "label": "Enable Certainty Shock", "type": "boolean", "phase": "signal"},
-        {"key": "enable_decay_curve", "label": "Enable Decay Curve", "type": "boolean", "phase": "signal"},
-        {"key": "shock_lookback_seconds", "label": "Shock Lookback (sec)", "type": "number", "min": 60, "phase": "signal"},
-        {"key": "shock_min_abs_move", "label": "Shock Min Absolute Move", "type": "number", "min": 0.01, "max": 1, "phase": "signal"},
-        {"key": "shock_max_retrace", "label": "Shock Max Retrace", "type": "number", "min": 0, "max": 1, "phase": "signal"},
-        {"key": "shock_min_favored_price", "label": "Shock Min Favored Price", "type": "number", "min": 0.01, "max": 0.99, "phase": "signal"},
-        {"key": "shock_target_certainty", "label": "Shock Target Certainty", "type": "number", "min": 0.5, "max": 0.995, "phase": "signal"},
+        {"key": "exclude_market_keywords", "label": "Exclude Market Keywords", "type": "list", "phase": "signal"},
+        {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
+    ]
+}
+
+_SCANNER_SCHEMA_CERTAINTY_SHOCK = {
+    "param_fields": [
+        *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
+        {"key": "shock_lookback_seconds", "label": "Lookback (sec)", "type": "number", "min": 60, "phase": "signal"},
+        {"key": "shock_min_abs_move", "label": "Min Absolute Move", "type": "number", "min": 0.05, "max": 1, "phase": "signal"},
+        {"key": "shock_max_retrace", "label": "Max Retrace", "type": "number", "min": 0, "max": 1, "phase": "signal"},
+        {"key": "shock_min_favored_price", "label": "Min Favored Price", "type": "number", "min": 0.01, "max": 0.99, "phase": "signal"},
+        {"key": "shock_target_certainty", "label": "Target Certainty", "type": "number", "min": 0.5, "max": 0.995, "phase": "signal"},
         {"key": "min_days_to_deadline", "label": "Min Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
         {"key": "max_days_to_deadline", "label": "Max Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
         {"key": "exclude_market_keywords", "label": "Exclude Market Keywords", "type": "list", "phase": "signal"},
+        {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
+    ]
+}
+
+_SCANNER_SCHEMA_TEMPORAL_DECAY = {
+    "param_fields": [
+        *_COMMON_SCANNER_SCHEMA["param_fields"][:3],
+        {"key": "min_days_to_deadline", "label": "Min Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
+        {"key": "max_days_to_deadline", "label": "Max Days To Deadline", "type": "number", "min": 0, "max": 365, "phase": "signal"},
+        {"key": "min_deviation", "label": "Min Deviation", "type": "number", "min": 0.01, "max": 1, "phase": "signal"},
+        {"key": "min_history_points", "label": "Min History Points", "type": "integer", "min": 3, "max": 50, "phase": "signal"},
+        {"key": "decay_rate", "label": "Decay Rate (sqrt-time exponent)", "type": "number", "min": 0.1, "max": 2, "phase": "signal"},
+        {"key": "exclude_market_keywords", "label": "Exclude Market Keywords", "type": "list", "phase": "signal"},
+        {"key": "take_profit_pct", "label": "Take Profit (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "stop_loss_pct", "label": "Stop Loss (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
+        {"key": "trailing_stop_pct", "label": "Trailing Stop (%)", "type": "number", "min": 1, "max": 100, "phase": "exit"},
         *_COMMON_SCANNER_SCHEMA["param_fields"][3:],
     ]
 }
@@ -472,6 +500,20 @@ SYSTEM_OPPORTUNITY_STRATEGY_SEEDS: list[SystemOpportunityStrategySeed] = [
         import_module="services.strategies.stat_arb",
         sort_order=170,
         config_schema=_SCANNER_SCHEMA_STAT_ARB,
+    ),
+    SystemOpportunityStrategySeed(
+        slug="certainty_shock",
+        source_key="scanner",
+        import_module="services.strategies.certainty_shock",
+        sort_order=171,
+        config_schema=_SCANNER_SCHEMA_CERTAINTY_SHOCK,
+    ),
+    SystemOpportunityStrategySeed(
+        slug="temporal_decay",
+        source_key="scanner",
+        import_module="services.strategies.temporal_decay",
+        sort_order=172,
+        config_schema=_SCANNER_SCHEMA_TEMPORAL_DECAY,
     ),
     SystemOpportunityStrategySeed(
         slug="flash_crash_reversion",
@@ -1297,7 +1339,8 @@ async def ensure_system_opportunity_strategies_seeded(session: AsyncSession) -> 
         "weather_conservative_no",
         "bayesian_cascade",
         "late_favorite_alpha",
-        "temporal_decay",
+        # NOTE: temporal_decay was previously folded into stat_arb but is now
+        # back as a standalone strategy with its own performance tracking.
         "btc_5m_reversal_sniper",
         "btc_5m_threshold_flip",
         "crypto_twin_parallel",
