@@ -866,11 +866,20 @@ _STANDARD_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 1
 _HIGH_FREQUENCY_RUNTIME_TRIGGER_SCAN_BATCH_SIZE = 1
 # Max concurrent runtime-trigger cycles per trader.  Allowing N parallel
 # cycles trades a small race window on shared trader state (open-position
-# count, occupied markets) for big gains in queue throughput: under a
-# burst of N signals the lane can dispatch all of them rather than
-# queueing N-1.  Position caps still bound over-trading because the
-# cycle re-reads positions from the DB before each decision.
-_RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER = 4
+# count, occupied markets) for queue throughput.  Pre-2026-04-29 this
+# was 4: in practice each cycle holds a DB connection for 10-20s of
+# HTTP-bound enrichment, so 4 × ~6 traders = 24 concurrent connections
+# into the live-trading codepath, each fighting the others for the
+# regular pool's 80 slots and creating the lock-contention cascade
+# observed as ``db_list_signals: 3-9s`` in the fast-trader stats and
+# ``running=4 stuck=29s`` in the orchestrator skip telemetry.
+#
+# Lowered to 2: still allows two-signal bursts to dispatch in
+# parallel (the original throughput motivation) while halving the
+# steady-state DB-connection footprint per trader.  Position caps
+# still bound over-trading because each cycle re-reads positions
+# from the DB before each decision.
+_RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER = 2
 _trader_idle_maintenance_last_run: dict[str, datetime] = {}
 _TRADER_CYCLE_HEARTBEAT_EVENT_INTERVAL_SECONDS = 1
 _trader_cycle_heartbeat_last_emitted: dict[str, datetime] = {}
