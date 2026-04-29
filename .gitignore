@@ -46,6 +46,12 @@ Thumbs.db
 data/
 backend/.runtime/
 
+# Force-include shipped SDK baseline data (refreshed by
+# scripts/refresh_category_yes_rates.py; the seed is the empirical
+# baseline at commit time so a fresh install has reasonable defaults).
+!backend/data/
+!backend/data/*.json
+
 # Local exports
 homerun-settings-*.json
 
@@ -74,3 +80,7 @@ output/
 secrets.json
 .claude/worktrees/
 .cutover-snapshots/
+
+# Strategy iteration snapshots (scratch copies used by
+# scripts/strategy_iter.py for A/B diff against earlier versions).
+scripts/iter_snapshots/

@@ -1,0 +1,26 @@
+{
+  "generated_at": "2026-04-29T01:18:52.909740+00:00",
+  "min_samples": 15,
+  "rates": {
+    "sports": 0.3219895287958115,
+    "esports": 0.4708994708994709,
+    "crypto": 0.5263157894736842,
+    "games": 0.64,
+    "tennis": 0.5087719298245614,
+    "up or down": 0.3076923076923077,
+    "weather": 0.023255813953488372,
+    "bitcoin": 0.5,
+    "ethereum": 0.47619047619047616
+  },
+  "samples": {
+    "sports": 382,
+    "esports": 189,
+    "crypto": 114,
+    "games": 100,
+    "tennis": 57,
+    "up or down": 52,
+    "weather": 43,
+    "bitcoin": 26,
+    "ethereum": 21
+  }
+}

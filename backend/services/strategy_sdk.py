@@ -1982,6 +1982,379 @@ class StrategySDK:
             return None
         return ((ask - bid) / mid) * 10000
 
+    # ------------------------------------------------------------------
+    # Realistic-fill pricing
+    # ------------------------------------------------------------------
+    @staticmethod
+    def get_ask_priced_fill(
+        market: Any,
+        prices: dict[str, dict],
+        side: str = "YES",
+        *,
+        spread_cushion: float = 0.005,
+    ) -> tuple[float, float, bool]:
+        """Return ``(fill_price, mid_price, ask_known)`` for buying ``side``.
+
+        ``fill_price`` is the price a market-taker BUY would actually pay:
+
+        - If a live ask is available, returns the ask.
+        - If only a bid is available, infers ``ask = max(mid, 2*mid - bid)``.
+        - If neither is available, falls back to ``mid + spread_cushion``
+          (default 0.005 = half a cent) so a strategy never assumes a
+          mid-priced fill it can't realistically achieve.
+
+        Use this for any strategy that:
+          - Builds a multi-leg bundle whose profit margin can be eaten by
+            spread costs (negrisk arb, multi-outcome bundles).
+          - Needs realistic capital efficiency on a directional bet rather
+            than an idealized mid-priced ROI.
+
+        The mid-price trap killed a number of negrisk-short opportunities
+        in production where a 1-2¢ ask premium per leg silently consumed
+        a $0.30 gross profit. Strategies should call this helper rather
+        than reading ``prices[token]["mid"]`` directly.
+
+        Args:
+            market: Market object with ``clob_token_ids`` and ``yes_price`` /
+                ``no_price`` attributes.
+            prices: The prices dict passed to detect().
+            side: 'YES' or 'NO' — which side this strategy is buying.
+            spread_cushion: Per-leg cushion added to mid when neither bid
+                nor ask is available. Half a cent is conservative; raise
+                for thinner / less-liquid markets.
+
+        Returns:
+            ``(fill_price, mid_price, ask_known)``. ``ask_known`` is True
+            when the live ask was used (highest confidence in the fill cost).
+        """
+        side_upper = side.upper()
+        idx = 0 if side_upper == "YES" else 1
+        token_ids = getattr(market, "clob_token_ids", None) or []
+        # Fallback price comes from the market's static yes_price/no_price.
+        if side_upper == "YES":
+            mid = float(getattr(market, "yes_price", 0.0) or 0.0)
+        else:
+            mid = float(getattr(market, "no_price", 0.0) or 0.0)
+        ask: float | None = None
+        bid: float | None = None
+        if len(token_ids) > idx:
+            payload = prices.get(token_ids[idx]) if isinstance(prices, dict) else None
+            if isinstance(payload, dict):
+                mid_raw = payload.get("mid")
+                if isinstance(mid_raw, (int, float)) and mid_raw > 0:
+                    mid = float(mid_raw)
+                ask_raw = payload.get("best_ask", payload.get("ask"))
+                if isinstance(ask_raw, (int, float)) and ask_raw > 0:
+                    ask = float(ask_raw)
+                bid_raw = payload.get("best_bid", payload.get("bid"))
+                if isinstance(bid_raw, (int, float)) and bid_raw > 0:
+                    bid = float(bid_raw)
+        if ask is not None:
+            return ask, mid, True
+        if bid is not None and bid > 0:
+            inferred = max(mid, 2.0 * mid - bid)
+            return inferred, mid, False
+        return mid + max(0.0, spread_cushion), mid, False
+
+    @staticmethod
+    def get_bid_priced_exit(
+        market: Any,
+        prices: dict[str, dict],
+        side: str = "YES",
+        *,
+        spread_cushion: float = 0.005,
+    ) -> tuple[float, float, bool]:
+        """Return ``(exit_price, mid_price, bid_known)`` for selling ``side``.
+
+        Mirror of :meth:`get_ask_priced_fill` for the exit side: a
+        market-taker SELL receives the bid. When no bid is observable
+        infers ``bid = min(mid, 2*mid - ask)``; when neither side is
+        available falls back to ``mid - spread_cushion``.
+
+        Use this when projecting the realized P&L of an exit, not the
+        theoretical mid-priced one.
+        """
+        side_upper = side.upper()
+        idx = 0 if side_upper == "YES" else 1
+        token_ids = getattr(market, "clob_token_ids", None) or []
+        if side_upper == "YES":
+            mid = float(getattr(market, "yes_price", 0.0) or 0.0)
+        else:
+            mid = float(getattr(market, "no_price", 0.0) or 0.0)
+        ask: float | None = None
+        bid: float | None = None
+        if len(token_ids) > idx:
+            payload = prices.get(token_ids[idx]) if isinstance(prices, dict) else None
+            if isinstance(payload, dict):
+                mid_raw = payload.get("mid")
+                if isinstance(mid_raw, (int, float)) and mid_raw > 0:
+                    mid = float(mid_raw)
+                ask_raw = payload.get("best_ask", payload.get("ask"))
+                if isinstance(ask_raw, (int, float)) and ask_raw > 0:
+                    ask = float(ask_raw)
+                bid_raw = payload.get("best_bid", payload.get("bid"))
+                if isinstance(bid_raw, (int, float)) and bid_raw > 0:
+                    bid = float(bid_raw)
+        if bid is not None:
+            return bid, mid, True
+        if ask is not None and ask > 0:
+            inferred = min(mid, 2.0 * mid - ask)
+            return max(0.01, inferred), mid, False
+        return max(0.01, mid - max(0.0, spread_cushion)), mid, False
+
+    # ------------------------------------------------------------------
+    # Conviction / confidence math (broadly applicable to ensemble strategies)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def confidence_from_signal_agreement(
+        signals: dict[str, float],
+        *,
+        edge_sign: float,
+        edge_magnitude: float,
+        magnitude_full_scale: float = 0.15,
+        signal_zero_threshold: float = 0.05,
+        floor: float = 0.30,
+        ceiling: float = 0.85,
+        agreement_weight: float = 0.6,
+    ) -> tuple[float, int, int]:
+        """Derive a [floor, ceiling] confidence from ensemble signal agreement.
+
+        For any strategy that combines multiple weak signals into a
+        composite edge, this collapses two questions into a single
+        confidence number:
+
+        1. **Signal agreement** — what fraction of non-zero signals point
+           in the same direction as the composite edge?
+        2. **Edge magnitude** — how big is the composite edge relative to
+           ``magnitude_full_scale`` (the largest plausible adjustment for
+           the strategy)?
+
+        Final score = ``floor + (ceiling - floor) * (agreement_weight ×
+        agreement_ratio + (1 - agreement_weight) × magnitude_factor)``.
+
+        Returns ``(confidence, agreeing_count, voting_count)``. Returns
+        ``(floor, 0, 0)`` when the signals dict is empty or no signal
+        crosses ``signal_zero_threshold``.
+
+        Usage::
+
+            conf, agree, voting = StrategySDK.confidence_from_signal_agreement(
+                signal_breakdown,
+                edge_sign=1.0 if edge > 0 else -1.0,
+                edge_magnitude=abs(edge),
+            )
+
+        Args:
+            signals: Mapping ``{signal_name: signed_value}`` where the sign
+                indicates direction (positive = buy YES, negative = buy NO)
+                and magnitude indicates strength.
+            edge_sign: +1.0 / -1.0 / 0.0 — direction of the composite edge.
+            edge_magnitude: Absolute composite edge in the same units as
+                ``magnitude_full_scale``.
+            magnitude_full_scale: Edge magnitude that maps to a full
+                magnitude score of 1.0 (clipped above).
+            signal_zero_threshold: Signals with ``|value| <`` this are
+                ignored when counting agreement.
+            floor: Minimum confidence to claim, even when nothing agrees.
+            ceiling: Maximum confidence to claim, even on a unanimous vote.
+            agreement_weight: Weight given to the agreement ratio versus
+                edge magnitude in the blended score (0..1).
+        """
+        if not isinstance(signals, dict) or not signals:
+            return floor, 0, 0
+        if edge_sign == 0.0:
+            return floor, 0, 0
+
+        agreeing = 0
+        disagreeing = 0
+        for value in signals.values():
+            try:
+                v = float(value)
+            except (TypeError, ValueError):
+                continue
+            if abs(v) < signal_zero_threshold:
+                continue
+            if (v > 0) == (edge_sign > 0):
+                agreeing += 1
+            else:
+                disagreeing += 1
+
+        voting = agreeing + disagreeing
+        if voting == 0:
+            return floor, 0, 0
+
+        agreement_ratio = agreeing / voting
+        magnitude_factor = max(0.0, min(1.0, edge_magnitude / max(1e-6, magnitude_full_scale)))
+        w = max(0.0, min(1.0, agreement_weight))
+        blended = w * agreement_ratio + (1.0 - w) * magnitude_factor
+        confidence = floor + (ceiling - floor) * blended
+        return max(floor, min(ceiling, confidence)), agreeing, voting
+
+    # ------------------------------------------------------------------
+    # Sizing (Kelly-fraction-from-edge, broadly applicable to directional bets)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def fractional_kelly_size(
+        base_size: float,
+        max_size: float,
+        *,
+        edge_price: float,
+        confidence: float,
+        risk_score: float,
+        kelly_fraction: float = 0.25,
+        kelly_size_multiplier: float = 4.0,
+        confidence_floor: float = 0.5,
+        risk_floor: float = 0.4,
+    ) -> float:
+        """Quarter-Kelly position sizing from a price-space edge.
+
+        For any directional binary-market strategy. Approximates the Kelly
+        fraction as ``f* = edge_price / (1 - edge_price)`` (the optimal
+        fraction for a 1:1 binary contract with edge ``edge_price``), then:
+
+          1. Caps to ``kelly_fraction`` (default 0.25 = quarter-Kelly) so a
+             model error doesn't overstake.
+          2. Scales the base size by ``1 + kelly_size_multiplier × f``.
+          3. Multiplies by a confidence factor in
+             ``[confidence_floor, 1.0]`` so high-conviction signals size
+             larger.
+          4. Multiplies by a risk-damping factor in
+             ``[risk_floor, 1.0 - risk_score]`` so high-risk signals size
+             smaller.
+          5. Clips to ``[1.0, max_size]``.
+
+        This replaces the older p_estimated = 0.5 + edge/200 hack which
+        structurally assumed a $0.50 market price regardless of the
+        actual contract being traded.
+
+        Args:
+            base_size: Trader's per-signal base notional (USD).
+            max_size: Trader's per-signal cap (USD).
+            edge_price: Price-space edge in [0, 1] — e.g. 0.09 for a 9¢
+                disagreement between fair value and market.
+            confidence: [0, 1] strategy-emitted conviction.
+            risk_score: [0, 1] strategy-emitted risk score (lower = safer).
+            kelly_fraction: Maximum Kelly fraction to commit (quarter-Kelly
+                = 0.25 is a standard cap).
+            kelly_size_multiplier: Multiplier applied to the capped Kelly
+                fraction when scaling base_size. Higher values let
+                higher-edge signals scale up more aggressively.
+            confidence_floor: Minimum confidence damping factor.
+            risk_floor: Minimum risk damping factor.
+
+        Returns:
+            Position size in USD, clipped to ``[1.0, max_size]``.
+        """
+        edge_price = max(0.0, min(0.99, abs(float(edge_price))))
+        f_star = edge_price / max(1e-3, 1.0 - edge_price)
+        f_capped = max(0.0, min(float(kelly_fraction), f_star * float(kelly_fraction)))
+        conf_scale = max(float(confidence_floor),
+                         min(1.0, float(confidence) + 0.15))
+        risk_scale = max(float(risk_floor), 1.0 - float(risk_score))
+        size = float(base_size) * (1.0 + float(kelly_size_multiplier) * f_capped) * conf_scale * risk_scale
+        return max(1.0, min(float(max_size), size))
+
+    # ------------------------------------------------------------------
+    # Category-level resolution rates (broadly applicable to any
+    # base-rate-aware strategy)
+    # ------------------------------------------------------------------
+
+    # Path to the rates JSON. Refreshed periodically by a background job
+    # (scripts/refresh_category_yes_rates.py) which queries the DB and
+    # writes the file. The SDK reads it lazily — no DB dependency from
+    # synchronous detect() paths.
+    _CATEGORY_RATES_PATH = (
+        Path(__file__).resolve().parents[1] / "data" / "category_yes_rates.json"
+    )
+    _category_yes_rates_cache: dict[str, float] | None = None
+    _category_yes_rates_cache_at: float = 0.0
+    _CATEGORY_RATES_TTL_SECONDS = 600.0
+
+    # Hardcoded baseline. Only the universal ``_default`` is set — every
+    # category-specific number must come from the JSON file produced by
+    # ``scripts/refresh_category_yes_rates.py`` (which queries the actual
+    # DB for terminal outcome_prices on closed binary markets).
+    #
+    # The 0.45 default is a slight YES-skeptical prior: a randomly-chosen
+    # binary prediction-market question is more often a "Will X happen?"
+    # framing where most ambitious propositions don't resolve YES. It's
+    # the same default the legacy implementation used. Override per-call
+    # via the ``defaults`` parameter when needed.
+    _CATEGORY_YES_RATES_DEFAULTS: dict[str, float] = {
+        "_default": 0.45,
+    }
+
+    @classmethod
+    def get_category_yes_resolve_rates(
+        cls,
+        *,
+        defaults: Optional[dict[str, float]] = None,
+    ) -> dict[str, float]:
+        """Per-category YES-resolution rate for binary markets.
+
+        Returns a mapping of ``{category_lower: rate}`` where ``rate`` is
+        the empirical fraction of resolved binary markets in that category
+        whose YES side won.
+
+        **Binary markets only**: a category that contains multi-outcome
+        bundles (NegRisk events with 5 candidates, etc.) will see each
+        individual binary market counted separately — exactly one of the
+        bundle's markets resolves YES, so the per-market YES rate is
+        approximately ``1/N`` in such categories. This is the rate any
+        single-market base-rate signal needs anyway.
+
+        Lookup order:
+          1. JSON cache file (refreshed offline by
+             ``scripts/refresh_category_yes_rates.py``).
+          2. Hardcoded empirical defaults.
+          3. Caller-supplied ``defaults`` dict.
+
+        ``defaults`` is overlaid LAST so caller intent wins.
+
+        Always returns a ``_default`` key for categories not otherwise
+        covered. Strategies that depend on category base rates should
+        call this rather than hardcoding constants:
+
+            rates = StrategySDK.get_category_yes_resolve_rates()
+            rate = rates.get((category or "").lower(), rates["_default"])
+        """
+        now = time.time()
+        cached = cls._category_yes_rates_cache
+        if (
+            cached is not None
+            and (now - cls._category_yes_rates_cache_at) < cls._CATEGORY_RATES_TTL_SECONDS
+        ):
+            base = dict(cached)
+            if defaults:
+                base.update(defaults)
+            return base
+
+        # Start from the hardcoded baseline.
+        rates = dict(cls._CATEGORY_YES_RATES_DEFAULTS)
+
+        # Overlay any JSON-cached rates written by the refresh script.
+        try:
+            blob = cls.load_json_from_disk(str(cls._CATEGORY_RATES_PATH))
+            if isinstance(blob, dict):
+                payload = blob.get("rates") if "rates" in blob else blob
+                if isinstance(payload, dict):
+                    for cat, rate in payload.items():
+                        try:
+                            r = float(rate)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0.0 < r < 1.0:
+                            rates[str(cat).strip().lower()] = r
+        except Exception:
+            pass
+
+        cls._category_yes_rates_cache = dict(rates)
+        cls._category_yes_rates_cache_at = now
+
+        if defaults:
+            rates.update(defaults)
+        return rates
+
     @staticmethod
     def is_ws_feed_started() -> bool:
         """Return True when this process has an active FeedManager."""
