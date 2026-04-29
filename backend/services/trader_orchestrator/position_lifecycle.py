@@ -78,6 +78,16 @@ _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD = 3
 # escalates eventually; this just makes us notice it tradable again
 # sooner once the venue / our infra recovers.
 _BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS = 5 * 60
+# After this many cumulative retries on a single order we no longer
+# cycle it every 5 minutes; we apply exponential backoff up to a 1-hour
+# ceiling.  Without this, two orders whose venue-side problem isn't
+# going to resolve (e.g. ``balance: $X, sum of active orders: $X``
+# rejection that needs operator attention to clear) eat ~30s of the
+# 30s reconcile budget every 5 minutes — blocking every other order's
+# retry path indefinitely.  The 2026-04-28 cascade had bed1b35d at
+# attempt=13 and 76e3a73e at attempt=12 doing exactly this.
+_BLOCKED_PERSISTENT_TIMEOUT_QUARANTINE_THRESHOLD_RETRIES = 10
+_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_MAX_SECONDS = 60 * 60
 
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
@@ -571,6 +581,43 @@ def _apply_failed_exit_state(pending_exit: dict[str, Any], *, error: Any, now: d
     pending_exit["next_retry_at"] = _iso_utc(now + timedelta(seconds=_failed_exit_retry_delay_seconds(error_text)))
 
 
+def _persistent_timeout_auto_retry_seconds(retry_count: int) -> float:
+    """Cooldown for the next auto-recovery attempt of a
+    ``blocked_persistent_timeout`` row.
+
+    Up to ``_BLOCKED_PERSISTENT_TIMEOUT_QUARANTINE_THRESHOLD_RETRIES``
+    cumulative retries we use the base 5-minute cadence — that's the
+    "transient venue/infra blip" recovery path.
+
+    Past the threshold we double the cooldown for each additional
+    retry, capped at
+    ``_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_MAX_SECONDS`` (1 hour).
+    The progression for retry_count = 10..14 is:
+
+        10 → 5 min
+        11 → 10 min
+        12 → 20 min
+        13 → 40 min
+        14+→ 60 min
+
+    This quarantines orders whose venue-side problem isn't going to
+    fix itself within minutes (balance/allowance mismatches, condition
+    deactivations, etc.) so they don't burn the reconcile worker's
+    30s per-trader budget every 5 minutes; an operator who comes to
+    look will still find them tradable, just on hourly cadence.
+    """
+    base = float(_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS)
+    threshold = int(_BLOCKED_PERSISTENT_TIMEOUT_QUARANTINE_THRESHOLD_RETRIES)
+    cap = float(_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_MAX_SECONDS)
+    if retry_count <= threshold:
+        return base
+    excess = max(0, retry_count - threshold)
+    # 2** is fast even for huge retry_count because we cap; clamp
+    # excess at log2(cap/base) + 1 to avoid pathological exponents.
+    bounded_excess = min(excess, 20)
+    return min(cap, base * (2 ** bounded_excess))
+
+
 def _maybe_clear_persistent_timeout(pending_exit: dict[str, Any], now: datetime) -> bool:
     """Auto-recover a ``blocked_persistent_timeout`` row whose cooldown elapsed.
 
@@ -587,6 +634,12 @@ def _maybe_clear_persistent_timeout(pending_exit: dict[str, Any], now: datetime)
     don't immediately re-latch the blocked state on the first new
     failure.
 
+    The cooldown applied here is exponential past
+    ``_BLOCKED_PERSISTENT_TIMEOUT_QUARANTINE_THRESHOLD_RETRIES`` so a
+    single doomed order doesn't dominate every 5-minute reconcile
+    cycle indefinitely.  See
+    ``_persistent_timeout_auto_retry_seconds``.
+
     Returns True iff the row was reset.
     """
     if str(pending_exit.get("status") or "").strip().lower() != "blocked_persistent_timeout":
@@ -599,7 +652,9 @@ def _maybe_clear_persistent_timeout(pending_exit: dict[str, Any], now: datetime)
         return False
     now_naive = now.replace(tzinfo=None) if now.tzinfo is not None else now
     elapsed_seconds = (now_naive - exhausted_at).total_seconds()
-    if elapsed_seconds < _BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS:
+    retry_count = int(pending_exit.get("retry_count") or 0)
+    cooldown = _persistent_timeout_auto_retry_seconds(retry_count)
+    if elapsed_seconds < cooldown:
         return False
     prior_error = str(pending_exit.get("last_error") or "").strip() or "unknown"
     pending_exit["status"] = "failed"
@@ -608,7 +663,8 @@ def _maybe_clear_persistent_timeout(pending_exit: dict[str, Any], now: datetime)
     pending_exit["next_retry_at"] = _iso_utc(now)
     pending_exit["last_error"] = (
         f"persistent_timeout_auto_recovery_after_{int(elapsed_seconds)}s "
-        f"(prior: {prior_error[:80]})"
+        f"(cooldown_was={int(cooldown)}s, retry_count={retry_count}, "
+        f"prior: {prior_error[:80]})"
     )
     return True
 

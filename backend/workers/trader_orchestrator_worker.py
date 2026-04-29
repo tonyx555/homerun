@@ -198,7 +198,23 @@ _skip_log_last_at: dict[str, float] = {}  # trader_id -> last log monotonic time
 _skip_log_suppressed: dict[str, int] = {}  # trader_id -> suppressed count
 _SKIP_LOG_INTERVAL_SECONDS = 60.0  # only log once per minute per trader
 _OVERLAP_WARNING_MIN_STUCK_SECONDS = 15.0
-_STUCK_TASK_HARD_KILL_SECONDS = 300.0  # force-kill tasks stuck longer than 5 minutes
+# Force-kill threshold for trader-cycle tasks that have been running
+# longer than the soft timeout × small multiple.  Pre-2026-04-28 this
+# was 300s — far too generous: with up to
+# ``_RUNTIME_TRIGGER_MAX_CONCURRENT_PER_TRADER`` (4) signal cycles
+# allowed per trader, and the soft-timeout backgrounding pattern that
+# leaves leaked tasks in the running set, a slow trader could
+# accumulate 4 × 5min = 20 task-minutes of pending work — exactly the
+# cascade observed when ``c8851ef7`` showed ``stuck=120s`` (suppressed
+# 5 duplicates) and ``f88cc061`` had ``running=4``.
+#
+# 90s is well past the soft timeout (20s) + cancel-grace (5s) plus
+# headroom for a slow Polymarket gateway, so a healthy submission has
+# every chance to complete.  Past 90s the order is either already on
+# the venue (the wallet-trade verifier will discover it on its next
+# 5-minute cycle) or genuinely stuck — leaking the task buys nothing
+# and starves every other inflight cycle.
+_STUCK_TASK_HARD_KILL_SECONDS = 90.0
 
 
 def _discard_abandoned_trader_cycle(task: asyncio.Task) -> None:

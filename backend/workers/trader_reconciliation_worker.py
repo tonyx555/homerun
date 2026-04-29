@@ -201,6 +201,28 @@ def _clear_inflight_timed_task(label: str, task: asyncio.Task) -> None:
 
 
 async def _graceful_timeout(coro, *, timeout: float, label: str):
+    """Run *coro* with a wall-time bound; cancel it on timeout.
+
+    Pre-2026-04-28 this function only abandoned the task on timeout —
+    it kept running in the background, accumulating to dozens of
+    in-flight reconciles whenever the venue or DB was slow.  The
+    "stuck=210s" telemetry from the cascade was that pile-up: the
+    next cycle's pre-check saw the old task still running and skipped,
+    while the leaked task continued to consume DB connections, RPC
+    bandwidth, and event-loop time.
+
+    The fix: actually call ``task.cancel()`` on timeout, then wait
+    up to ``_TIMEOUT_CANCEL_GRACE_SECONDS`` for the task to honor the
+    cancel.  Tasks that don't honor cancel within the grace window
+    are added to the abandoned set as before — but the common case
+    of a stuck ``await polymarket_http(...)`` will release its
+    DB-connection / asyncio resources within a tick.
+
+    Cancelling work that's mid-DB-write is acceptable here: the
+    lifecycle's ``release_conn(session)`` pattern means SDK calls
+    don't span open transactions, and the next reconcile cycle
+    re-reads truth from the chain regardless.
+    """
     existing = _inflight_timed_tasks.get(label)
     if existing is not None and not existing.done():
         close = getattr(coro, "close", None)
@@ -215,26 +237,30 @@ async def _graceful_timeout(coro, *, timeout: float, label: str):
     _inflight_timed_tasks[label] = task
     task.add_done_callback(lambda done_task, step_label=label: _clear_inflight_timed_task(step_label, done_task))
 
+    async def _cancel_and_drain() -> None:
+        if task.done():
+            return
+        task.cancel()
+        try:
+            await asyncio.shield(asyncio.wait({task}, timeout=_TIMEOUT_CANCEL_GRACE_SECONDS))
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+        if not task.done():
+            # Task didn't honor cancel within grace window — fall
+            # back to abandonment so we don't block the caller.
+            _abandoned_timed_tasks.add(task)
+            task.add_done_callback(_discard_abandoned_task)
+
     try:
         done, _ = await asyncio.wait({task}, timeout=timeout)
         if done:
             return task.result()
-
-        _abandoned_timed_tasks.add(task)
-        task.add_done_callback(_discard_abandoned_task)
+        await _cancel_and_drain()
         raise asyncio.TimeoutError()
     except asyncio.CancelledError:
-        if not task.done():
-            task.cancel()
-            try:
-                await asyncio.shield(asyncio.wait({task}, timeout=_TIMEOUT_CANCEL_GRACE_SECONDS))
-            except asyncio.CancelledError:
-                pass
-            except Exception:
-                pass
-            if not task.done():
-                _abandoned_timed_tasks.add(task)
-                task.add_done_callback(_discard_abandoned_task)
+        await _cancel_and_drain()
         raise
 
 

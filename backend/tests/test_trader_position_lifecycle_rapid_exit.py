@@ -99,6 +99,44 @@ def test_pending_exit_verified_terminal_fill_rejects_cancelled_status_without_tr
     ) is False
 
 
+def test_persistent_timeout_quarantine_backoff():
+    """Past the quarantine threshold the auto-recovery cooldown
+    doubles per retry until it caps at 1 hour.
+
+    This is the fix for the 2026-04-28 cascade where two orders at
+    attempt=12 / attempt=13 cycled through the 5-minute auto-recovery
+    every cycle and ate ~30s of the 30s reconcile budget — blocking
+    every other order indefinitely."""
+    f = position_lifecycle._persistent_timeout_auto_retry_seconds
+    base = float(position_lifecycle._BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS)
+    threshold = position_lifecycle._BLOCKED_PERSISTENT_TIMEOUT_QUARANTINE_THRESHOLD_RETRIES
+    cap = float(position_lifecycle._BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_MAX_SECONDS)
+
+    # Below threshold → base cadence (5 min).
+    assert f(0) == pytest.approx(base)
+    assert f(1) == pytest.approx(base)
+    assert f(threshold - 1) == pytest.approx(base)
+    assert f(threshold) == pytest.approx(base)
+
+    # Past threshold → exponential backoff doubling per retry.
+    assert f(threshold + 1) == pytest.approx(min(cap, base * 2))
+    assert f(threshold + 2) == pytest.approx(min(cap, base * 4))
+    assert f(threshold + 3) == pytest.approx(min(cap, base * 8))
+
+    # Cap at 1 hour — even way past threshold, never beyond cap.
+    assert f(threshold + 100) == pytest.approx(cap)
+    assert f(threshold + 1000) == pytest.approx(cap)
+
+
+def test_persistent_timeout_quarantine_handles_negative_retry_count():
+    """Defensive: a negative retry_count from a corrupt payload must
+    not return a negative cooldown."""
+    f = position_lifecycle._persistent_timeout_auto_retry_seconds
+    base = float(position_lifecycle._BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS)
+    assert f(-1) == pytest.approx(base)
+    assert f(-100) == pytest.approx(base)
+
+
 def test_aggressive_exit_price_decrement_progression():
     """Walk-down progression: original on first attempt, gradually
     larger steps once the venue keeps rejecting, capped at 10 ¢."""
