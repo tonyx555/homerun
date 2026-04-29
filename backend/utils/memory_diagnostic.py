@@ -209,6 +209,84 @@ def _module_singletons_section() -> str:
     return "\n".join(lines)
 
 
+def _enumerate_instance_containers() -> list[tuple[str, int, str]]:
+    """Walk every live object via ``gc.get_objects()`` and find instance
+    attributes that are dict/list/set/deque with len() >= 100.
+
+    Module-level dicts ONLY surface stuff like
+    ``somemodule._global_cache``.  The application's actual hot state
+    is on class instances:
+    ``MarketCacheService._market_cache``, ``IntentRuntime._signals_by_id``,
+    ``PriceCache._entries``, etc.  This walker finds those.
+
+    Reports ``ClassName.attribute`` keyed by the instance class so a
+    hundred-instance class with one big attr each shows up as one
+    aggregate row, not one hundred.
+    """
+    aggregate: dict[tuple[str, str, str], int] = {}
+    skip_class_prefixes = (
+        "builtins.",
+        "typing.",
+        "_collections_abc.",
+        "collections.",
+        "weakref.",
+        "asyncio.",
+        "concurrent.",
+        "logging.",
+        "pydantic.",
+        "sqlalchemy.",
+        "google.",
+    )
+    objs = gc.get_objects()
+    for obj in objs:
+        cls = type(obj)
+        try:
+            cls_name = f"{cls.__module__}.{cls.__name__}"
+        except Exception:
+            continue
+        if any(cls_name.startswith(p) for p in skip_class_prefixes):
+            continue
+        try:
+            slots = getattr(obj, "__dict__", None)
+        except Exception:
+            continue
+        if not isinstance(slots, dict):
+            continue
+        for attr, value in tuple(slots.items()):
+            t = type(value)
+            if t not in (dict, list, set, frozenset, deque):
+                continue
+            try:
+                n = len(value)
+            except Exception:
+                continue
+            if n < 100:
+                continue
+            key = (cls_name, attr, t.__name__)
+            current = aggregate.get(key, 0)
+            if n > current:
+                aggregate[key] = n
+    out = [
+        (f"{cls_name}.{attr}", n, typ)
+        for (cls_name, attr, typ), n in aggregate.items()
+    ]
+    out.sort(key=lambda t: t[1], reverse=True)
+    return out
+
+
+def _instance_containers_section() -> str:
+    items = _enumerate_instance_containers()
+    lines = [
+        "=== CLASS-INSTANCE CONTAINERS (len >= 100, max len per class.attr) ===",
+        f"Found {len(items)} containers above the noise floor",
+        "",
+    ]
+    for qualname, n, typ in items[:_TOP_N]:
+        lines.append(f"{n:>10,} | {typ:<10} | {qualname}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _gc_section() -> str:
     counts = gc.get_count()
     stats = gc.get_stats()
@@ -239,6 +317,7 @@ def _write_dump() -> None:
         _process_memory_section(),
         _gc_section(),
         _module_singletons_section(),
+        _instance_containers_section(),
         _tracemalloc_section(),
     ]
     body = "\n".join(sections)
