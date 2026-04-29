@@ -40,28 +40,33 @@ class LegSubmitResult:
 
 
 def _clob_metadata_from_leg(leg: dict[str, Any]) -> str | None:
-    """Extract CLOB-compatible metadata from a leg dict.
+    """Extract the CLOB ``OrderArgsV2.metadata`` value from a leg dict.
 
-    ``leg["metadata"]`` carries two distinct shapes in this codebase:
+    The venue metadata key lives in ``leg["clob_idempotency_key"]`` —
+    a dedicated field separate from ``leg["metadata"]`` (which carries
+    ExecutionPlan bookkeeping consumed by readers like
+    ``_resolve_execution_price_bounds``). The two used to share the
+    same key, which produced a recurring production crash where a
+    bookkeeping dict got stringified into ``bytes.fromhex`` deep in
+    the CLOB SDK; splitting them out is the structural fix.
 
-      * a 0x-prefixed bytes32 hex string (set by the fast-tier idempotency
-        path) — pass through to the venue so the reconcile sweep can match
-        the on-chain order back to its DB row,
-      * an internal bookkeeping dict (set by strategies / session_engine
-        for ExecutionPlan metadata like ``market_coverage``) — never meant
-        for the venue; stringifying it produces garbage that the CLOB SDK
-        feeds into ``bytes.fromhex`` and crashes the order with
-        "non-hexadecimal number found".
-
-    Return only string-typed metadata, leaving validation to
-    ``live_execution_service._normalize_clob_metadata`` at the actual
-    submission boundary.
+    For backward compatibility we still accept a string-shaped
+    ``leg["metadata"]`` so any in-flight legs constructed under the
+    old shape continue to submit with their correct idempotency key
+    on retry. Dict-shaped metadata is ignored (it was always
+    bookkeeping).
     """
-    raw = leg.get("metadata")
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip()
-    return text or None
+    primary = leg.get("clob_idempotency_key")
+    if isinstance(primary, str):
+        text = primary.strip()
+        if text:
+            return text
+    legacy = leg.get("metadata")
+    if isinstance(legacy, str):
+        text = legacy.strip()
+        if text:
+            return text
+    return None
 
 
 def _normalize_id(value: Any) -> str:

@@ -52,6 +52,7 @@ from services.trader_orchestrator_state import (
     update_execution_leg,
     update_execution_session_status,
 )
+from services.trader_orchestrator.fast_idempotency import derive_clob_idempotency_key
 from utils.converters import safe_float, safe_int
 from utils.signal_helpers import normalize_position_side
 from utils.utcnow import utcnow
@@ -1127,6 +1128,14 @@ class ExecutionSessionEngine:
             }
             placeholder_payload = dict(order_seed["order_payload"])
             placeholder_payload["submission_intent"] = submission_intent
+            # Persist the venue idempotency key into the pre-submit row so
+            # ``reconcile`` can locate this row by querying Polymarket for
+            # orders whose ``metadata`` field matches this key.  Without
+            # this we'd have to fuzzy-match by (token, side, price, size,
+            # timestamp), which is unreliable on busy markets.
+            clob_idempotency_key = leg_payload.get("clob_idempotency_key")
+            if isinstance(clob_idempotency_key, str) and clob_idempotency_key.strip():
+                placeholder_payload["clob_idempotency_key"] = clob_idempotency_key.strip()
             placeholder_payload = _sync_order_runtime_payload(
                 payload=placeholder_payload,
                 status=_PRE_SUBMIT_ORDER_STATUS,
@@ -1481,7 +1490,36 @@ class ExecutionSessionEngine:
             params=dict(explicit_strategy_params or {}),
         )
 
+        # Stamp a deterministic CLOB idempotency key onto every live leg
+        # before either the pre-submit row write or the venue submission.
+        # The key is derived from (trader_id, signal_id, leg_id) so:
+        #
+        #   * a retry of the same leg produces the same key — reconcile
+        #     can attach to a previously-issued venue order rather than
+        #     duplicating it,
+        #   * the key gets recorded on both the venue order
+        #     (OrderArgsV2.metadata) and the pre-submit TraderOrder row's
+        #     payload_json, giving reconcile an exact match path when
+        #     the post-submit DB update is lost.
+        #
+        # Mirrors the fast-tier guarantee from fa4d823 — the orchestrator
+        # path used to fall back to fuzzy attribute matching for orphan
+        # recovery; with the key in place every multi-leg session is
+        # precisely recoverable too.
+        signal_id_for_key = str(getattr(signal, "id", "") or "").strip()
         for wave_index, wave in enumerate(waves):
+            if mode == "live" and signal_id_for_key:
+                for leg_in_wave in wave:
+                    leg_id_for_key = str(leg_in_wave.get("leg_id") or "").strip()
+                    if not leg_id_for_key:
+                        continue
+                    if leg_in_wave.get("clob_idempotency_key"):
+                        continue
+                    leg_in_wave["clob_idempotency_key"] = derive_clob_idempotency_key(
+                        trader_id=trader_id,
+                        signal_id=signal_id_for_key,
+                        leg_id=leg_id_for_key,
+                    )
             wave_with_notionals = [(leg, safe_float(leg.get("requested_notional_usd"), 0.0)) for leg in wave]
             if mode == "live":
                 created_pre_submit_placeholders = False

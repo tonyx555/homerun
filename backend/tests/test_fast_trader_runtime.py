@@ -644,9 +644,12 @@ async def test_execute_fast_signal_keeps_lock_when_clob_raises_after_pre_submit(
 @pytest.mark.asyncio
 async def test_execute_fast_signal_stamps_deterministic_idempotency_key(monkeypatch):
     """Every fast-tier submission must (1) derive the same key from
-    (trader_id, signal_id) on every call, (2) attach it to the leg dict so
-    the CLOB layer forwards it as ``OrderArgsV2.metadata``, and (3) persist
-    it on ``TraderOrder.payload_json["fast_idempotency_key"]`` so the
+    (trader_id, signal_id) on every call, (2) attach it to the leg dict
+    under the dedicated ``clob_idempotency_key`` field (NOT overloading
+    ``leg["metadata"]``, which now stays cleanly the ExecutionPlan
+    bookkeeping dict), so the CLOB layer forwards it as
+    ``OrderArgsV2.metadata``, and (3) persist it on
+    ``TraderOrder.payload_json["fast_idempotency_key"]`` so the
     orphan-reconcile sweep can match a venue order back to the row even
     after a crash that lost ``provider_clob_order_id``."""
     engine, session_factory = await build_postgres_session_factory(Base, "fast_submit_idempotency_key")
@@ -696,9 +699,18 @@ async def test_execute_fast_signal_stamps_deterministic_idempotency_key(monkeypa
         assert expected_key.startswith("0x") and len(expected_key) == 66
         assert expected_key != "0x" + ("0" * 64)
 
-        # (1) Stamped into the leg dict for the CLOB layer.
+        # (1) Stamped into the leg dict's dedicated CLOB-key field for the
+        # venue submission. ``leg["metadata"]`` stays the bookkeeping dict
+        # — the two used to share a slot, which produced the
+        # "non-hexadecimal number found in fromhex() arg at position 43"
+        # production crash; the dedicated field ends that overload.
         assert len(captured_legs) == 1
-        assert captured_legs[0].get("metadata") == expected_key
+        assert captured_legs[0].get("clob_idempotency_key") == expected_key
+        legacy_metadata = captured_legs[0].get("metadata")
+        assert not isinstance(legacy_metadata, str), (
+            "leg['metadata'] should not carry the idempotency key under the "
+            "new schema; the dedicated clob_idempotency_key field carries it."
+        )
 
         # (2) Persisted onto the TraderOrder row's payload.
         async with session_factory() as session:

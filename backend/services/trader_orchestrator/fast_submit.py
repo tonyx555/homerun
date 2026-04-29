@@ -284,16 +284,20 @@ async def execute_fast_signal(
     # Derived from (trader_id, signal_id) so a retry produces the same key.
     # Stamped into the venue's order metadata field AND onto the skeleton
     # row's payload_json so the orphan-reconcile sweep can match a venue
-    # order back to its TraderOrder when the local DB write was lost.
+    # order back to its TraderOrder when the post-submit flush is lost.
+    #
+    # Note on the field name: we set ``leg["clob_idempotency_key"]`` rather
+    # than overloading ``leg["metadata"]`` (which is the
+    # ExecutionPlan-bookkeeping dict consumed by readers like
+    # ``order_manager._resolve_execution_price_bounds``). Conflating those
+    # two meanings is what produced the production hex-error pattern; the
+    # dedicated field ends that overload for good.
     idempotency_key = derive_fast_idempotency_key(
         trader_id=trader_id,
         signal_id=signal_id,
     )
     if mode_key == "live" and idempotency_key:
-        # Maker/taker submission goes through the leg dict; stamp metadata
-        # there so order_manager + live_execution_adapter forward it
-        # untouched into ``OrderArgsV2.metadata``.
-        leg = {**leg, "metadata": idempotency_key}
+        leg = {**leg, "clob_idempotency_key": idempotency_key}
 
     # ----- Pre-submit skeleton row (idempotency lock) -------------------------
     # Write a TraderOrder row marked in-flight BEFORE the CLOB submission so

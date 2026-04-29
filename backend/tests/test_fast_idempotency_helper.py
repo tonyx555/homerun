@@ -62,6 +62,47 @@ def test_is_fast_idempotency_key_accepts_real_keys_and_rejects_zero():
     assert is_fast_idempotency_key("not-hex") is False
 
 
+def test_derive_clob_idempotency_key_falls_back_to_fast_shape_when_leg_id_empty():
+    """Backward compatibility: passing leg_id="" must produce the same
+    bytes as the legacy ``derive_fast_idempotency_key`` so reconcile
+    can still attach to fast-path orders submitted before the orchestrator
+    path adopted leg-scoped keys."""
+    from services.trader_orchestrator.fast_idempotency import derive_clob_idempotency_key
+
+    legacy = derive_fast_idempotency_key(trader_id="trader-1", signal_id="sig-abc")
+    new_no_leg = derive_clob_idempotency_key(trader_id="trader-1", signal_id="sig-abc", leg_id="")
+    assert legacy == new_no_leg
+
+
+def test_derive_clob_idempotency_key_distinguishes_legs_within_same_signal():
+    """Multi-leg execution plans submit several CLOB orders that all
+    share (trader_id, signal_id); each must get a distinct idempotency
+    key so reconcile can attach venue orders to the right leg's
+    pre-submit row."""
+    from services.trader_orchestrator.fast_idempotency import derive_clob_idempotency_key
+
+    leg_a = derive_clob_idempotency_key(trader_id="trader-1", signal_id="sig-abc", leg_id="leg_1")
+    leg_b = derive_clob_idempotency_key(trader_id="trader-1", signal_id="sig-abc", leg_id="leg_2")
+    assert leg_a != leg_b
+    # Stable across recompute (idempotent on retry).
+    assert leg_a == derive_clob_idempotency_key(
+        trader_id="trader-1", signal_id="sig-abc", leg_id="leg_1"
+    )
+    # Differs from the no-leg fast-path shape so a leg-scoped retry
+    # never collides with a fast-path order's key.
+    assert leg_a != derive_clob_idempotency_key(
+        trader_id="trader-1", signal_id="sig-abc", leg_id=""
+    )
+
+
+def test_derive_clob_idempotency_key_normalizes_leg_id_whitespace_and_case():
+    from services.trader_orchestrator.fast_idempotency import derive_clob_idempotency_key
+
+    a = derive_clob_idempotency_key(trader_id="trader-1", signal_id="sig-abc", leg_id="LEG_1")
+    b = derive_clob_idempotency_key(trader_id="trader-1", signal_id="sig-abc", leg_id="  leg_1 ")
+    assert a == b
+
+
 def test_normalize_metadata_for_match_handles_prefix_and_case():
     raw = "ABCDEF" + "0" * 58
     expected = "0x" + ("abcdef" + "0" * 58)

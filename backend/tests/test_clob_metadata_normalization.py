@@ -82,7 +82,31 @@ def test_normalize_clob_metadata_handles_non_str_inputs():
     assert _normalize_clob_metadata([1, 2, 3]) is None  # str repr is "[1, 2, 3]"
 
 
-def test_clob_metadata_from_leg_accepts_string_idempotency_key():
+def test_clob_metadata_from_leg_prefers_dedicated_idempotency_field():
+    """The current schema puts the venue idempotency key in
+    ``leg["clob_idempotency_key"]`` — a dedicated field separate from
+    ``leg["metadata"]`` (which carries ExecutionPlan bookkeeping). The
+    reader must prefer the dedicated field over any legacy string
+    metadata, and it must coexist cleanly with a dict-shaped
+    ``leg["metadata"]``."""
+    key = "0x" + "ab" * 32
+    assert _clob_metadata_from_leg({"clob_idempotency_key": key}) == key
+    # Coexistence with the bookkeeping dict.
+    assert _clob_metadata_from_leg(
+        {"clob_idempotency_key": key, "metadata": {"market_coverage": {"scope": "event"}}}
+    ) == key
+    # Dedicated field wins over legacy string metadata.
+    assert _clob_metadata_from_leg(
+        {"clob_idempotency_key": key, "metadata": "0x" + "cd" * 32}
+    ) == key
+
+
+def test_clob_metadata_from_leg_falls_back_to_legacy_string_metadata():
+    """In-flight legs constructed under the old schema (where
+    fast_submit overrode ``leg["metadata"]`` with the hex key) must
+    still submit with the right key on retry. The reader falls back
+    to a string-shaped ``leg["metadata"]`` only when no
+    ``clob_idempotency_key`` is present."""
     key = "0x" + "ab" * 32
     assert _clob_metadata_from_leg({"metadata": key}) == key
 
@@ -100,3 +124,6 @@ def test_clob_metadata_from_leg_handles_missing_or_empty():
     assert _clob_metadata_from_leg({"metadata": None}) is None
     assert _clob_metadata_from_leg({"metadata": ""}) is None
     assert _clob_metadata_from_leg({"metadata": "   "}) is None
+    assert _clob_metadata_from_leg({"clob_idempotency_key": None}) is None
+    assert _clob_metadata_from_leg({"clob_idempotency_key": ""}) is None
+    assert _clob_metadata_from_leg({"clob_idempotency_key": "   "}) is None
