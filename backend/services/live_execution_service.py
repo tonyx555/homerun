@@ -1188,6 +1188,131 @@ class LiveExecutionService:
             )
             return False
 
+    async def _log_balance_snapshot_per_signature_type(self, *, context: str) -> None:
+        """Log the venue's balance + active-order view for every supported
+        signature_type so an operator can see *which wallet* the SDK was
+        looking at when it threw "not enough balance / allowance".
+
+        The error message itself only reports one signature_type's slice
+        of the truth (the one the SDK currently has selected) — funds in
+        a different funder wallet are invisible to that slice.  Without
+        this snapshot the operator has to run an out-of-band script to
+        find which funder actually has free cash; with it, every
+        balance rejection in the worker logs is self-explanatory.
+
+        Read-only.  All exceptions are swallowed: this is best-effort
+        diagnostic output and must not break the calling order path.
+        """
+        try:
+            from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+        except Exception:
+            logger.warning(
+                "balance snapshot unavailable: could not import BalanceAllowanceParams",
+                context=context,
+            )
+            return
+
+        if not self.is_ready():
+            logger.warning(
+                "balance snapshot unavailable: trading client not ready",
+                context=context,
+            )
+            return
+
+        prior = self._balance_signature_type
+        try:
+            for sig in POLYMARKET_SIGNATURE_TYPES:
+                if not self._signature_type_supported(int(sig)):
+                    logger.info(
+                        "balance snapshot",
+                        context=context,
+                        signature_type=int(sig),
+                        supported=False,
+                        funder=None,
+                    )
+                    continue
+                funder = self._funder_for_signature_type(int(sig))
+                # Re-point the client so ``get_balance_allowance`` reads
+                # this signature_type's wallet.  Restored in the finally.
+                try:
+                    self._balance_signature_type = int(sig)
+                    self._apply_signature_type_to_client(int(sig))
+                except Exception:
+                    pass
+
+                params = BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=int(sig),
+                )
+
+                balance_str: str | None = None
+                allowance_str: str | None = None
+                err: str | None = None
+
+                try:
+                    await self._run_client_io(
+                        self._client.update_balance_allowance, params
+                    )
+                except Exception as exc:
+                    err = f"refresh_failed:{type(exc).__name__}:{str(exc)[:80]}"
+
+                try:
+                    payload = await self._run_client_io(
+                        self._client.get_balance_allowance, params
+                    )
+                except Exception as exc:
+                    err = (err + " | " if err else "") + (
+                        f"fetch_failed:{type(exc).__name__}:{str(exc)[:80]}"
+                    )
+                    payload = None
+
+                if isinstance(payload, dict):
+                    assume_base_units = isinstance(payload.get("allowances"), dict)
+                    bal = _parse_collateral_amount(
+                        payload.get("balance"),
+                        assume_base_units=assume_base_units,
+                    )
+                    alw = _parse_collateral_amount(
+                        payload.get("allowance"),
+                        assume_base_units=assume_base_units,
+                    )
+                    if isinstance(payload.get("allowances"), dict):
+                        for raw in payload["allowances"].values():
+                            parsed = _parse_collateral_amount(
+                                raw, assume_base_units=True
+                            )
+                            if parsed is not None and (
+                                alw is None or parsed > alw
+                            ):
+                                alw = parsed
+                    if bal is not None:
+                        balance_str = f"${float(bal):.2f}"
+                    if alw is not None:
+                        allowance_str = f"${float(alw):.2f}"
+
+                logger.info(
+                    "balance snapshot",
+                    context=context,
+                    signature_type=int(sig),
+                    supported=True,
+                    funder=funder,
+                    balance_usdc=balance_str,
+                    allowance_usdc=allowance_str,
+                    error=err,
+                )
+        except Exception as exc:
+            logger.warning(
+                "balance snapshot dump failed",
+                context=context,
+                exc_info=exc,
+            )
+        finally:
+            try:
+                self._balance_signature_type = prior
+                self._apply_signature_type_to_client(prior)
+            except Exception:
+                pass
+
     async def refresh_collateral_balance_allowance(self) -> bool:
         if not self.is_ready() and not await self.ensure_initialized():
             return False
@@ -3150,6 +3275,14 @@ class LiveExecutionService:
             await self._refresh_signature_type()
             sell_allowance_retry_used = False
             buy_allowance_retry_used = False
+            # One-shot guard so we dump the per-signature_type wallet
+            # snapshot at most once per ``place_order`` call even if
+            # multiple retries hit "not enough balance / allowance".
+            # The snapshot itself is 9 SDK calls (3 sig types × refresh +
+            # fetch + apply) so spamming it on every retry would amplify
+            # gateway pressure exactly when the venue is already
+            # rejecting us.
+            balance_snapshot_logged = False
             if side == OrderSide.BUY and not skip_buy_pre_submit_gate:
                 buy_gate_ok, buy_gate_error = await self._enforce_buy_pre_submit_gate(
                     token_id=token_key,
@@ -3267,10 +3400,14 @@ class LiveExecutionService:
                                 )
                                 await asyncio.sleep(0)
                                 continue
+                        if not balance_snapshot_logged:
+                            balance_snapshot_logged = True
+                            await self._log_balance_snapshot_per_signature_type(
+                                context=f"sell_balance_rejection:{token_key}"
+                            )
                     if (
                         side == OrderSide.BUY
                         and "not enough balance / allowance" in error_text
-                        and not buy_allowance_retry_used
                     ):
                         # Polymarket's CLOB caches USDC balance/allowance
                         # server-side for performance; a fill on a previous
@@ -3282,16 +3419,22 @@ class LiveExecutionService:
                         # would fail and stay failed (visible as a recurring
                         # "balance: $X, sum of active orders: $X" rejection
                         # even when the wallet on-chain has plenty of USDC).
-                        buy_allowance_retry_used = True
-                        if await self.refresh_collateral_balance_allowance():
-                            logger.warning(
-                                "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
-                                attempt=attempt + 1,
-                                token_id=token_key,
-                                error_excerpt=error_text[:200],
+                        if not buy_allowance_retry_used:
+                            buy_allowance_retry_used = True
+                            if await self.refresh_collateral_balance_allowance():
+                                logger.warning(
+                                    "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
+                                    attempt=attempt + 1,
+                                    token_id=token_key,
+                                    error_excerpt=error_text[:200],
+                                )
+                                await asyncio.sleep(0)
+                                continue
+                        if not balance_snapshot_logged:
+                            balance_snapshot_logged = True
+                            await self._log_balance_snapshot_per_signature_type(
+                                context=f"buy_balance_rejection:{token_key}"
                             )
-                            await asyncio.sleep(0)
-                            continue
                     if (
                         post_only
                         and _is_post_only_cross_reject(error_text)
@@ -3439,10 +3582,14 @@ class LiveExecutionService:
                             )
                             await asyncio.sleep(0)
                             continue
+                    if not balance_snapshot_logged:
+                        balance_snapshot_logged = True
+                        await self._log_balance_snapshot_per_signature_type(
+                            context=f"sell_balance_rejection:{token_key}"
+                        )
                 if (
                     side == OrderSide.BUY
                     and "not enough balance / allowance" in error_message.lower()
-                    and not buy_allowance_retry_used
                 ):
                     # Same stale-cache root cause as the create_order path
                     # above — Polymarket's CLOB caches USDC balance/allowance
@@ -3452,16 +3599,22 @@ class LiveExecutionService:
                     # against a stale cache fail permanently (the recurring
                     # "balance: $X, sum of active orders: $X" rejection users
                     # see despite having ample USDC in the proxy wallet).
-                    buy_allowance_retry_used = True
-                    if await self.refresh_collateral_balance_allowance():
-                        logger.warning(
-                            "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
-                            attempt=attempt + 1,
-                            token_id=token_key,
-                            error_excerpt=error_message[:200],
+                    if not buy_allowance_retry_used:
+                        buy_allowance_retry_used = True
+                        if await self.refresh_collateral_balance_allowance():
+                            logger.warning(
+                                "Buy order rejected by stale balance/allowance cache; refreshed cache and retrying",
+                                attempt=attempt + 1,
+                                token_id=token_key,
+                                error_excerpt=error_message[:200],
+                            )
+                            await asyncio.sleep(0)
+                            continue
+                    if not balance_snapshot_logged:
+                        balance_snapshot_logged = True
+                        await self._log_balance_snapshot_per_signature_type(
+                            context=f"buy_balance_rejection:{token_key}"
                         )
-                        await asyncio.sleep(0)
-                        continue
                 if (
                     post_only
                     and _is_post_only_cross_reject(error_message)
