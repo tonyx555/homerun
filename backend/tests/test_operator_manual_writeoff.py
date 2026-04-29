@@ -28,8 +28,10 @@ from models.database import (
 from services.operator_writeoff import (
     ManualWriteoffRejected,
     ManualWriteoffReversalRejected,
+    WalletAbsentResolutionReversalRejected,
     manual_writeoff_order,
     reverse_manual_writeoff_order,
+    reverse_wallet_absent_resolution,
 )
 from tests.postgres_test_db import build_postgres_session_factory
 from utils.utcnow import utcnow
@@ -707,6 +709,152 @@ async def test_reverse_writeoff_chain_balance_sanity_check(tmp_path):
             )
             await session.commit()
             assert result["next_status"] == "executed"
+    finally:
+        await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Reverse wallet-absent resolution
+# ---------------------------------------------------------------------------
+
+
+async def _seed_wallet_absent_resolved(
+    session,
+    trader_id: str,
+    order_id: str,
+    *,
+    pe_status: str = "superseded_wallet_absent_no_provider",
+):
+    """Seed a row in the resolved/wallet-absent state — what the
+    lifecycle's wallet-absent close path leaves behind when it fires
+    (and what the 2026-04-28 incident incorrectly fired against three
+    positions)."""
+    await _seed(session, trader_id, order_id, last_error="TimeoutError")
+    async with session.begin():
+        row = await session.get(TraderOrder, order_id)
+        assert row is not None
+        row.status = "resolved"
+        row.actual_profit = None
+        payload = dict(row.payload_json or {})
+        payload["pending_live_exit"] = {
+            **(payload.get("pending_live_exit") or {}),
+            "status": pe_status,
+            "resolved_at": utcnow().isoformat(),
+            "retry_count": 18,
+            "last_error": "persistent_timeout_auto_recovery_after_1926s (prior: TimeoutError)",
+        }
+        payload["wallet_absent_resolution"] = {
+            "resolved_at": utcnow().isoformat(),
+            "reason": "stale_pending_exit_no_provider_and_wallet_absent",
+            "retry_count": 18,
+            "last_error": "TimeoutError",
+        }
+        row.payload_json = payload
+
+
+@pytest.mark.asyncio
+async def test_reverse_wallet_absent_resolution_happy_path(tmp_path):
+    engine, session_factory = await build_postgres_session_factory(
+        Base, "reverse_wallet_absent_happy"
+    )
+    try:
+        async with session_factory() as session:
+            await _seed_wallet_absent_resolved(session, "trader-wa", "order-wa")
+
+        async with session_factory() as session:
+            result = await reverse_wallet_absent_resolution(
+                session,
+                order_id="order-wa",
+                reason="DB-pressure timeouts + Polymarket /positions blip caused false wallet-absent",
+                operator_id="ops@homerun",
+            )
+            await session.commit()
+
+        async with session_factory() as session:
+            row = await session.get(TraderOrder, "order-wa")
+            assert row is not None
+            assert row.status == "executed"
+            assert row.actual_profit is None
+            assert row.verification_status == "wallet_position"
+            payload = row.payload_json or {}
+            assert "wallet_absent_resolution" not in payload
+            pe = payload.get("pending_live_exit") or {}
+            assert pe.get("status") == "reopened_after_wallet_absent_reversal"
+            assert pe.get("retry_count") == 0
+            assert pe.get("last_error") is None
+
+            events = (
+                await session.execute(
+                    select(TraderOrderVerificationEvent).where(
+                        TraderOrderVerificationEvent.trader_order_id == "order-wa"
+                    )
+                )
+            ).scalars().all()
+            reversal = [e for e in events if e.event_type == "wallet_absent_resolution_reversed"]
+            assert len(reversal) == 1
+            evt = reversal[0]
+            payload = evt.payload_json or {}
+            assert payload.get("operator_id") == "ops@homerun"
+            assert payload.get("prior_lifecycle_status") == "resolved"
+            assert payload.get("prior_pending_exit", {}).get("status") == "superseded_wallet_absent_no_provider"
+            assert payload.get("prior_wallet_absent_resolution") is not None
+
+        assert result["next_status"] == "executed"
+        assert result["prior_pending_exit_status"] == "superseded_wallet_absent_no_provider"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reverse_wallet_absent_rejects_non_resolved_rows(tmp_path):
+    engine, session_factory = await build_postgres_session_factory(
+        Base, "reverse_wallet_absent_rejects_non_resolved"
+    )
+    try:
+        async with session_factory() as session:
+            await _seed(session, "trader-x", "order-still-active")  # status=executed
+
+        async with session_factory() as session:
+            with pytest.raises(WalletAbsentResolutionReversalRejected, match="not 'resolved'"):
+                await reverse_wallet_absent_resolution(
+                    session,
+                    order_id="order-still-active",
+                    reason="should fail",
+                    operator_id="ops",
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reverse_wallet_absent_rejects_non_wallet_absent_pe_status(tmp_path):
+    """A row that's resolved for a non-wallet-absent reason (real
+    settlement, terminal close) cannot be reversed via this path."""
+    engine, session_factory = await build_postgres_session_factory(
+        Base, "reverse_wallet_absent_rejects_other_pe"
+    )
+    try:
+        async with session_factory() as session:
+            # Seed resolved with a non-wallet-absent pending_exit status.
+            await _seed(session, "trader-y", "order-real-resolve")
+            row = await session.get(TraderOrder, "order-real-resolve")
+            row.status = "resolved"
+            payload = dict(row.payload_json or {})
+            payload["pending_live_exit"] = {"status": "superseded_settlement"}
+            row.payload_json = payload
+            await session.commit()
+
+        async with session_factory() as session:
+            with pytest.raises(
+                WalletAbsentResolutionReversalRejected,
+                match="wallet-absent-resolution",
+            ):
+                await reverse_wallet_absent_resolution(
+                    session,
+                    order_id="order-real-resolve",
+                    reason="should fail",
+                    operator_id="ops",
+                )
     finally:
         await engine.dispose()
 

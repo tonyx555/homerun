@@ -1813,6 +1813,44 @@ class LiveExecutionService:
                                     "updated_at": persisted_at,
                                 }
                             )
+                        # Wipe-and-replace guard: if the new positions list is
+                        # EMPTY but a non-trivial number of rows currently
+                        # exist for this wallet, refuse to wipe.  An empty
+                        # ``self._positions`` map can be the legitimate
+                        # "wallet truly has no positions" signal, but it is
+                        # also the indistinguishable shape produced by a
+                        # transient Polymarket data-API blip (HTTP 200 with
+                        # empty ``data`` array, or pagination short-circuit).
+                        # The 2026-04-28 incident saw ~$200 of unrealised gain
+                        # written off because that blip wiped the local cache,
+                        # which the lifecycle then read as "wallet absent".
+                        # Trust the previous DB state until we get a non-empty
+                        # confirmation; the next sync will reconcile if the
+                        # wallet did genuinely flatten.
+                        if not position_rows:
+                            existing_count = (
+                                await session.execute(
+                                    select(func.count())
+                                    .select_from(LiveTradingPosition)
+                                    .where(
+                                        func.lower(
+                                            func.coalesce(
+                                                LiveTradingPosition.wallet_address, ""
+                                            )
+                                        )
+                                        == wallet_key
+                                    )
+                                )
+                            ).scalar_one() or 0
+                            if int(existing_count) > 0:
+                                logger.warning(
+                                    "Refusing to wipe live_trading_positions on "
+                                    "empty-result sync (likely Polymarket data-API blip)",
+                                    wallet=wallet_key,
+                                    existing_rows=int(existing_count),
+                                )
+                                await session.commit()
+                                return
                         stale_rows_query = delete(LiveTradingPosition).where(
                             func.lower(func.coalesce(LiveTradingPosition.wallet_address, "")) == wallet_key
                         )

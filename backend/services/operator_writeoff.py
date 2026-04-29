@@ -136,6 +136,27 @@ class ManualWriteoffReversalRejected(ValueError):
     """
 
 
+class WalletAbsentResolutionReversalRejected(ValueError):
+    """Raised when a reverse-wallet-absent-resolution request fails a
+    precondition.  Same shape as the writeoff variants for API
+    consistency.
+    """
+
+
+# Pending-exit statuses that the lifecycle uses to mark a row as
+# resolved-because-the-wallet-appeared-flat.  All three flavours come
+# from the same root cause class — the wallet snapshot returning
+# (transiently) empty during reconcile — so the reversal path treats
+# them uniformly.
+_WALLET_ABSENT_PENDING_EXIT_STATES = frozenset(
+    {
+        "superseded_wallet_absent",
+        "superseded_wallet_absent_no_provider",
+        "superseded_wallet_absent_underfilled_close",
+    }
+)
+
+
 def _close_status_for_pnl(realized_pnl: float) -> str:
     """Map a realized P&L number to the canonical ``trader_orders.status``
     closing value."""
@@ -566,5 +587,180 @@ async def reverse_manual_writeoff_order(
         "prior_actual_profit": prior_actual_profit,
         "prior_lifecycle_status": current_status,
         "prior_writeoff_event_id": prior_writeoff_event_id,
+        "applied_at": now.isoformat(),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Wallet-absent resolution reversal
+# ---------------------------------------------------------------------------
+#
+# Sibling of ``reverse_manual_writeoff_order`` for the OTHER false-close
+# class: rows the lifecycle marked ``status='resolved'`` after seeing the
+# wallet snapshot return empty.  The 2026-04-28 incident affected three
+# of these — the SELL retry path's repeated client-side timeouts left
+# the pending_exit stale, and a Polymarket data-API blip wiping the
+# local cache flipped ``wallet_position_observed`` to False, so the
+# wallet-absent close fired even though the chain still held the
+# shares.  The two layers of defence in
+# ``services/live_execution_service._persist_positions`` and
+# ``reconcile_live_positions`` (``wallet_positions_authoritative``)
+# stop new occurrences; this function recovers the historic ones.
+#
+# Behaviour mirrors ``reverse_manual_writeoff_order``:
+#
+#   * Only acts on rows whose ``status='resolved'`` AND
+#     ``payload['pending_live_exit']['status']`` is one of the three
+#     wallet-absent variants.  No other terminal closes are touched.
+#   * Restores the row to ``status='executed'``,
+#     ``verification_status='wallet_position'``.  Clears any stale
+#     ``payload['position_close']`` and resets the pending_exit
+#     counters so reconcile re-evaluates.
+#   * Emits an immutable
+#     ``TraderOrderVerificationEvent(event_type='wallet_absent_resolution_reversed')``
+#     with operator id, reason, prior pending_exit, prior
+#     wallet_absent_resolution payload.
+#
+# The session is NOT committed here; the caller commits.
+
+
+async def reverse_wallet_absent_resolution(
+    session: AsyncSession,
+    *,
+    order_id: str,
+    reason: str,
+    operator_id: str,
+) -> dict[str, Any]:
+    """Reverse a ``superseded_wallet_absent_*`` resolution and restore
+    the row to active.
+
+    See module-level note above for the failure mode this exists to
+    recover from.
+    """
+    normalized_order_id = str(order_id or "").strip()
+    if not normalized_order_id:
+        raise WalletAbsentResolutionReversalRejected("order_id is required")
+
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        raise WalletAbsentResolutionReversalRejected("reason is required (non-empty string)")
+    if len(normalized_reason) > 2000:
+        raise WalletAbsentResolutionReversalRejected("reason must be ≤ 2000 characters")
+
+    normalized_operator = str(operator_id or "").strip()
+    if not normalized_operator:
+        raise WalletAbsentResolutionReversalRejected("operator_id is required")
+
+    row = (
+        await session.execute(
+            select(TraderOrder).where(TraderOrder.id == normalized_order_id)
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        raise WalletAbsentResolutionReversalRejected(
+            f"order_id={normalized_order_id} not found"
+        )
+
+    current_status = str(row.status or "").strip().lower()
+    if current_status != "resolved":
+        raise WalletAbsentResolutionReversalRejected(
+            f"order status={current_status!r} is not 'resolved'; this reversal is "
+            "only valid for rows marked resolved by the wallet-absent path"
+        )
+
+    payload = dict(row.payload_json or {})
+    pending_exit = payload.get("pending_live_exit") or {}
+    pe_status = (
+        str(pending_exit.get("status") or "").strip().lower()
+        if isinstance(pending_exit, dict)
+        else ""
+    )
+    if pe_status not in _WALLET_ABSENT_PENDING_EXIT_STATES:
+        raise WalletAbsentResolutionReversalRejected(
+            f"pending_live_exit.status={pe_status!r} is not a wallet-absent-resolution "
+            f"state (expected one of {sorted(_WALLET_ABSENT_PENDING_EXIT_STATES)})"
+        )
+
+    now = utcnow()
+    prior_actual_profit = (
+        float(row.actual_profit) if row.actual_profit is not None else None
+    )
+    prior_pending_exit = (
+        dict(pending_exit) if isinstance(pending_exit, dict) else {}
+    )
+    prior_wallet_absent_res = payload.get("wallet_absent_resolution")
+    if isinstance(prior_wallet_absent_res, dict):
+        prior_wallet_absent_res = dict(prior_wallet_absent_res)
+    else:
+        prior_wallet_absent_res = None
+    prior_position_close = payload.get("position_close")
+    if isinstance(prior_position_close, dict):
+        prior_position_close = dict(prior_position_close)
+    else:
+        prior_position_close = None
+    prior_verification = str(row.verification_status or "").strip().lower()
+
+    # Reset.  Status → executed; verification → wallet_position; clear
+    # position_close + wallet_absent_resolution; reset retry counters
+    # on pending_exit so the lifecycle re-evaluates the exit triggers.
+    row.actual_profit = None
+    row.status = "executed"
+    row.updated_at = now
+
+    reset_pending_exit = dict(prior_pending_exit) if prior_pending_exit else {}
+    reset_pending_exit["status"] = "reopened_after_wallet_absent_reversal"
+    reset_pending_exit["reopened_at"] = now.isoformat()
+    reset_pending_exit["consecutive_timeout_count"] = 0
+    reset_pending_exit["consecutive_blocked_failure_count"] = 0
+    reset_pending_exit["retry_count"] = 0
+    reset_pending_exit["last_error"] = None
+    reset_pending_exit["next_retry_at"] = None
+    reset_pending_exit["exhausted_at"] = None
+
+    payload["pending_live_exit"] = reset_pending_exit
+    payload.pop("wallet_absent_resolution", None)
+    payload.pop("position_close", None)
+    row.payload_json = payload
+
+    apply_trader_order_verification(
+        row,
+        verification_status="wallet_position",
+        verification_source="operator_reversal",
+        verification_reason=normalized_reason,
+        verified_at=now,
+        force=True,
+    )
+
+    event_payload: dict[str, Any] = {
+        "operator_id": normalized_operator,
+        "reason": normalized_reason,
+        "prior_actual_profit": prior_actual_profit,
+        "prior_lifecycle_status": current_status,
+        "prior_verification_status": prior_verification,
+        "prior_pending_exit": prior_pending_exit,
+        "prior_wallet_absent_resolution": prior_wallet_absent_res,
+        "prior_position_close": prior_position_close,
+    }
+
+    append_trader_order_verification_event(
+        session,
+        trader_order_id=normalized_order_id,
+        verification_status="wallet_position",
+        source="operator_reversal",
+        event_type="wallet_absent_resolution_reversed",
+        reason=normalized_reason,
+        payload_json=event_payload,
+        created_at=now,
+    )
+
+    return {
+        "order_id": normalized_order_id,
+        "next_status": "executed",
+        "verification_status": "wallet_position",
+        "operator_id": normalized_operator,
+        "reason": normalized_reason,
+        "prior_actual_profit": prior_actual_profit,
+        "prior_lifecycle_status": current_status,
+        "prior_pending_exit_status": pe_status,
         "applied_at": now.isoformat(),
     }

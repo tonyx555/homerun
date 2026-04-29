@@ -4585,7 +4585,27 @@ async def reconcile_live_positions(
             timeout=_WALLET_POSITIONS_LOAD_TIMEOUT_SECONDS,
             fallback=dict(_wallet_positions_cache[1] or {}),
         )
+    # Two distinct concepts:
+    #
+    #   wallet_positions_loaded         — the load attempt succeeded; the
+    #                                     wallet snapshot is meaningful
+    #                                     enough to AUDIT against.
+    #   wallet_positions_authoritative  — the load returned at least one
+    #                                     row, so an absent token here is
+    #                                     genuine evidence the wallet does
+    #                                     not hold it.
+    #
+    # The wallet-absent close path uses ``authoritative`` rather than just
+    # ``loaded`` because an empty cache is indistinguishable from "the
+    # data API blipped empty".  The 2026-04-28 incident saw 3 positions
+    # wrongly resolved as ``superseded_wallet_absent_no_provider`` after
+    # such a blip wiped ``live_trading_positions``; requiring at least
+    # one observed entry before treating an absent token as authoritative
+    # eliminates that misclassification while still letting the path fire
+    # for a wallet that genuinely held N positions of which this one is
+    # gone.
     wallet_positions_loaded = bool(_wallet_positions_last_refresh_succeeded or wallet_positions_by_token)
+    wallet_positions_authoritative = bool(wallet_positions_by_token)
     wallet_closed_positions_by_token: dict[str, dict[str, Any]] = {}
     wallet_sell_trades_by_token: dict[str, dict[str, Any]] = {}
     wallet_close_activity_by_token: dict[str, dict[str, Any]] = {}
@@ -4777,6 +4797,12 @@ async def reconcile_live_positions(
                 pending_exit = pending_exit if isinstance(pending_exit, dict) else {}
                 if (
                     wallet_positions_loaded
+                    # Same blip-defence as the no-provider wallet-absent path
+                    # below (line ~6814) — refuse to flip a row to a wallet-
+                    # absent variant when the wallet cache is empty (could be
+                    # a Polymarket data-API blip rather than a genuinely
+                    # flat wallet).
+                    and wallet_positions_authoritative
                     and token_id
                     and wallet_position_size <= _WALLET_SIZE_EPSILON
                 ):
@@ -6641,6 +6667,14 @@ async def reconcile_live_positions(
                         )
                         if wallet_position_size > _WALLET_SIZE_EPSILON:
                             held += 1
+                        elif not wallet_positions_authoritative:
+                            # Empty wallet cache could be a Polymarket data-
+                            # API blip; don't trust ``size <= 0`` here.  Hold
+                            # and let the next reconcile cycle re-evaluate
+                            # against a fresh load.  See the
+                            # wallet_positions_authoritative comment above
+                            # the load.
+                            held += 1
                         else:
                             details.append(
                                 {
@@ -6812,6 +6846,19 @@ async def reconcile_live_positions(
             token_id
             and entry_fill_size > 0.0
             and wallet_positions_loaded
+            # ``wallet_positions_authoritative`` requires the load to have
+            # returned at least one row.  An empty wallet snapshot is the
+            # exact shape produced by a transient Polymarket data-API blip
+            # (HTTP 200 with empty ``data`` array) — and that's the failure
+            # mode that produced the 2026-04-28 incident.  A wallet that
+            # GENUINELY holds zero positions can be reconciled by other
+            # paths (resolution detection, settlement); the wallet-absent
+            # close path's purpose is recovering positions whose token
+            # disappeared from a wallet that still holds others.  See
+            # ``services/live_execution_service._persist_positions`` for
+            # the corresponding write-side guard against wiping the cache
+            # on an empty result.
+            and wallet_positions_authoritative
             and not wallet_position_observed
             and pending_winning_idx is None
             and wallet_settlement_price is None

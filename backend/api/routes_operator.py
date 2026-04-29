@@ -43,8 +43,10 @@ from models.database import AsyncSessionLocal
 from services.operator_writeoff import (
     ManualWriteoffRejected,
     ManualWriteoffReversalRejected,
+    WalletAbsentResolutionReversalRejected,
     manual_writeoff_order,
     reverse_manual_writeoff_order,
+    reverse_wallet_absent_resolution,
 )
 from services.stuck_position_monitor import (
     classify_stuck_position,
@@ -291,3 +293,81 @@ async def operator_reverse_manual_writeoff(
         },
     )
     return ReverseManualWriteoffResponse(**result)
+
+
+class ReverseWalletAbsentResolutionRequest(BaseModel):
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Mandatory free-form explanation for the reversal.  Recorded "
+            "in the wallet_absent_resolution_reversed verification event."
+        ),
+    )
+    operator_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+    )
+
+
+class ReverseWalletAbsentResolutionResponse(BaseModel):
+    order_id: str
+    next_status: str
+    verification_status: str
+    operator_id: str
+    reason: str
+    prior_actual_profit: Optional[float] = None
+    prior_lifecycle_status: str
+    prior_pending_exit_status: str
+    applied_at: str
+
+
+@router.post(
+    "/orders/{order_id}/reverse-wallet-absent-resolution",
+    response_model=ReverseWalletAbsentResolutionResponse,
+)
+async def operator_reverse_wallet_absent_resolution(
+    order_id: str,
+    body: ReverseWalletAbsentResolutionRequest,
+) -> ReverseWalletAbsentResolutionResponse:
+    """Reverse a ``superseded_wallet_absent_*`` resolution.
+
+    Sibling of ``reverse-manual-writeoff`` for the OTHER false-close
+    class — rows the lifecycle marked ``status='resolved'`` after a
+    transient wallet-snapshot blip.  See
+    ``services.operator_writeoff.reverse_wallet_absent_resolution``
+    for the precondition rules.
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await reverse_wallet_absent_resolution(
+                session,
+                order_id=order_id,
+                reason=body.reason,
+                operator_id=body.operator_id,
+            )
+        except WalletAbsentResolutionReversalRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception(
+                "reverse_wallet_absent_resolution failed unexpectedly",
+                extra={"order_id": order_id, "operator_id": body.operator_id},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"reverse_wallet_absent_resolution failed: {exc}",
+            ) from exc
+        await session.commit()
+
+    logger.warning(
+        "Operator wallet-absent resolution REVERSED",
+        extra={
+            "order_id": result["order_id"],
+            "operator_id": result["operator_id"],
+            "reason": result["reason"],
+            "prior_pending_exit_status": result.get("prior_pending_exit_status"),
+        },
+    )
+    return ReverseWalletAbsentResolutionResponse(**result)
