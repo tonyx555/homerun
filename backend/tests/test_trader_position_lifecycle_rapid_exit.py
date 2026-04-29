@@ -125,6 +125,107 @@ def test_aggressive_exit_price_decrement_no_walk_for_zero_or_negative():
     assert position_lifecycle._aggressive_exit_price_decrement(-100) == 0.0
 
 
+@pytest.mark.asyncio
+async def test_prepare_sell_allowance_bounded_swallows_timeout(monkeypatch):
+    """A degraded Polygon RPC must not blow the per-attempt budget.
+
+    The bounded helper wraps ``prepare_sell_balance_allowance`` in
+    ``asyncio.wait_for(timeout=_LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS)``
+    so a hung allowance refresh can't run for 15-25s before the SDK
+    call's outer wait_for even starts its clock — that was the prep-
+    side half of the 2026-04-28 cascade."""
+    import asyncio
+
+    from services import live_execution_service as les
+
+    async def hung_prep(_token_id):
+        await asyncio.sleep(60.0)  # would never return inside the budget
+        return True
+
+    monkeypatch.setattr(
+        les.live_execution_service,
+        "prepare_sell_balance_allowance",
+        hung_prep,
+    )
+    monkeypatch.setattr(
+        position_lifecycle,
+        "_LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS",
+        0.05,
+    )
+
+    started = asyncio.get_event_loop().time()
+    result = await position_lifecycle._prepare_sell_allowance_bounded("0xabc")
+    elapsed = asyncio.get_event_loop().time() - started
+
+    assert result is False
+    assert elapsed < 1.0, f"helper did not honor the 0.05s budget: {elapsed:.2f}s"
+
+
+@pytest.mark.asyncio
+async def test_prepare_sell_allowance_bounded_returns_underlying_result(monkeypatch):
+    """Happy path: bounded helper passes through the underlying
+    truthy/falsy return value from ``prepare_sell_balance_allowance``."""
+    from services import live_execution_service as les
+
+    async def fast_ok(_token_id):
+        return True
+
+    monkeypatch.setattr(
+        les.live_execution_service,
+        "prepare_sell_balance_allowance",
+        fast_ok,
+    )
+    assert await position_lifecycle._prepare_sell_allowance_bounded("0xabc") is True
+
+    async def fast_false(_token_id):
+        return False
+
+    monkeypatch.setattr(
+        les.live_execution_service,
+        "prepare_sell_balance_allowance",
+        fast_false,
+    )
+    assert await position_lifecycle._prepare_sell_allowance_bounded("0xabc") is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_sell_allowance_bounded_swallows_arbitrary_exception(monkeypatch):
+    """Underlying exceptions other than TimeoutError are also
+    swallowed — the SDK's on-the-fly approval fallback handles
+    cases where the refresh failed for any reason."""
+    from services import live_execution_service as les
+
+    async def boom(_token_id):
+        raise RuntimeError("rpc went away")
+
+    monkeypatch.setattr(
+        les.live_execution_service,
+        "prepare_sell_balance_allowance",
+        boom,
+    )
+    assert await position_lifecycle._prepare_sell_allowance_bounded("0xabc") is False
+
+
+@pytest.mark.asyncio
+async def test_prepare_sell_allowance_bounded_skips_empty_token(monkeypatch):
+    """No work for empty token; never calls the underlying function."""
+    from services import live_execution_service as les
+
+    called = []
+
+    async def spy(token_id):
+        called.append(token_id)
+        return True
+
+    monkeypatch.setattr(
+        les.live_execution_service,
+        "prepare_sell_balance_allowance",
+        spy,
+    )
+    assert await position_lifecycle._prepare_sell_allowance_bounded("") is False
+    assert called == []
+
+
 def test_take_profit_floor_blocks_walk_down():
     """A take-profit exit's floor must trump the walk-down — the limit
     price is set from the gain target, not from market liquidity, so

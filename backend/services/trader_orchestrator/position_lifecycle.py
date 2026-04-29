@@ -125,22 +125,45 @@ _TERMINAL_EXTREME_MARK_THRESHOLD = 0.001
 # incident's bulk writeoff fired against rows whose ONLY problem was
 # this too-tight outer timeout.
 #
-# 15s gives Polymarket headroom under load without making a
-# stuck-on-untradable-market exit eat too much wall-time per pass —
-# the per-pass budget upstream still bounds the worst case.
-_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 15.0
-# Retry budget can be slightly tighter since the cycle has already
-# proven the venue is responsive once we got an answer; we just want
-# to bound time spent on a single candidate.  Still well above the
-# old 5s value to avoid the same false-timeout cascade.
-_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 12.0
-# Cap the number of exits we submit per reconcile pass.  With 20+ stuck
-# retry candidates each taking up to 10s sequentially, a single pass can
-# burn 200+ seconds — blowing the reconciliation worker's 30s per-trader
-# timeout and starving the fast-tier pool.  Processing the N oldest per
-# pass keeps each pass bounded; the rest pick up on the next cycle.
-_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS = 2
+# Outer ``asyncio.wait_for`` budget around ``execute_live_order`` for
+# entry submissions.  This MUST exceed the sum of the SDK's per-call
+# timeouts (``_ORDER_SUBMIT_TIMEOUT_SECONDS`` × 2 = 16s) plus a small
+# buffer for the ``release_conn`` + post-result book-keeping; if it
+# is tighter the outer ``wait_for`` will cancel the SDK
+# ``asyncio.to_thread`` worker mid-protocol.  Cancelling
+# ``to_thread`` is best-effort in CPython (the thread keeps running
+# in the background and may complete the half-submitted request),
+# which is exactly the pathology that produced the 2026-04-28 ghost
+# orders / asyncpg state corruption cascade.
+#
+# Sized to fit the 30s per-trader reconcile cycle:
+#   prep (6s) + outer (20s) + bookkeeping (~3s) ≈ 29s.
+_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 20.0
+# Same constraint for the retry path.  Was 12.0 — strictly less than
+# the SDK's prior 20.0 timeout, so every retry that hit Polymarket
+# gateway latency cancelled the SDK call and produced false
+# TimeoutErrors that bumped ``consecutive_blocked_failure_count`` and
+# eventually marked the row ``blocked_persistent_timeout`` even
+# though the venue was healthy.  Bumped to 20.0 in lockstep with
+# the SDK timeout drop to 8.0 so the inner can complete cleanly.
+_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 20.0
+# Cap the number of exits we submit per reconcile pass.  With each
+# attempt now budgeting up to ~29s (6s prep + 20s outer + bookkeeping),
+# a 2-per-pass cap blows the reconcile worker's 30s per-trader
+# timeout.  Lowered to 1 always — the deferred work picks up on the
+# next reconcile cycle anyway, and 1-per-pass matches the previous
+# "under DB pressure" path (which never regressed throughput in
+# production).
+_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS = 1
 _LIVE_EXIT_PRESSURE_MAX_SUBMISSIONS_PER_PASS = 1
+# Bound on ``prepare_sell_balance_allowance`` (chain RPC, up to 3
+# signature types tried sequentially).  Pre-incident this was
+# unbounded and could happily run for 15-25s before the outer
+# ``wait_for`` even started its clock.  Cap at 6s so a degraded
+# Polygon RPC can't blow the per-attempt budget; the allowance
+# refresh isn't required for correctness — failure here just means
+# the SDK falls through to the existing on-the-fly approval path.
+_LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS = 6.0
 _MARKET_INFO_LOAD_TIMEOUT_SECONDS = 2.5
 _ORDER_SNAPSHOT_LOAD_TIMEOUT_SECONDS = 2.0
 _RECONCILE_TIMING_WARN_SECONDS = 20.0
@@ -658,6 +681,41 @@ def _aggressive_exit_price_decrement(retry_count: int) -> float:
     if retry_count <= 4:
         return 0.05
     return min(0.10, 0.05 + 0.01 * (retry_count - 4))
+
+
+async def _prepare_sell_allowance_bounded(token_id: str) -> bool:
+    """Wrap ``live_execution_service.prepare_sell_balance_allowance``
+    in an ``asyncio.wait_for`` so a degraded Polygon RPC can't run
+    unbounded before the SDK call's outer timeout starts its clock.
+
+    The underlying allowance refresh tries up to 3 signature types
+    sequentially with chain RPC reads in each — pre-incident this was
+    completely unbounded and observed at 15-25s per token in the
+    user-visible cascade.
+
+    Failure here is non-fatal: the SDK call has its own on-the-fly
+    approval fall-through, so a swallowed exception (timeout or
+    otherwise) just means the SELL submission picks up the slack.
+    """
+    if not token_id:
+        return False
+    try:
+        return bool(
+            await asyncio.wait_for(
+                live_execution_service.prepare_sell_balance_allowance(token_id),
+                timeout=_LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS,
+            )
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "prepare_sell_balance_allowance bounded timeout exceeded "
+            "(token_id=%s, budget=%.1fs) — proceeding to SDK without refresh",
+            token_id,
+            _LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS,
+        )
+        return False
+    except Exception:
+        return False
 
 
 def _safe_bool(value: Any, default: bool = False) -> bool:
@@ -7189,10 +7247,7 @@ async def reconcile_live_positions(
 
             try:
                 async with release_conn(session):
-                    try:
-                        await live_execution_service.prepare_sell_balance_allowance(_ladder_token_id)
-                    except Exception:
-                        pass
+                    await _prepare_sell_allowance_bounded(_ladder_token_id)
                     _ladder_report = await exit_executor.run_exit_pass(
                         pending_exit=pending_exit,
                         token_id=_ladder_token_id,
@@ -7722,10 +7777,7 @@ async def reconcile_live_positions(
                                 pending_exit["close_trigger"] = "tp_underwater_market_sell"
                                 pending_exit["post_only"] = False
                                 async with release_conn(session):
-                                    try:
-                                        await live_execution_service.prepare_sell_balance_allowance(token_id)
-                                    except Exception:
-                                        pass
+                                    await _prepare_sell_allowance_bounded(token_id)
                                     exec_result = await asyncio.wait_for(
                                         execute_live_order(
                                             token_id=token_id,
@@ -7747,10 +7799,7 @@ async def reconcile_live_positions(
                                     pending_exit["post_only"] = True
                                 requote_as_rapid_exit = rapid_exit_requote_enabled
                                 async with release_conn(session):
-                                    try:
-                                        await live_execution_service.prepare_sell_balance_allowance(token_id)
-                                    except Exception:
-                                        pass
+                                    await _prepare_sell_allowance_bounded(token_id)
                                     exec_result = await asyncio.wait_for(
                                         execute_live_order(
                                             token_id=token_id,
@@ -8154,10 +8203,7 @@ async def reconcile_live_positions(
                     rapid_retry_exit = force_rapid_retry
                     post_only_retry = bool(pending_exit_kind == "take_profit_limit" and not rapid_retry_exit)
                     async with release_conn(session):
-                        try:
-                            await live_execution_service.prepare_sell_balance_allowance(token_id)
-                        except Exception:
-                            pass
+                        await _prepare_sell_allowance_bounded(token_id)
                         exec_result = await asyncio.wait_for(
                             execute_live_order(
                                 token_id=token_id,
@@ -9304,12 +9350,7 @@ async def reconcile_live_positions(
 
                             try:
                                 async with release_conn(session):
-                                    try:
-                                        await live_execution_service.prepare_sell_balance_allowance(
-                                            token_id
-                                        )
-                                    except Exception:
-                                        pass
+                                    await _prepare_sell_allowance_bounded(token_id)
                                     _first_report = await exit_executor.run_exit_pass(
                                         pending_exit=exit_record,
                                         token_id=token_id,
@@ -9400,10 +9441,7 @@ async def reconcile_live_positions(
                         from services.live_execution_adapter import execute_live_order
 
                         async with release_conn(session):
-                            try:
-                                await live_execution_service.prepare_sell_balance_allowance(token_id)
-                            except Exception:
-                                pass
+                            await _prepare_sell_allowance_bounded(token_id)
                             exec_result = await asyncio.wait_for(
                                 execute_live_order(
                                     token_id=token_id,

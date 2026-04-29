@@ -54,7 +54,21 @@ POST_ONLY_REPRICE_TICK = 0.01
 INITIALIZATION_RETRY_BACKOFF_SECONDS = 60.0
 MISSING_DEPENDENCY_RELOG_SECONDS = 300.0
 PENDING_RECONCILIATION_MAX_ATTEMPTS = 6
-_ORDER_SUBMIT_TIMEOUT_SECONDS = 20.0
+# Per-call cap on the synchronous Polymarket SDK methods
+# (``create_order`` / ``create_market_order`` / ``post_order``).  Each
+# of those is wrapped in ``asyncio.wait_for(asyncio.to_thread(...),
+# timeout=_ORDER_SUBMIT_TIMEOUT_SECONDS)`` so the event loop can
+# unblock if the gateway is unresponsive.  Two SDK calls per
+# submission (sign + post) means the worst-case wall time of a single
+# ``place_order`` is ~2 × this value; the OUTER ``asyncio.wait_for``
+# at the lifecycle layer (``_LIVE_EXIT_ORDER_TIMEOUT_SECONDS`` /
+# ``_LIVE_EXIT_RETRY_TIMEOUT_SECONDS``) MUST exceed that or it will
+# cancel the SDK mid-protocol and leak the underlying thread (and
+# half-submit a request to Polymarket).  20.0s pre-incident produced
+# exactly that pathology against the lifecycle's 12s retry outer.
+# 8s here keeps each gateway round-trip bounded under load while
+# leaving room for the 22s outer to absorb both calls plus buffer.
+_ORDER_SUBMIT_TIMEOUT_SECONDS = 8.0
 _CLIENT_IO_TIMEOUT_SECONDS = 10.0
 _CLOB_READ_TIMEOUT_SECONDS = 3.0
 _CLOB_READ_CIRCUIT_BREAKER_THRESHOLD = 3  # consecutive failures before opening

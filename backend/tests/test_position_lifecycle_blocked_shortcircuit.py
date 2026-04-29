@@ -43,22 +43,65 @@ from utils.utcnow import utcnow
 def test_exit_timeout_floor_and_ceiling():
     """Sanity-check the per-attempt SELL wall-time cap.
 
-    Pre-incident this was 5s and the test asserted ``<= 5``; that
-    floor was wrong — the SDK's own internal SELL timeout is ~12s, so
-    a 5s outer ``asyncio.wait_for`` cancelled mid-protocol every time
-    and produced the false-stuck-position cascade documented in
-    commit a8ef524.  Bumped to 15.0 / 12.0 to outlive the SDK timeout
-    while still bounding total cycle cost.
+    The outer ``asyncio.wait_for`` MUST exceed the SDK's per-call
+    submission timeout (``_ORDER_SUBMIT_TIMEOUT_SECONDS``) × 2 plus a
+    small buffer for the surrounding ``release_conn`` and post-result
+    book-keeping.  If it is tighter, the outer ``wait_for`` cancels
+    the SDK's ``asyncio.to_thread`` worker mid-protocol and leaks
+    the underlying thread (which keeps running and may complete a
+    half-submitted request to Polymarket).  Pre-incident the outer
+    was 12.0 / 15.0 and the SDK was 20.0; the resulting cascade is
+    documented in commit a8ef524 (entry path) and the follow-up
+    bound for the retry path.
 
-    The bound here just protects against future drift in either
-    direction:
-      * A floor (>=12) so we don't reintroduce the premature-cancel
-        pathology.
-      * A ceiling (<=30) so a single retry can never consume an
-        entire reconcile cycle.
+    The floor here is 2 × SDK + 4s buffer; the ceiling is the
+    reconcile worker's per-trader budget so a single retry can't
+    consume the whole cycle.
     """
-    assert 12.0 <= _LIVE_EXIT_ORDER_TIMEOUT_SECONDS <= 30.0
-    assert 12.0 <= _LIVE_EXIT_RETRY_TIMEOUT_SECONDS <= 30.0
+    from services.live_execution_service import _ORDER_SUBMIT_TIMEOUT_SECONDS
+
+    floor = 2.0 * _ORDER_SUBMIT_TIMEOUT_SECONDS + 4.0
+    ceiling = 30.0
+    assert floor <= _LIVE_EXIT_ORDER_TIMEOUT_SECONDS <= ceiling, (
+        f"_LIVE_EXIT_ORDER_TIMEOUT_SECONDS={_LIVE_EXIT_ORDER_TIMEOUT_SECONDS} "
+        f"must satisfy 2×SDK+4s ({floor}) <= x <= {ceiling}"
+    )
+    assert floor <= _LIVE_EXIT_RETRY_TIMEOUT_SECONDS <= ceiling, (
+        f"_LIVE_EXIT_RETRY_TIMEOUT_SECONDS={_LIVE_EXIT_RETRY_TIMEOUT_SECONDS} "
+        f"must satisfy 2×SDK+4s ({floor}) <= x <= {ceiling}"
+    )
+
+
+def test_per_pass_submission_cap_fits_reconcile_budget():
+    """The reconcile worker has a 30s per-trader timeout; a single
+    pass must therefore complete N submissions × per-attempt cost
+    inside that envelope.  Per-attempt ≈ allowance prep budget +
+    outer SDK budget + ~3s book-keeping.  We require:
+
+        cap × per_attempt + reconcile_overhead <= reconcile budget
+
+    Pre-incident the cap was 2 and per-attempt was effectively
+    unbounded (allowance prep was unbounded, SDK was 20s) which
+    routinely blew the 30s budget."""
+    from services.trader_orchestrator.position_lifecycle import (
+        _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS,
+        _LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS,
+    )
+
+    per_attempt_seconds = (
+        _LIVE_EXIT_PREP_ALLOWANCE_TIMEOUT_SECONDS
+        + _LIVE_EXIT_RETRY_TIMEOUT_SECONDS
+        + 3.0  # surrounding bookkeeping
+    )
+    reconcile_budget_seconds = 30.0
+    assert (
+        _LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS * per_attempt_seconds
+        <= reconcile_budget_seconds
+    ), (
+        f"cap={_LIVE_EXIT_MAX_SUBMISSIONS_PER_PASS} × per_attempt="
+        f"{per_attempt_seconds:.1f}s exceeds reconcile budget "
+        f"{reconcile_budget_seconds:.1f}s"
+    )
 
 
 async def _seed_trader_and_order(session, trader_id: str, order_id: str, *, pending_exit_status: str) -> None:
