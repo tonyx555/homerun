@@ -81,8 +81,6 @@ async def test_graceful_timeout_falls_back_to_abandon_if_task_resists_cancel(mon
     """If the inner coro doesn't honor cancel within the grace
     window we fall back to abandonment so the caller isn't blocked
     forever waiting for cleanup."""
-    abandoned_seen = {"value": False}
-
     async def stubborn_task() -> None:
         try:
             await asyncio.sleep(60.0)

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import re
 import statistics
-import time
 from typing import Any, Optional
 
 import logging
@@ -828,8 +827,6 @@ class StatArbStrategy(BaseStrategy):
         enable_stat_signals = bool(config.get("enable_stat_signals", True))
         excluded_keywords = self._normalize_excluded_keywords(config.get("exclude_market_keywords"))
         opportunities: list[Opportunity] = []
-        now = utcnow()
-        scan_time = time.time()
 
         # Pre-build market-id -> event mapping for fast lookup
         market_to_event: dict[str, Event] = {}
