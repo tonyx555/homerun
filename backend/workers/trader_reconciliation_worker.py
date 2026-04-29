@@ -113,7 +113,16 @@ _TRADER_RECONCILE_ATTEMPTS = 3
 _TRADER_RECONCILE_RETRY_BASE_DELAY_SECONDS = 0.05
 _TRADER_RECONCILE_RETRY_MAX_DELAY_SECONDS = 0.3
 _TRADER_RECONCILE_TIMEOUT_SECONDS = 30.0
-_RECONCILIATION_CYCLE_TIMEOUT_SECONDS = 120.0
+# Cycle budget covers all traders processed sequentially.  With per-
+# trader budget at 30s + 5s cancel grace, four traders worst-case
+# need 4 × 35 = 140s, plus inter-trader sleep + the cooldown + the
+# wallet positions sync.  Pre-2026-04-28 this was 120s — exactly at
+# 4 × 30s with zero headroom for the cancel grace, so any single
+# slow trader blew the cycle and the abandoned-task pile-up
+# triggered the "Reconciliation cycle skipped because the prior
+# timed-out cycle is still finishing" cascade.  180s gives 40s of
+# margin for the trailing book-keeping.
+_RECONCILIATION_CYCLE_TIMEOUT_SECONDS = 180.0
 _MAX_TRIGGER_DRAIN_PER_CYCLE = 128
 _TIMEOUT_CANCEL_GRACE_SECONDS = 5.0
 _STARTUP_INTER_TRADER_SLEEP_SECONDS = 0.0

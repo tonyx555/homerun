@@ -5371,6 +5371,28 @@ async def _run_trader_once(
                         + (_now - _last_per_signal_started) * 1000.0
                     )
                 _last_per_signal_started = _now
+                # Budget-based bail: if the cycle has consumed enough of
+                # its timeout that we likely cannot process another
+                # signal cleanly, defer the rest to the next cycle.
+                # Pre-fix the loop ran to completion regardless of
+                # budget; a 23-signal batch (≈3.5s/signal) consistently
+                # blew the 30s soft timeout, leaking the cycle as a
+                # backgrounded task and starving sibling traders.
+                # Reserve ~3s for the trailing commit + book-keeping;
+                # if less than that remains, defer the remaining
+                # signals to the next reconcile cycle.
+                _budget_remaining = _remaining_cycle_budget_seconds(
+                    cycle_started_mono=cycle_started_mono,
+                    cycle_timeout_seconds=cycle_timeout_seconds,
+                    reserve_seconds=3.0,
+                )
+                if _budget_remaining is not None and _budget_remaining <= 0:
+                    deferred_signals += int(len(signals) - signals.index(signal))
+                    deferred_by_reason["cycle_budget_exhausted"] = deferred_by_reason.get(
+                        "cycle_budget_exhausted", 0
+                    ) + (len(signals) - signals.index(signal))
+                    defer_signal_processing = True
+                    break
                 signal_id = str(signal.id)
                 signal_wake_started_at = utcnow()
                 context_ready_at = signal_wake_started_at
