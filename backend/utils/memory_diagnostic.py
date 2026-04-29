@@ -34,7 +34,6 @@ import time
 import tracemalloc
 from collections import deque
 from pathlib import Path
-from typing import Any
 
 logger = logging.getLogger("memory_diagnostic")
 
