@@ -93,15 +93,35 @@ _MARK_TOUCH_INTERVAL_SECONDS = 0.5
 _MAX_LIVE_EXIT_FALLBACK_MARK_AGE_SECONDS = 120.0
 _POST_END_EXTREME_MARK_GRACE_SECONDS = 900.0
 _TERMINAL_EXTREME_MARK_THRESHOLD = 0.001
-_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 5.0
-# Retries: same 5s budget.  Polymarket's CLOB submit acknowledges in
-# ~200-800ms when the market is healthy.  A request that hasn't come
-# back in 5s is going to time out anyway — the prior 12s budget just
-# burned more wall-time per stuck attempt without changing the outcome.
-# This bounds the worst-case per-candidate processing on stuck-exit
-# orders (e.g. orders on untradable markets) so they can't blow a
-# 30s reconcile cycle by themselves.
-_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 5.0
+# Per-attempt budget for SELL submissions on the slow path.  This is
+# the OUTER ``asyncio.wait_for`` that wraps ``execute_live_order``;
+# the SDK itself has ``_ORDER_SUBMIT_TIMEOUT_SECONDS=20s`` for the
+# CLOB roundtrip, and ``execute_live_order`` adds:
+#
+#   * VPN check                     (~50ms healthy, can spike to 1s)
+#   * pre-submit DB write           (~50ms healthy, seconds under load)
+#   * sell allowance prep           (~200-500ms; on-chain check)
+#   * SDK signature                 (~50ms)
+#   * HTTP POST to Polymarket       (~200-800ms healthy)
+#   * server-side processing        (~200-2000ms)
+#   * post-submit DB write          (~50ms)
+#
+# Total realistic budget: 5-10s under healthy conditions.  The prior
+# 5s value caused recurring false TimeoutErrors that the lifecycle
+# treated as venue rejections, which the operator stuck-position
+# alert then surfaced as "needs operator review".  The 2026-04-28
+# incident's bulk writeoff fired against rows whose ONLY problem was
+# this too-tight outer timeout.
+#
+# 15s gives Polymarket headroom under load without making a
+# stuck-on-untradable-market exit eat too much wall-time per pass —
+# the per-pass budget upstream still bounds the worst case.
+_LIVE_EXIT_ORDER_TIMEOUT_SECONDS = 15.0
+# Retry budget can be slightly tighter since the cycle has already
+# proven the venue is responsive once we got an answer; we just want
+# to bound time spent on a single candidate.  Still well above the
+# old 5s value to avoid the same false-timeout cascade.
+_LIVE_EXIT_RETRY_TIMEOUT_SECONDS = 12.0
 # Cap the number of exits we submit per reconcile pass.  With 20+ stuck
 # retry candidates each taking up to 10s sequentially, a single pass can
 # burn 200+ seconds — blowing the reconciliation worker's 30s per-trader

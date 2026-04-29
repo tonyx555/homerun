@@ -336,9 +336,13 @@ async def test_classify_resolved_market_is_redemption_pending(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_classify_unresolved_with_holdings_needs_operator(monkeypatch):
-    """Holdings + market_unresolved + retry circuit-broken = the
-    case that needs human review."""
+async def test_classify_unresolved_with_holdings_and_venue_rejection_needs_operator(monkeypatch):
+    """Holdings + market_unresolved + retry circuit-broken with
+    *genuine venue-rejection evidence* in last_error = the case that
+    actually needs human review.  The presence of a known
+    venue-rejection marker (here: ``orderbook does not exist``)
+    distinguishes a real venue-side problem from our own client-side
+    timeout cascade."""
     async def fake_fetch(**kwargs):
         return {
             "wallet_balance_shares": 8.69,
@@ -360,9 +364,56 @@ async def test_classify_unresolved_with_holdings_needs_operator(monkeypatch):
         "token_id": "111",
         "condition_id": "0x" + "1" * 64,
         "outcome_index": 0,
+        "last_error": "Order rejected by CLOB: orderbook does not exist for this market",
     }
     result = await spm.classify_stuck_position(obs)
     assert result["classification"] == "operator_intervention"
+
+
+@pytest.mark.asyncio
+async def test_classify_unresolved_with_holdings_and_client_timeout_is_transient(monkeypatch):
+    """Holdings + market_unresolved + retry circuit-broken but
+    last_error is a CLIENT-side failure (TimeoutError, ConnectionError,
+    asyncpg, etc.) — classify as ``transient_client_failure`` so the
+    alert path stays silent.  The lifecycle's auto-recovery will retry
+    the SELL after _BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS;
+    paging the operator on transient infrastructure noise is the
+    failure mode that produced the 2026-04-28 incident."""
+    async def fake_fetch(**kwargs):
+        return {
+            "wallet_balance_shares": 8.69,
+            "market_resolved": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(ctf_execution_service, "fetch_position_chain_status", fake_fetch)
+    from services import live_execution_service as _les
+    monkeypatch.setattr(
+        _les.live_execution_service,
+        "get_execution_wallet_address",
+        lambda: "0x" + "a" * 40,
+    )
+
+    for last_error in (
+        "TimeoutError",
+        "ConnectionError",
+        "asyncpg.exceptions._base.InternalClientError: cannot switch to state",
+        "ReadTimeout",
+        "",  # missing entirely
+    ):
+        obs = {
+            "order_id": "x",
+            "trader_id": "t",
+            "token_id": "111",
+            "condition_id": "0x" + "1" * 64,
+            "outcome_index": 0,
+            "last_error": last_error,
+        }
+        result = await spm.classify_stuck_position(obs)
+        assert result["classification"] == "transient_client_failure", (
+            f"last_error={last_error!r} should be transient, got "
+            f"{result['classification']!r}"
+        )
 
 
 @pytest.mark.asyncio

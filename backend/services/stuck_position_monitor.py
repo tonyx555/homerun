@@ -69,6 +69,7 @@ from sqlalchemy import select
 from models.database import AsyncSessionLocal, TraderOrder
 from services.ctf_execution import ctf_execution_service
 from services.live_execution_service import live_execution_service
+from services.operator_writeoff import _is_venue_rejection_error
 from utils.logger import get_logger
 from utils.utcnow import utcnow
 
@@ -298,8 +299,37 @@ async def classify_stuck_position(observation: dict[str, Any]) -> dict[str, Any]
         }
 
     # We hold shares + market is not resolved + retry was already
-    # circuit-broken by the lifecycle.  This is the case that needs
-    # operator attention.
+    # circuit-broken by the lifecycle.  Decide whether this needs
+    # operator attention or is just our own retry-path timing out:
+    #
+    #   * If ``last_error`` matches a known venue-rejection marker
+    #     (``orderbook does not exist``, ``market not tradable``,
+    #     etc.) — the venue is genuinely refusing the SELL and the
+    #     operator should look.
+    #   * If ``last_error`` is a client-side failure (TimeoutError,
+    #     ConnectionError, asyncpg, etc.) — the lifecycle's
+    #     auto-recovery (after _BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS)
+    #     will retry the SELL; alerting the operator now is noise.
+    #     Classify as ``transient_client_failure`` instead so the
+    #     alert path stays silent.
+    #
+    # This pairs with the venue-rejection gate in
+    # ``services/operator_writeoff.manual_writeoff_order``: the
+    # writeoff path now refuses non-venue errors without an explicit
+    # override, and the alert path now refuses to escalate them at
+    # all.  Together they prevent the 2026-04-28 incident where a
+    # client-side timeout cascade (DB pressure → SELL retry timeouts
+    # → blocked_persistent_timeout) was misread as venue rejection,
+    # surfaced as ``Stuck position needs operator review``, and led
+    # to a bulk full-loss writeoff against rows whose wallets still
+    # held the shares.
+    last_error_text = str(observation.get("last_error") or "")
+    if not _is_venue_rejection_error(last_error_text):
+        return {
+            **observation,
+            "classification": "transient_client_failure",
+            "chain_status": chain_status,
+        }
     return {
         **observation,
         "classification": "operator_intervention",
@@ -346,6 +376,14 @@ async def alert_operator_on_stuck_positions(classified: list[dict[str, Any]]) ->
         "recovered_externally": 0,
         "redemption_pending": 0,
         "operator_intervention": 0,
+        # New classification: rows whose only failure is our own
+        # client-side timeouts.  Counted but never alerted — the
+        # lifecycle's auto-recovery kicks in after
+        # ``_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS`` and
+        # paging the operator on transient infrastructure noise is
+        # what produced the 2026-04-28 alert-then-bulk-writeoff
+        # incident.
+        "transient_client_failure": 0,
         "missing_chain_inputs": 0,
         "chain_unavailable": 0,
         "alerts_emitted": 0,
