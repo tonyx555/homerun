@@ -620,6 +620,46 @@ def _take_profit_price_floor(pending_exit: dict[str, Any]) -> Optional[float]:
     return min(0.999, max(0.01, max(floor_candidates)))
 
 
+def _aggressive_exit_price_decrement(retry_count: int) -> float:
+    """Cumulative decrement (in 0–1 binary units) to subtract from a
+    SELL limit price after ``retry_count`` failures.
+
+    Progression:
+
+      retry 0 → 0.00   (original price)
+      retry 1 → 0.01   (1 ¢ off)
+      retry 2 → 0.02
+      retry 3 → 0.05
+      retry 4 → 0.05
+      retry 5 → 0.06
+      retry 6 → 0.07
+      …
+      retry ≥ 9 → 0.10 (cap)
+
+    Tuned so a healthy market clears at the original price, a slightly
+    thin market clears within 1–3 retries, and a persistently illiquid
+    market eventually walks down enough to accept what is there
+    instead of spinning at the same rejected limit forever.  Capped at
+    10 ¢ to bound the give-away on a non-take-profit exit; if the
+    market truly doesn't pay 10 ¢ less than our target, the retry
+    ceiling will eventually escalate it.
+
+    Caller MUST skip this when ``_take_profit_price_floor`` returns a
+    non-None value — for take-profit exits the limit price is set
+    from the gain target, not from market liquidity, so walking it
+    down is just leaving money on the table.
+    """
+    if retry_count <= 0:
+        return 0.0
+    if retry_count == 1:
+        return 0.01
+    if retry_count == 2:
+        return 0.02
+    if retry_count <= 4:
+        return 0.05
+    return min(0.10, 0.05 + 0.01 * (retry_count - 4))
+
+
 def _safe_bool(value: Any, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
@@ -8050,6 +8090,27 @@ async def reconcile_live_positions(
                 exit_price = max(exit_price, take_profit_floor_price)
                 pending_exit["close_price"] = float(exit_price)
                 pending_exit["post_only"] = True
+            else:
+                # No take-profit floor → this is an SL / time-stop /
+                # default-exit retry whose job is to force a fill.  If
+                # the venue rejected a SELL at ``exit_price`` once, it
+                # will keep rejecting at the same price; walk the
+                # limit down based on ``retry_count`` so a thin market
+                # eventually gets a price it can fill.  Capped at
+                # 10 ¢ off the original; see
+                # ``_aggressive_exit_price_decrement``.
+                walk_decrement = _aggressive_exit_price_decrement(retry_count)
+                if walk_decrement > 0.0:
+                    walked_price = max(0.01, exit_price - walk_decrement)
+                    if walked_price < exit_price - 1e-9:
+                        pending_exit["aggressive_walk_down_applied"] = {
+                            "retry_count": retry_count,
+                            "original_close_price": float(exit_price),
+                            "walked_close_price": float(walked_price),
+                            "decrement": float(walk_decrement),
+                        }
+                        exit_price = walked_price
+                        pending_exit["close_price"] = float(exit_price)
             base_min_order_size_usd = _resolve_position_min_order_size_usd(
                 trader_params=params,
                 payload=payload,

@@ -40,15 +40,25 @@ from tests.postgres_test_db import build_postgres_session_factory
 from utils.utcnow import utcnow
 
 
-def test_exit_timeouts_were_lowered():
-    """Cap on per-attempt SELL wall time when retrying stuck exits.
+def test_exit_timeout_floor_and_ceiling():
+    """Sanity-check the per-attempt SELL wall-time cap.
 
-    12s was the prior value — under live load that meant a single
-    stuck order could blow ~24s of a 30s reconcile cycle on TWO
-    timeouts (allowance prep + execute).  5s caps that worst case.
+    Pre-incident this was 5s and the test asserted ``<= 5``; that
+    floor was wrong — the SDK's own internal SELL timeout is ~12s, so
+    a 5s outer ``asyncio.wait_for`` cancelled mid-protocol every time
+    and produced the false-stuck-position cascade documented in
+    commit a8ef524.  Bumped to 15.0 / 12.0 to outlive the SDK timeout
+    while still bounding total cycle cost.
+
+    The bound here just protects against future drift in either
+    direction:
+      * A floor (>=12) so we don't reintroduce the premature-cancel
+        pathology.
+      * A ceiling (<=30) so a single retry can never consume an
+        entire reconcile cycle.
     """
-    assert _LIVE_EXIT_ORDER_TIMEOUT_SECONDS <= 5.0
-    assert _LIVE_EXIT_RETRY_TIMEOUT_SECONDS <= 5.0
+    assert 12.0 <= _LIVE_EXIT_ORDER_TIMEOUT_SECONDS <= 30.0
+    assert 12.0 <= _LIVE_EXIT_RETRY_TIMEOUT_SECONDS <= 30.0
 
 
 async def _seed_trader_and_order(session, trader_id: str, order_id: str, *, pending_exit_status: str) -> None:
