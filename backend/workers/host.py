@@ -49,6 +49,17 @@ if not os.environ.get("HF_TOKEN"):
     logging.getLogger("huggingface_hub.utils._http").setLevel(logging.ERROR)
 logger = get_logger("workers.host")
 
+# Enable tracemalloc as the very first thing the worker does so it
+# captures every subsequent allocation.  The flag is opt-in via
+# ``HOMERUN_TRACE_MEMORY=1`` so the steady-state worker doesn't pay
+# the ~10% allocation overhead — flip it on when chasing a leak,
+# trigger dumps via ``backend/.runtime/memory_dump_request``, and
+# turn it off when done.  See ``utils/memory_diagnostic.py``.
+if os.environ.get("HOMERUN_TRACE_MEMORY") == "1":
+    from utils.memory_diagnostic import start_tracemalloc
+
+    start_tracemalloc()
+
 if os.name == "nt":
     import msvcrt
 else:
@@ -595,6 +606,19 @@ class WorkerHost:
         from models.database import start_pool_watchdog
 
         self._background_tasks.append(start_pool_watchdog())
+
+        # Memory diagnostic loop — polls for the trigger file and
+        # writes a snapshot when found.  Always running (cost ~ one
+        # ``Path.exists()`` call every 30s) so an operator can dump
+        # without restarting.  Tracemalloc is opt-in via env var
+        # (see top of this file) — the loop still produces useful
+        # psutil + module-singleton + GC sections without it.
+        from utils.memory_diagnostic import memory_diagnostic_loop
+
+        self._background_tasks.append(asyncio.create_task(
+            memory_diagnostic_loop(),
+            name="memory-diagnostic",
+        ))
 
         if self._enabled("load_strategy_registry"):
             try:
