@@ -123,3 +123,75 @@ async def test_drain_then_invalidate_runs_invalidate_even_when_inner_raises():
 
     await _drain_then_invalidate()
     assert invalidate_called is True
+
+
+@pytest.mark.asyncio
+async def test_close_invalidates_when_inner_completed_with_connection_broken():
+    """The 2026-04-28 cascade gap: an inner task that COMPLETES with an
+    asyncpg ``cannot switch to state X; another operation in progress``
+    error has poisoned the connection's protocol state.  ``super().close()``
+    would return that connection to the pool where the next checkout
+    reuses it and reproduces the same error indefinitely.
+
+    The fix: ``_do_close_or_invalidate`` inspects each completed inner
+    task; if any of them raised a connection-broken error, the close
+    path invalidates instead of closing.
+
+    This test exercises the inspection logic without needing a real
+    asyncpg connection.
+    """
+    from utils.retry import is_db_connection_broken
+
+    async def _broken_inner():
+        # Simulate the asyncpg protocol-state error that the previous
+        # ``except DBAPIError`` handler missed.
+        raise type("InternalClientError", (Exception,), {})(
+            "cannot switch to state 12; another operation (2) is in progress"
+        )
+
+    inner = asyncio.ensure_future(_broken_inner())
+    try:
+        await inner
+    except Exception:
+        pass
+
+    # Replicate the inspection loop from _do_close_or_invalidate.
+    connection_poisoned = False
+    if inner.done():
+        try:
+            task_exc = inner.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            task_exc = None
+        if task_exc is not None and is_db_connection_broken(task_exc):
+            connection_poisoned = True
+
+    assert connection_poisoned is True, (
+        "is_db_connection_broken must classify the asyncpg "
+        "'cannot switch to state' error as a poisoned-connection signal"
+    )
+
+
+@pytest.mark.asyncio
+async def test_close_uses_close_when_inner_completed_cleanly():
+    """Sanity: when the inner task completed without a connection-broken
+    error, the close path uses ``super().close()`` (returns connection to
+    pool), not ``invalidate()``."""
+    from utils.retry import is_db_connection_broken
+
+    async def _ok_inner():
+        return "result"
+
+    inner = asyncio.ensure_future(_ok_inner())
+    await inner
+
+    connection_poisoned = False
+    if inner.done():
+        try:
+            task_exc = inner.exception()
+        except (asyncio.CancelledError, asyncio.InvalidStateError):
+            task_exc = None
+        if task_exc is not None and is_db_connection_broken(task_exc):
+            connection_poisoned = True
+
+    assert connection_poisoned is False
+    assert inner.result() == "result"

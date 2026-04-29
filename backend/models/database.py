@@ -292,8 +292,16 @@ class RetryableAsyncSession(AsyncSession):
                 await self._reset_after_failed_commit()
                 delay = min(self._COMMIT_BASE_DELAY_SECONDS * (2 ** (attempt - 1)), 0.4)
                 await asyncio.sleep(delay)
-            except Exception:
-                self._fire_and_forget(self._do_rollback_or_invalidate())
+            except Exception as exc:
+                # Same rationale as ``execute()``: catch raw driver-level
+                # connection-broken errors that aren't wrapped as
+                # ``DBAPIError`` (asyncpg ``InternalClientError`` etc.)
+                # and drain-then-invalidate before re-raising, so the
+                # poisoned connection doesn't go back to the pool.
+                if is_db_connection_broken(exc):
+                    self._fire_and_forget(self._drain_then_invalidate(inner))
+                else:
+                    self._fire_and_forget(self._do_rollback_or_invalidate())
                 raise
 
     async def execute(self, statement, params=None, **kwargs):
@@ -353,6 +361,21 @@ class RetryableAsyncSession(AsyncSession):
             except Exception:
                 pass
             raise
+        except Exception as exc:
+            # Catch raw driver-level errors that SQLAlchemy did NOT
+            # wrap as ``DBAPIError`` — most importantly
+            # ``asyncpg.exceptions._base.InternalClientError`` ("cannot
+            # switch to state X; another operation in progress").  This
+            # is asyncpg's INTERNAL error, surfaced when the protocol
+            # state is corrupted by a cancellation that landed mid
+            # extended-protocol exchange.  It is NOT a subclass of
+            # SQLAlchemy DBAPIError, so the previous handler missed it
+            # and the poisoned connection went back to the pool — every
+            # subsequent checkout produced the same error.  We invalidate
+            # via drain-then-invalidate so the pool drops the socket.
+            if is_db_connection_broken(exc):
+                self._fire_and_forget(self._drain_then_invalidate(inner))
+            raise
 
     async def flush(self, objects=None) -> None:
         """Cancellation-safe flush.
@@ -362,6 +385,8 @@ class RetryableAsyncSession(AsyncSession):
         protocol.  Same tear-in-the-middle hazard as execute() — see
         execute() docstring for the drain-then-invalidate rationale.
         """
+        from utils.retry import is_db_connection_broken
+
         await self._wait_inflight()
         inner = asyncio.ensure_future(super().flush(objects))
         self._track_inflight(inner)
@@ -370,7 +395,13 @@ class RetryableAsyncSession(AsyncSession):
         except asyncio.CancelledError:
             self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
-        except Exception:
+        except Exception as exc:
+            # Connection-broken errors: drain then invalidate (drop the
+            # poisoned socket); other errors: same drain-then-invalidate
+            # path because flush errors generally indicate the session
+            # is in a state we shouldn't reuse.  See ``execute()`` and
+            # ``commit()`` for the same pattern.
+            _ = is_db_connection_broken(exc)  # marker check (no branch needed; same action)
             self._fire_and_forget(self._drain_then_invalidate(inner))
             raise
 
@@ -381,21 +412,31 @@ class RetryableAsyncSession(AsyncSession):
     async def _do_close_or_invalidate(self) -> None:
         """Close the session; fall back to invalidate on any error.
 
-        Before calling ``super().close()`` we wait for any shielded
-        inner tasks (execute/commit/flush) that may still be running to
-        drain.  Closing while a shielded inner task still holds the
-        asyncpg connection causes the close attempt to race with the
-        in-flight protocol, surfacing as
-        ``cannot perform operation: another operation is in progress``
-        and poisoning the next caller of that connection.
+        Three cases of inflight cleanup, all of which must invalidate
+        rather than close:
 
-        If the drain *times out* — an inner task is still running after
-        _DRAIN_TIMEOUT_SECONDS — we invalidate instead of closing.
-        ``super().close()`` would race the still-active protocol;
-        ``invalidate()`` lets the pool drop the connection cleanly.
+          1. **Drain timed out** — the inner task is still running after
+             ``_DRAIN_TIMEOUT_SECONDS``.  ``super().close()`` would
+             race the still-active protocol; invalidate drops the
+             connection cleanly.
+
+          2. **Drain succeeded with a connection-broken result** —
+             this was the gap that caused the persistent 2026-04-28
+             ``cannot switch to state X; another operation in
+             progress`` cascade.  An inner task that completed with
+             that asyncpg error has left the underlying socket in a
+             corrupted protocol state.  ``super().close()`` would
+             return the poisoned connection to the pool, where the
+             next checkout reuses it and produces the same error.
+             We must invalidate so the pool drops it.
+
+          3. **No inflight tasks** — clean close, return to pool.
         """
+        from utils.retry import is_db_connection_broken
+
         bag = getattr(self, "_inflight_tasks", None)
         drain_timed_out = False
+        connection_poisoned = False
         if bag:
             inflight = [t for t in list(bag) if not t.done()]
             if inflight:
@@ -406,7 +447,22 @@ class RetryableAsyncSession(AsyncSession):
                     drain_timed_out = bool(pending)
                 except Exception:
                     drain_timed_out = True
-        if drain_timed_out:
+            # Inspect the (now-completed) inner tasks.  If any of them
+            # raised a connection-broken error (the asyncpg protocol
+            # corruption case), the underlying socket is in a state
+            # where the next caller will hit the same error.  Mark the
+            # connection poisoned so we invalidate instead of close.
+            for task in list(bag):
+                if not task.done():
+                    continue
+                try:
+                    task_exc = task.exception()
+                except (asyncio.CancelledError, asyncio.InvalidStateError):
+                    task_exc = None
+                if task_exc is not None and is_db_connection_broken(task_exc):
+                    connection_poisoned = True
+                    break
+        if drain_timed_out or connection_poisoned:
             try:
                 await super().invalidate()
             except Exception:
