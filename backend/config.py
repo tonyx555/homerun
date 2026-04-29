@@ -260,10 +260,30 @@ class Settings(BaseSettings):
     # that are clearly abandoned — old enough to be unintentional and
     # priced far enough off-mid that they cannot fill. Defaults below
     # are conservative; tighten to be more aggressive about cleanup.
-    STALE_ORDER_AGE_HOURS: float = 6.0  # Minimum age before sweep considers an order
+    # Pre-2026-04-28 these were 6.0h / 2.5x.  The 02:42 cascade
+    # showed the result: $122 of $237 wallet collateral was held
+    # captive by our own unfilled limit orders, leaving $34 free —
+    # while SELL retries needing $61 of fee buffer kept rejecting
+    # because nothing was sweeping the BUYs that had drifted off-mid.
+    #
+    # The DRIFT threshold (2.5x) is intentionally unchanged: it
+    # protects intentional maker quotes (``btc_eth_maker_quote``,
+    # ``crypto_entropy_maker``) which post GTC limits near mid that
+    # MUST be allowed to sit on the book.  A BUY @ 0.40 vs mid 0.50
+    # is at 1.25x — won't be swept; a BUY @ 0.10 vs mid 0.40 is at
+    # 4x — will be.  That's the genuine "abandoned" signal.
+    #
+    # Tightened the AGE thresholds: 6h → 2h (and 24h → 8h for the
+    # no-mid fallback).  Two hours is still ample for a maker quote
+    # to convert before being treated as stale, but cuts the
+    # collateral-trapped window from a quarter-day to a couple of
+    # cycles.  Combined with the 60s sweep cadence (was 300s) in the
+    # reconciliation worker, transient stale BUYs get reclaimed
+    # within minutes of crossing the age threshold instead of hours.
+    STALE_ORDER_AGE_HOURS: float = 2.0  # Minimum age before sweep considers an order
     STALE_ORDER_PRICE_DRIFT_MULTIPLE: float = 2.5  # Cancel if limit ≥ this × current mid (or BUY × this ≤ mid)
     STALE_ORDER_RESIDUAL_SHARES: float = 1.0  # Cancel residual size below this (Polymarket min ≈ 5)
-    STALE_ORDER_AGE_HOURS_NO_MID: float = 24.0  # Hard age cutoff when mid lookup fails
+    STALE_ORDER_AGE_HOURS_NO_MID: float = 8.0  # Hard age cutoff when mid lookup fails
 
     # Order Settings
     DEFAULT_ORDER_TYPE: str = "GTC"  # GTC (Good Till Cancel) or FOK (Fill Or Kill)

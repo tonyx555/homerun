@@ -72,7 +72,18 @@ _LIVE_WALLET_POSITIONS_SYNC_TIMEOUT_SECONDS = 20.0
 # Cycle cadence is process-local; the actual thresholds (age, drift,
 # residual) are sourced from ``config.Settings`` so operators can tune
 # them via env vars without an alembic migration.
-_STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS = 300.0
+# Pre-2026-04-28 sweep ran every 5 minutes — too lenient when our
+# own unfilled limit orders accumulate and reserve venue-side
+# collateral.  The 02:42 cascade showed $122 of a $237 wallet was
+# held captive by stale BUYs while every SELL retry kept rejecting
+# for "not enough balance / allowance" on a $61 order needing $61
+# of fee buffer.  60 seconds is aggressive enough that a BUY which
+# fails to fill by its first reconcile cycle gets cancelled before
+# the next reconcile; combined with the tighter age (1h) and
+# drift (1.5x) thresholds in ``config.Settings``, the open-order
+# float should never accumulate to more than a single trader's
+# in-flight working set.
+_STALE_OPEN_ORDER_SWEEP_INTERVAL_SECONDS = 60.0
 _last_stale_open_order_sweep_at = 0.0
 # Stuck-position surveillance: scan every 5 minutes for orders whose
 # exit retry has been circuit-broken (blocked_persistent_timeout etc.)
