@@ -56,8 +56,25 @@ services:
       - statement_timeout=60000
       - -c
       - lock_timeout=5000
+      # Pre-2026-04-29 this was 30000 (30s).  Postgres logs showed a
+      # cluster of 14+ FATAL "terminating connection due to idle-in-
+      # transaction timeout" within ONE second every 2-4 minutes —
+      # ``sessions_fatal=3511`` over 7h.  The application's own
+      # client-side cap (``DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS``)
+      # is supposed to fire first, but the worker's chronic 30-43s
+      # transaction-holds (slow signal_loop + setup) routinely
+      # exceeded BOTH the client cap and the server cap, so the
+      # server killed them en masse and the cascade we observed in
+      # the application logs (``cannot switch to state X``,
+      # ``InterfaceError``, mass invalidation) is the AFTERMATH of
+      # the FATALs.  Bumped to 120000 (2 min) to give the application
+      # headroom while still catching truly-leaked transactions —
+      # nothing legitimate should sit idle-in-tx for >2 min.  The
+      # right long-term fix is to wrap external I/O (HTTP/RPC) in
+      # ``release_conn(session)`` so transactions don't span network
+      # waits; this is the safety net.
       - -c
-      - idle_in_transaction_session_timeout=30000
+      - idle_in_transaction_session_timeout=120000
       # Stats collection for pg_stat_statements (used by perf
       # investigations to identify slow queries by mean exec time).
       - -c
