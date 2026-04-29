@@ -1223,7 +1223,7 @@ class LiveExecutionService:
         try:
             for sig in POLYMARKET_SIGNATURE_TYPES:
                 if not self._signature_type_supported(int(sig)):
-                    logger.info(
+                    logger.warning(
                         "balance snapshot",
                         context=context,
                         signature_type=int(sig),
@@ -1290,7 +1290,7 @@ class LiveExecutionService:
                     if alw is not None:
                         allowance_str = f"${float(alw):.2f}"
 
-                logger.info(
+                logger.warning(
                     "balance snapshot",
                     context=context,
                     signature_type=int(sig),
