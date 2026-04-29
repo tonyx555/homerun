@@ -93,3 +93,13 @@ services:
 
 volumes:
   homerun-postgres-data:
+    # Pin to the actual volume that contains the user's database.
+    # ``external: true`` + explicit ``name`` decouples the volume
+    # binding from Compose's project-prefix convention — running
+    # ``docker compose up`` from the ``infra/`` directory previously
+    # created a NEW empty ``infra_homerun-postgres-data`` volume
+    # while the real data lived in ``homerun_homerun-postgres-data``,
+    # which caused alembic to re-apply every migration against an
+    # empty database and the backend to fail at startup.
+    external: true
+    name: homerun_homerun-postgres-data
