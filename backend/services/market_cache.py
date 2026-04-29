@@ -26,6 +26,7 @@ from sqlalchemy import (
     select,
     delete,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import DBAPIError
@@ -160,6 +161,18 @@ class MarketCacheService:
                 username_count = 0
 
                 async with AsyncSessionLocal() as session:
+                    # ``cached_markets`` is ~65K rows / ~300MB and the
+                    # streaming SELECT that hydrates the in-memory cache
+                    # routinely exceeds the regular pool's 30s
+                    # statement_timeout under live load — observed as
+                    # "Connection held for 31.2s ... task=market-cache-
+                    # load" + "Intent runtime initialization failed"
+                    # right after every restart.  This is a one-time
+                    # startup load, not a hot-path query, so a longer
+                    # cap is appropriate.  ``SET LOCAL`` only applies
+                    # to this transaction's connection — won't bleed
+                    # into the rest of the worker.
+                    await session.execute(text("SET LOCAL statement_timeout = '300000'"))
                     market_stream = await session.stream_scalars(
                         select(CachedMarket).execution_options(yield_per=1000)
                     )

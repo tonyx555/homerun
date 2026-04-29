@@ -1429,6 +1429,20 @@ class IntentRuntime:
             TradeSignal.quality_rejection_reasons, Text
         ).label("quality_rejection_reasons_text")
         async with AsyncSessionLocal() as session:
+            # The bootstrap fetch from ``trade_signals`` reads up to
+            # several thousand active + recent-terminal rows from a
+            # 6.7 GB JSON-heavy table.  Under live load this routinely
+            # exceeds the regular pool's 30s statement_timeout —
+            # observed as "Connection held for 31.2s task=Task-62"
+            # right after every restart, with the bootstrap raising
+            # DBAPIError (statement_timeout) and intent-runtime
+            # initialization failing.  This is a one-time startup
+            # hydration, not a hot-path query, so a longer cap is
+            # appropriate.  ``SET LOCAL`` only applies to this
+            # transaction's connection.
+            from sqlalchemy import text as _sa_text
+
+            await session.execute(_sa_text("SET LOCAL statement_timeout = '300000'"))
             raw_rows = (
                 (
                     await session.execute(
