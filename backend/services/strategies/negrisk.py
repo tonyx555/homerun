@@ -7,6 +7,7 @@ from typing import Any
 from models import Market, Event, Opportunity
 from .base import BaseStrategy, DecisionCheck, ExitDecision, ScoringWeights, SizingConfig, make_aware
 from services.quality_filter import QualityFilterOverrides, quality_filter
+from services.strategy_sdk import StrategySDK
 from utils.converters import to_float
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,17 @@ class NegRiskStrategy(BaseStrategy):
         "warn_total_yes": 0.97,
         "election_min_total_yes": 0.97,
         "max_resolution_spread_days": 7,
+        # Bid/ask-aware fill-cost gates. Both detection branches now price
+        # legs at the visible ask (with a small mid-cushion fallback) and
+        # require a minimum margin AFTER spread is paid. Without these, a
+        # 1-2¢ ask premium per leg silently consumes the edge — the latent
+        # bug that made the (never-traded) short side dangerous.
+        "long_min_ask_priced_margin": 0.02,   # $0.02 gross after ask fill
+        "short_min_ask_priced_margin": 0.04,  # $0.04 gross after ask fill (3+ legs)
+        # Per-leg liquidity floor — bundle-level min(...) is enforced inside
+        # create_opportunity, but a single thin leg breaks the bundle.
+        "long_min_per_leg_liquidity": 750.0,
+        "short_min_per_leg_liquidity": 750.0,
     }
 
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
@@ -132,6 +144,11 @@ class NegRiskStrategy(BaseStrategy):
             "token_id": token_id,
         }
 
+    # NOTE: realistic fill-cost pricing is delegated to
+    # StrategySDK.get_ask_priced_fill so the bid/ask trap stays patched
+    # in one place across every strategy. Detect paths call the SDK
+    # helper directly with side="YES" or side="NO".
+
     def _finalize_opportunity(self, opportunity: Opportunity | None) -> Opportunity | None:
         if opportunity is None:
             return None
@@ -176,21 +193,37 @@ class NegRiskStrategy(BaseStrategy):
         if not verified_exhaustive:
             return None
 
-        # Get YES prices for all outcomes
-        total_yes = 0.0
+        # Per-leg minimum liquidity. A single thin leg makes the "buy all
+        # YES" bundle un-fillable at the quoted ask without slippage, even
+        # if the bundle's aggregate liquidity looks fine.
+        min_per_leg_liquidity = float(
+            to_float(self.config.get("long_min_per_leg_liquidity", 750.0), 750.0)
+        )
+        for market in active_markets:
+            if float(getattr(market, "liquidity", 0.0) or 0.0) < min_per_leg_liquidity:
+                return None
+
+        # Gather YES prices using ask when available (true fill cost) and
+        # mid as a fallback. Track both so we can warn when the spread
+        # cushion is non-trivial.
+        total_yes_ask = 0.0
+        total_yes_mid = 0.0
+        ask_used_count = 0
         positions = []
 
         for market in active_markets:
-            yes_price = market.yes_price
+            fill_price, yes_mid, ask_known = StrategySDK.get_ask_priced_fill(
+                market, prices, side="YES",
+            )
+            total_yes_ask += fill_price
+            total_yes_mid += yes_mid
+            ask_used_count += int(ask_known)
+            positions.append(self._build_position(market, outcome="YES", price=fill_price, token_index=0))
 
-            # Use live price if available
-            if market.clob_token_ids:
-                yes_token = market.clob_token_ids[0]
-                if yes_token in prices:
-                    yes_price = prices[yes_token].get("mid", yes_price)
-
-            total_yes += yes_price
-            positions.append(self._build_position(market, outcome="YES", price=yes_price, token_index=0))
+        # The arb bound applies to the ask-priced bundle. If the bundle can
+        # be filled for less than $1.00 at ask (and exactly one outcome
+        # wins), we have a real edge — otherwise short arb may still apply.
+        total_yes = total_yes_ask
 
         # In NegRisk, exactly one outcome wins, so total YES should = $1
         if total_yes >= 1.0:
@@ -222,6 +255,17 @@ class NegRiskStrategy(BaseStrategy):
 
         # Hard reject when listed outcomes are likely non-exhaustive.
         if total_yes < min_required_total_yes:
+            return None
+
+        # Reject when the ask-priced bundle gross margin is too thin.
+        # Long arb gross = $1 - total_yes_ask (because exactly one YES wins
+        # for $1.00). If that gross is less than the configured floor, the
+        # bundle isn't worth firing on.
+        min_long_margin = float(
+            to_float(self.config.get("long_min_ask_priced_margin", 0.02), 0.02)
+        )
+        gross_at_ask = 1.0 - total_yes_ask
+        if gross_at_ask < min_long_margin:
             return None
 
         # --- Multi-winner / threshold detection ---
@@ -274,7 +318,14 @@ class NegRiskStrategy(BaseStrategy):
         - Buy NO on all N outcomes
         - Exactly N-1 outcomes resolve to NO, each paying $1
         - Total payout = N - 1
-        - Profit = (N - 1) - total_no_cost
+        - Profit = (N - 1) - total_ask_no_cost
+
+        Critical detail: a short bundle has to be filled by **crossing the
+        NO ask** on every leg. Detecting at the mid price systematically
+        underestimates fill cost — a 1-2¢ ask premium per leg easily wipes
+        out a $0.30 gross profit on a 3-leg bundle. Use mid only as a
+        last-resort when no ask is available, and require the ask-priced
+        bundle to still clear after fees.
 
         Routes through create_opportunity so that shared hard filters
         (min liquidity, min position size, min absolute profit, max plausible
@@ -296,30 +347,53 @@ class NegRiskStrategy(BaseStrategy):
         if self._is_threshold_market(questions):
             return None
 
-        total_no = 0.0
+        # Per-leg minimum liquidity. Bundle-level min(...) is enforced by
+        # create_opportunity, but in a short we need each leg individually
+        # tradeable at meaningful size — a single thin leg can't be filled
+        # at the quoted ask without large slippage.
+        min_per_leg_liquidity = float(
+            to_float(self.config.get("short_min_per_leg_liquidity", 750.0), 750.0)
+        )
+        for market in active_markets:
+            if float(getattr(market, "liquidity", 0.0) or 0.0) < min_per_leg_liquidity:
+                return None
+
+        total_no_ask = 0.0
+        total_no_mid = 0.0
+        ask_used_count = 0
         positions = []
 
         for market in active_markets:
-            no_price = market.no_price
-
-            # Use live price if available
-            if market.clob_token_ids and len(market.clob_token_ids) > 1:
-                no_token = market.clob_token_ids[1]
-                if no_token in prices:
-                    no_price = prices[no_token].get("mid", no_price)
-
-            total_no += no_price
-            positions.append(self._build_position(market, outcome="NO", price=no_price, token_index=1))
+            fill_price, no_mid, ask_known = StrategySDK.get_ask_priced_fill(
+                market, prices, side="NO",
+            )
+            total_no_ask += fill_price
+            total_no_mid += no_mid
+            ask_used_count += int(ask_known)
+            positions.append(self._build_position(market, outcome="NO", price=fill_price, token_index=1))
 
         expected_payout = float(n - 1)  # N-1 NOs win
 
-        if expected_payout - total_no <= 0:
+        gross_at_ask = expected_payout - total_no_ask
+        gross_at_mid = expected_payout - total_no_mid
+
+        # Reject when the ask-priced bundle would not clear the configured
+        # min absolute profit margin. The mid-priced version may have looked
+        # great, but if crossing the spread eats the edge we must not fire.
+        min_short_margin = float(
+            to_float(self.config.get("short_min_ask_priced_margin", 0.04), 0.04)
+        )
+        if gross_at_ask <= 0 or gross_at_ask < min_short_margin:
             return None
 
         opp = self.create_opportunity(
             title=f"NegRisk Short: {event.title[:50]}...",
-            description=f"Buy NO on all {n} outcomes for ${total_no:.3f}, {n - 1} win = ${expected_payout:.0f} payout",
-            total_cost=total_no,
+            description=(
+                f"Buy NO on all {n} outcomes for ${total_no_ask:.3f} (ask), "
+                f"{n - 1} win = ${expected_payout:.0f} payout. "
+                f"Spread cushion: mid=${total_no_mid:.3f} → ask=${total_no_ask:.3f}."
+            ),
+            total_cost=total_no_ask,
             markets=active_markets,
             positions=positions,
             event=event,
@@ -329,6 +403,13 @@ class NegRiskStrategy(BaseStrategy):
         if opp:
             opp.risk_factors.insert(0, f"Short NegRisk: buying NO on all {n} outcomes")
             opp.risk_factors.insert(1, f"Exhaustiveness verified: {exhaustiveness_reason.replace('_', ' ')}")
+            if ask_used_count < n:
+                opp.risk_factors.append(
+                    f"Ask price unavailable on {n - ask_used_count}/{n} legs — used mid+0.005 cushion"
+                )
+            opp.risk_factors.append(
+                f"Ask-priced gross ${gross_at_ask:.3f} vs mid-priced ${gross_at_mid:.3f}"
+            )
 
         return self._finalize_opportunity(opp)
 
@@ -735,24 +816,37 @@ class NegRiskStrategy(BaseStrategy):
         if len(exclusive_markets) != len(active_markets):
             return None
 
-        # Calculate total YES cost
-        total_yes = 0.0
+        # Per-leg liquidity floor.
+        min_per_leg = float(to_float(self.config.get("long_min_per_leg_liquidity", 750.0), 750.0))
+        for market in exclusive_markets:
+            if float(getattr(market, "liquidity", 0.0) or 0.0) < min_per_leg:
+                return None
+
+        # Calculate total YES cost using ask prices (same fix as the
+        # NegRisk-flagged branch). Mid pricing here was the latent
+        # bid/ask trap.
+        total_yes_ask = 0.0
+        total_yes_mid = 0.0
         positions = []
 
         for market in exclusive_markets:
-            yes_price = market.yes_price
+            fill_price, yes_mid, _ = StrategySDK.get_ask_priced_fill(
+                market, prices, side="YES",
+            )
+            total_yes_ask += fill_price
+            total_yes_mid += yes_mid
+            positions.append(self._build_position(market, outcome="YES", price=fill_price, token_index=0))
 
-            if market.clob_token_ids:
-                yes_token = market.clob_token_ids[0]
-                if yes_token in prices:
-                    yes_price = prices[yes_token].get("mid", yes_price)
-
-            total_yes += yes_price
-            positions.append(self._build_position(market, outcome="YES", price=yes_price, token_index=0))
-
+        total_yes = total_yes_ask
         if total_yes >= 1.0:
             # Check for SHORT arbitrage (total YES > $1 means NOs are cheap)
             return self._detect_multi_outcome_short(event, exclusive_markets, prices)
+
+        # Reject thin ask-priced margins — same gate as the negrisk
+        # long branch.
+        min_long_margin = float(to_float(self.config.get("long_min_ask_priced_margin", 0.02), 0.02))
+        if (1.0 - total_yes) < min_long_margin:
+            return None
 
         # Very low totals usually indicate missing outcomes in non-NegRisk events.
         if total_yes < 0.70:
@@ -846,30 +940,41 @@ class NegRiskStrategy(BaseStrategy):
         if not self._is_three_way_sports_match_family(event, exclusive_markets):
             return None
 
-        total_no = 0.0
+        # Per-leg liquidity floor (same as long branch).
+        min_per_leg = float(to_float(self.config.get("short_min_per_leg_liquidity", 750.0), 750.0))
+        for market in exclusive_markets:
+            if float(getattr(market, "liquidity", 0.0) or 0.0) < min_per_leg:
+                return None
+
+        total_no_ask = 0.0
+        total_no_mid = 0.0
         positions = []
 
         for market in exclusive_markets:
-            no_price = market.no_price
-
-            # Use live price if available
-            if market.clob_token_ids and len(market.clob_token_ids) > 1:
-                no_token = market.clob_token_ids[1]
-                if no_token in prices:
-                    no_price = prices[no_token].get("mid", no_price)
-
-            total_no += no_price
-            positions.append(self._build_position(market, outcome="NO", price=no_price, token_index=1))
+            fill_price, no_mid, _ = StrategySDK.get_ask_priced_fill(
+                market, prices, side="NO",
+            )
+            total_no_ask += fill_price
+            total_no_mid += no_mid
+            positions.append(self._build_position(market, outcome="NO", price=fill_price, token_index=1))
 
         expected_payout = float(n - 1)  # N-1 NOs win
+        gross_at_ask = expected_payout - total_no_ask
 
-        if expected_payout - total_no <= 0:
+        # Reject thin ask-priced margins — same gate as the negrisk
+        # short branch.
+        min_short_margin = float(to_float(self.config.get("short_min_ask_priced_margin", 0.04), 0.04))
+        if gross_at_ask < min_short_margin:
             return None
 
         opp = self.create_opportunity(
             title=f"Multi-Outcome Short: {event.title[:40]}...",
-            description=f"Buy NO on all {n} outcomes for ${total_no:.3f}, {n - 1} win = ${expected_payout:.0f} payout",
-            total_cost=total_no,
+            description=(
+                f"Buy NO on all {n} outcomes for ${total_no_ask:.3f} (ask), "
+                f"{n - 1} win = ${expected_payout:.0f} payout. "
+                f"Spread cushion: mid=${total_no_mid:.3f} → ask=${total_no_ask:.3f}."
+            ),
+            total_cost=total_no_ask,
             markets=exclusive_markets,
             positions=positions,
             event=event,
@@ -879,6 +984,9 @@ class NegRiskStrategy(BaseStrategy):
         if opp:
             opp.risk_factors.insert(0, f"Short Multi-Outcome: buying NO on all {n} outcomes")
             opp.risk_factors.insert(1, "Exhaustiveness verified: sports three way complete")
+            opp.risk_factors.append(
+                f"Ask-priced gross ${gross_at_ask:.3f} vs mid-priced ${expected_payout - total_no_mid:.3f}"
+            )
 
         return self._finalize_opportunity(opp)
 
