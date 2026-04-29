@@ -1,22 +1,33 @@
-"""Regression test for the CLOB metadata sanitizer.
+"""Unit tests for the CLOB metadata sanitizer helpers.
 
-Production logs showed `non-hexadecimal number found in fromhex() arg at
-position 43` repeating every cycle for a live trader: the orchestrator
-path was forwarding `leg["metadata"]` (often a Python dict carrying
-ExecutionPlan bookkeeping) straight into ``OrderArgsV2.metadata``. The
-CLOB SDK then ran ``bytes.fromhex(value.replace("0x", "").zfill(64))``
-on the stringified dict and crashed every order.
+Production logs showed ``non-hexadecimal number found in fromhex() arg
+at position 43`` repeating every cycle for a live trader: the
+orchestrator path was forwarding ``leg["metadata"]`` (often a Python
+dict carrying ExecutionPlan bookkeeping) straight into
+``OrderArgsV2.metadata``. The CLOB SDK then ran
+``bytes.fromhex(value.replace("0x", "").zfill(64))`` on the
+stringified dict and crashed every order.
 
-Two fixes guard the boundary now:
+The fix is two-layered:
 
-* ``order_manager._clob_metadata_from_leg`` only accepts string-typed
-  metadata from the leg dict.
+* ``order_manager._clob_metadata_from_leg`` filters non-string leg
+  metadata at the source.  Dicts here represent ExecutionPlan
+  bookkeeping that was never meant for the venue (the fast-tier path
+  explicitly overwrites the field with a hex idempotency key when it
+  wants one), so dropping them returns the orchestrator path to the
+  pre-fast-tier baseline of "no metadata, SDK uses BYTES32_ZERO".
 * ``live_execution_service._normalize_clob_metadata`` validates that
-  whatever made it through is actually a 0x-prefixed bytes32 hex.
+  any string that did make it through is a real 0x-prefixed bytes32
+  hex.  The boundary in ``place_order`` REFUSES the submission when
+  this fails — see ``test_place_order_refuses_malformed_metadata_
+  without_submitting`` in ``test_trading_service_safety`` for that
+  contract.  Submitting without the idempotency key would leave a
+  venue order undiscoverable by the reconcile sweep if the
+  post-submit DB flush was lost; for a real-money path the safer
+  behaviour is to fail loud.
 
-These tests pin both helpers so a future regression that re-introduces
-the dict-stringification path fails loudly here instead of in
-production.
+This file pins the pure helpers; the integration test for the
+fail-loud contract lives in ``test_trading_service_safety``.
 """
 
 from __future__ import annotations

@@ -3035,6 +3035,34 @@ class LiveExecutionService:
             opportunity_id=opportunity_id,
         )
 
+        # Validate the CLOB metadata BEFORE reserving risk budget or
+        # touching the trading transport.  Metadata is the only mechanism
+        # the reconcile sweep has to recover an orphan venue order whose
+        # post-submit DB write was lost (see fast_idempotency.py); we
+        # would rather refuse the trade and surface the bug than submit
+        # without the safety key and leave a position undiscoverable if
+        # the worker crashes mid-flush.  If a caller passed metadata at
+        # all, it must be a 0x-prefixed bytes32 hex.  Empty / None means
+        # "no idempotency key", which is fine — the SDK substitutes
+        # BYTES32_ZERO and reconcile simply skips that submission.
+        normalized_metadata: Optional[str] = None
+        if metadata is not None:
+            normalized_metadata = _normalize_clob_metadata(metadata)
+            if normalized_metadata is None:
+                order.status = OrderStatus.FAILED
+                order.error_message = (
+                    "invalid_clob_metadata: metadata must be a 0x-prefixed bytes32 hex string"
+                )
+                self._remember_order(order)
+                await self._persist_orders([order])
+                logger.error(
+                    "Refusing live order: malformed CLOB metadata (would orphan the venue submission)",
+                    token_id=token_key,
+                    side=side.value,
+                    metadata_excerpt=str(metadata)[:80],
+                )
+                return order
+
         # Calculate USD notional with Decimal to avoid float accumulation drift.
         size_usd = _to_decimal(normalized_price) * _to_decimal(normalized_size)
         reserved = False
@@ -3113,14 +3141,6 @@ class LiveExecutionService:
                                 price=submit_price,
                                 order_type=provider_order_type,
                             )
-                            normalized_metadata = _normalize_clob_metadata(metadata)
-                            if normalized_metadata is None and metadata:
-                                logger.warning(
-                                    "Dropping non-hex CLOB metadata before submission",
-                                    token_id=token_key,
-                                    side=side.value,
-                                    metadata_excerpt=str(metadata)[:80],
-                                )
                             if normalized_metadata is not None:
                                 market_order_kwargs["metadata"] = normalized_metadata
                             order_args = MarketOrderArgs(**market_order_kwargs)
@@ -3135,14 +3155,6 @@ class LiveExecutionService:
                                 side=order_side,
                                 token_id=token_key,
                             )
-                            normalized_metadata = _normalize_clob_metadata(metadata)
-                            if normalized_metadata is None and metadata:
-                                logger.warning(
-                                    "Dropping non-hex CLOB metadata before submission",
-                                    token_id=token_key,
-                                    side=side.value,
-                                    metadata_excerpt=str(metadata)[:80],
-                                )
                             if normalized_metadata is not None:
                                 limit_order_kwargs["metadata"] = normalized_metadata
                             order_args = OrderArgs(**limit_order_kwargs)

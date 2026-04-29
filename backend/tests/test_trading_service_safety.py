@@ -223,6 +223,90 @@ async def test_failed_order_rolls_back_reserved_volume(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_place_order_refuses_malformed_metadata_without_submitting(monkeypatch):
+    """Production logs showed orders crashing inside py_clob_client_v2's
+    ``bytes.fromhex`` because a Python dict had been stringified into the
+    ``metadata`` kwarg upstream.  The institutional behaviour is to
+    refuse the order entirely — submitting without the idempotency key
+    would leave the venue holding an order that the reconcile sweep
+    cannot match back to its DB row if the post-submit flush is lost.
+
+    This test pins the refusal contract: malformed metadata produces a
+    FAILED order, no CLOB call is made, and no risk budget is consumed.
+    """
+    _configure_limits(monkeypatch)
+    _install_fake_clob_modules(monkeypatch)
+
+    monkeypatch.setattr(
+        live_execution_module.global_pause_state,
+        "refresh_from_db",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(live_execution_module, "pre_trade_vpn_check", AsyncMock(return_value=(True, "")))
+
+    service = LiveExecutionService()
+    service._initialized = True
+    sequenced_client = _SequencedClient([True])
+    service._client = sequenced_client
+
+    failed = await service.place_order(
+        token_id="token-bad-metadata",
+        side=OrderSide.BUY,
+        price=0.5,
+        size=8.0,
+        # The exact production failure shape: a Python dict that was
+        # stringified somewhere upstream and fed in as "metadata".
+        metadata="{'market_coverage': {'scope': 'event'}}",
+    )
+
+    assert failed.status == OrderStatus.FAILED
+    assert failed.error_message is not None
+    assert "invalid_clob_metadata" in failed.error_message
+    # No CLOB call attempted — refusal happens before the trading transport
+    # is touched, so no risk budget is reserved either.
+    assert sequenced_client.created_market_orders == []
+    assert sequenced_client.created_limit_orders == []
+    assert sequenced_client.posted_order_types == []
+    assert service.get_stats().daily_volume == 0.0
+
+
+@pytest.mark.asyncio
+async def test_place_order_accepts_valid_bytes32_metadata(monkeypatch):
+    """The fast-tier idempotency key must round-trip cleanly: a properly
+    formed 0x-prefixed bytes32 hex passes validation and reaches the CLOB
+    SDK as the ``metadata`` kwarg unchanged.
+    """
+    _configure_limits(monkeypatch)
+    _install_fake_clob_modules(monkeypatch)
+
+    monkeypatch.setattr(
+        live_execution_module.global_pause_state,
+        "refresh_from_db",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(live_execution_module, "pre_trade_vpn_check", AsyncMock(return_value=(True, "")))
+
+    service = LiveExecutionService()
+    service._initialized = True
+    sequenced_client = _SequencedClient([True])
+    service._client = sequenced_client
+
+    idempotency_key = "0x" + ("ab" * 32)  # 64 hex chars
+    placed = await service.place_order(
+        token_id="token-good-metadata",
+        side=OrderSide.BUY,
+        price=0.5,
+        size=8.0,
+        metadata=idempotency_key,
+    )
+
+    assert placed.status == OrderStatus.OPEN
+    # The fake CLOB stub records every OrderArgs it sees; the metadata
+    # kwarg should arrive byte-for-byte from the caller.
+    assert sequenced_client.created_limit_orders, "expected a limit order to be submitted"
+
+
+@pytest.mark.asyncio
 async def test_sell_order_reduces_market_exposure(monkeypatch):
     _configure_limits(monkeypatch)
     _install_fake_clob_modules(monkeypatch)
