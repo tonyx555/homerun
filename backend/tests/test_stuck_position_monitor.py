@@ -371,6 +371,125 @@ async def test_classify_unresolved_with_holdings_and_venue_rejection_needs_opera
 
 
 @pytest.mark.asyncio
+async def test_classify_pending_resolution_when_market_ends_within_window(monkeypatch):
+    """If the market end_date is inside ``_PENDING_RESOLUTION_WINDOW_DAYS``
+    we classify as ``pending_resolution`` regardless of last_error.
+
+    Rationale: the redeemer worker auto-closes on resolution, so even
+    a genuine venue-rejection (CLOB has stopped accepting SELLs in
+    the last hours of a market — extremely common) should not page
+    the operator.  By the time anyone could intervene the market will
+    have resolved on its own."""
+    async def fake_fetch(**kwargs):
+        return {
+            "wallet_balance_shares": 8.69,
+            "market_resolved": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(ctf_execution_service, "fetch_position_chain_status", fake_fetch)
+    from services import live_execution_service as _les
+    monkeypatch.setattr(
+        _les.live_execution_service,
+        "get_execution_wallet_address",
+        lambda: "0x" + "a" * 40,
+    )
+
+    end_time = (utcnow() + timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    obs = {
+        "order_id": "x",
+        "trader_id": "t",
+        "token_id": "111",
+        "condition_id": "0x" + "1" * 64,
+        "outcome_index": 0,
+        # Even with a "real" venue rejection, the imminent resolution
+        # gate fires first.
+        "last_error": "Order rejected by CLOB: orderbook does not exist",
+        "market_end_time": end_time,
+    }
+    result = await spm.classify_stuck_position(obs)
+    assert result["classification"] == "pending_resolution"
+    assert result["seconds_until_market_end"] is not None
+    assert 0 < result["seconds_until_market_end"] < 7 * 86400
+
+
+@pytest.mark.asyncio
+async def test_classify_pending_resolution_includes_already_past_end_date(monkeypatch):
+    """If the gamma end_date is in the past but the chain hasn't yet
+    reported the resolution (oracle lag), we still classify as
+    ``pending_resolution`` — the redeemer is going to fire any moment.
+    Alerting now would just be noise."""
+    async def fake_fetch(**kwargs):
+        return {
+            "wallet_balance_shares": 8.69,
+            "market_resolved": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(ctf_execution_service, "fetch_position_chain_status", fake_fetch)
+    from services import live_execution_service as _les
+    monkeypatch.setattr(
+        _les.live_execution_service,
+        "get_execution_wallet_address",
+        lambda: "0x" + "a" * 40,
+    )
+
+    end_time = (utcnow() - timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+    obs = {
+        "order_id": "x",
+        "trader_id": "t",
+        "token_id": "111",
+        "condition_id": "0x" + "1" * 64,
+        "outcome_index": 0,
+        "last_error": "Order rejected by CLOB: orderbook does not exist",
+        "market_end_time": end_time,
+    }
+    result = await spm.classify_stuck_position(obs)
+    assert result["classification"] == "pending_resolution"
+
+
+@pytest.mark.asyncio
+async def test_classify_far_end_date_falls_through_to_venue_rejection(monkeypatch):
+    """If end_date is far in the future (or unknown) AND last_error
+    matches a venue-rejection marker, we still escalate to
+    ``operator_intervention``.  The pending_resolution gate must NOT
+    swallow genuinely stuck positions."""
+    async def fake_fetch(**kwargs):
+        return {
+            "wallet_balance_shares": 8.69,
+            "market_resolved": False,
+            "error": None,
+        }
+
+    monkeypatch.setattr(ctf_execution_service, "fetch_position_chain_status", fake_fetch)
+    from services import live_execution_service as _les
+    monkeypatch.setattr(
+        _les.live_execution_service,
+        "get_execution_wallet_address",
+        lambda: "0x" + "a" * 40,
+    )
+
+    end_time = (utcnow() + timedelta(days=30)).isoformat().replace("+00:00", "Z")
+    obs = {
+        "order_id": "x",
+        "trader_id": "t",
+        "token_id": "111",
+        "condition_id": "0x" + "1" * 64,
+        "outcome_index": 0,
+        "last_error": "Order rejected by CLOB: orderbook does not exist",
+        "market_end_time": end_time,
+    }
+    result = await spm.classify_stuck_position(obs)
+    assert result["classification"] == "operator_intervention"
+
+    # Same observation but no end_time at all — still escalates.
+    obs2 = dict(obs)
+    obs2["market_end_time"] = ""
+    result2 = await spm.classify_stuck_position(obs2)
+    assert result2["classification"] == "operator_intervention"
+
+
+@pytest.mark.asyncio
 async def test_classify_unresolved_with_holdings_and_client_timeout_is_transient(monkeypatch):
     """Holdings + market_unresolved + retry circuit-broken but
     last_error is a CLIENT-side failure (TimeoutError, ConnectionError,
@@ -457,3 +576,54 @@ async def test_alert_respects_per_order_cooldown(monkeypatch):
     assert s2["alerts_emitted"] == 0
     assert s2["alerts_suppressed_by_cooldown"] == 1
     assert len(sent) == 1
+    # Alert framing was deliberately softened away from "needs
+    # operator review" to "informational" because by the time we
+    # reach this code path the auto-recovery has had multiple chances
+    # and the redeemer will close on resolution.  Regression-guard
+    # the rename so a future copy edit doesn't silently bring back
+    # the alarmist phrasing.
+    assert "needs operator review" not in sent[0]
+    assert "informational" in sent[0].lower()
+    assert "No action required" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_alert_pending_resolution_is_counted_but_never_emitted(monkeypatch):
+    """``pending_resolution`` rows must be counted in the summary so
+    they show up on the heartbeat dashboard, but must NEVER produce a
+    Telegram alert — there is nothing for the operator to do."""
+    spm._last_alert_at.clear()
+
+    sent: list[str] = []
+
+    async def fake_send(text, *, category="operator"):
+        sent.append(text)
+
+    from services import notifier as _notifier_mod
+    monkeypatch.setattr(_notifier_mod.notifier, "send_operator_alert", fake_send)
+
+    classified = [
+        {
+            "order_id": "stuck-PR",
+            "trader_id": "t",
+            "source": "scanner",
+            "market_id": "m1",
+            "direction": "buy_yes",
+            "notional_usd": 5.0,
+            "pending_exit_status": "blocked_persistent_timeout",
+            "consecutive_blocked_failure_count": 3,
+            "last_error": "Order rejected by CLOB: orderbook does not exist",
+            "classification": "pending_resolution",
+            "chain_status": {
+                "wallet_balance_shares": 5.0,
+                "market_resolved": False,
+                "block_number": 1234,
+            },
+        }
+    ]
+    summary = await spm.alert_operator_on_stuck_positions(classified)
+
+    assert summary["pending_resolution"] == 1
+    assert summary["alerts_emitted"] == 0
+    assert summary["alerts_suppressed_by_cooldown"] == 0
+    assert sent == []

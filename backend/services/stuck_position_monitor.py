@@ -30,13 +30,36 @@ Instead, this module does what a bank's exception queue does:
                                       The redeemer_worker will redeem on
                                       its next 120-second cycle.  No
                                       action — just observe.
+       * ``pending_resolution``    : balance > 0 AND market unresolved
+                                      AND market_end_date is within
+                                      ``_PENDING_RESOLUTION_WINDOW_DAYS``.
+                                      The market is about to close on
+                                      its own; once it resolves the
+                                      redeemer worker handles it.
+                                      Counted but NEVER alerted —
+                                      paging the operator about a
+                                      position that will resolve itself
+                                      within days is noise.
+       * ``transient_client_failure``: balance > 0 AND market unresolved
+                                      AND last_error is a client-side
+                                      failure.  The lifecycle's
+                                      auto-recovery will retry the
+                                      SELL.  Counted but NEVER alerted.
        * ``operator_intervention`` : balance > 0 AND market unresolved
-                                      AND age > _STUCK_AGE_HOURS.  This
-                                      is the case that needs a human:
-                                      shares are illiquid, market hasn't
-                                      resolved, retry-spam already
-                                      circuit-broken.  Alert via
-                                      Telegram.
+                                      AND market_end_date is far AND
+                                      last_error matches a venue-
+                                      rejection marker AND age >
+                                      ``_STUCK_AGE_HOURS``.  This is
+                                      the rare residual case: the
+                                      venue is genuinely refusing the
+                                      SELL, the market won't resolve
+                                      on its own soon, and the retry
+                                      circuit is already broken.  Alert
+                                      via Telegram with informational
+                                      framing — most of the time the
+                                      operator just acknowledges and
+                                      lets the redeemer handle it on
+                                      eventual resolution.
 
   4. **ALERT** the operator on ``operator_intervention`` rows with
      enough context to take a manual action (link to the order, market
@@ -61,7 +84,7 @@ from __future__ import annotations
 
 import asyncio
 import time as _time
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import select
@@ -90,13 +113,26 @@ _OPEN_LIFECYCLE_STATUSES = frozenset(
 )
 
 # Age threshold: orders younger than this are not yet "stuck" enough to
-# alert on (the retry circuit-breaker may still be settling).
+# alert on (the retry circuit-breaker may still be settling, the
+# 5-minute auto-recovery cycle may still be in flight).  Six hours is
+# the floor below which an alert would almost always be premature —
+# the lifecycle's auto-recovery clears every transient venue/infra
+# blip in seconds-to-minutes, and a real stuck position has no
+# meaningful difference between hour 5 and hour 24.
 _STUCK_AGE_HOURS = 6.0
 
 # Per-order alert cooldown so a single stuck order does NOT generate
 # alerts on every scan pass.  Six hours is the right cadence for a
 # human to look once per workday.
 _ALERT_COOLDOWN_SECONDS = 6 * 3600
+
+# Markets that close within this window are classified as
+# ``pending_resolution``: the redeemer worker will close them on
+# resolution, so paging the operator now is noise — they would just
+# wait.  Set to 7 days because that's the typical Polymarket weekly
+# event horizon; longer than this and the position is genuinely
+# illiquid in a way the operator may want to know about.
+_PENDING_RESOLUTION_WINDOW_DAYS = 7.0
 
 # Module-level cache of "last alert at" timestamps (process-local).
 # Crash-safe: on restart we'll re-alert on each row once, then settle.
@@ -136,6 +172,60 @@ def _extract_condition_id(payload: dict[str, Any]) -> str:
                 if text:
                     return text
     return ""
+
+
+def _extract_market_end_time(payload: dict[str, Any]) -> str:
+    """Pull the market's expected close time out of the order payload.
+
+    Polymarket markets carry ``end_date_iso`` / ``endDate`` /
+    ``end_time`` at the gamma layer.  The orchestrator caches a
+    normalized ``end_time`` (ISO-8601 with Z suffix) into
+    ``payload.live_market.end_time`` at signal time; older rows may
+    have it under one of the gamma aliases.  We probe in order of
+    preference and return "" if none is found (callers treat that as
+    "unknown" and skip the pending_resolution gate).
+    """
+    candidates = []
+    live_market = payload.get("live_market") if isinstance(payload, dict) else None
+    if isinstance(live_market, dict):
+        for key in ("end_time", "end_date_iso", "endDateIso", "end_date", "endDate"):
+            candidates.append(live_market.get(key))
+    market = payload.get("market") if isinstance(payload, dict) else None
+    if isinstance(market, dict):
+        for key in ("end_time", "end_date_iso", "endDateIso", "end_date", "endDate"):
+            candidates.append(market.get(key))
+    for key in ("end_time", "end_date_iso", "endDateIso", "end_date", "endDate"):
+        if isinstance(payload, dict):
+            candidates.append(payload.get(key))
+    for value in candidates:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _seconds_until_market_end(end_time_text: str) -> float | None:
+    """Parse an ISO-8601 timestamp and return seconds-until-now.
+
+    Returns None if the input is empty or unparseable.  Returns a
+    *negative* number if the market has already passed its end time
+    (which is fine — the caller treats anything within the window,
+    including past, as "imminent resolution").
+    """
+    if not end_time_text:
+        return None
+    raw = end_time_text.strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (parsed - utcnow()).total_seconds()
 
 
 def _extract_outcome_index(payload: dict[str, Any], direction: str | None) -> int | None:
@@ -224,6 +314,7 @@ async def scan_stuck_positions(
                 "token_id": _extract_token_id(payload),
                 "condition_id": _extract_condition_id(payload),
                 "outcome_index": _extract_outcome_index(payload, row.direction),
+                "market_end_time": _extract_market_end_time(payload),
             }
         )
     return out
@@ -298,6 +389,31 @@ async def classify_stuck_position(observation: dict[str, Any]) -> dict[str, Any]
             "chain_status": chain_status,
         }
 
+    # Before deciding whether this is a transient infra blip or a real
+    # venue-side rejection, ask: is this market about to resolve on its
+    # own?  If the gamma end_date is within ``_PENDING_RESOLUTION_WINDOW_DAYS``
+    # then the redeemer worker will close it the moment the oracle
+    # reports — and there is nothing the operator can do that the
+    # redeemer won't do automatically.  Suppress the alert.
+    #
+    # This classification fires *before* the venue-rejection / client-
+    # timeout split because the eventual disposition is the same in
+    # both cases when the market is imminently resolving.  Even if the
+    # CLOB has stopped accepting SELLs (which is exactly what happens
+    # in the final hours of a market) we can just wait for resolution.
+    end_time_text = str(observation.get("market_end_time") or "")
+    seconds_until_end = _seconds_until_market_end(end_time_text)
+    if (
+        seconds_until_end is not None
+        and seconds_until_end <= _PENDING_RESOLUTION_WINDOW_DAYS * 86400.0
+    ):
+        return {
+            **observation,
+            "classification": "pending_resolution",
+            "chain_status": chain_status,
+            "seconds_until_market_end": seconds_until_end,
+        }
+
     # We hold shares + market is not resolved + retry was already
     # circuit-broken by the lifecycle.  Decide whether this needs
     # operator attention or is just our own retry-path timing out:
@@ -338,11 +454,37 @@ async def classify_stuck_position(observation: dict[str, Any]) -> dict[str, Any]
 
 
 def _format_alert_message(observation: dict[str, Any]) -> str:
+    """Build the Telegram body.
+
+    Framing is deliberately *informational*, not "needs operator
+    review".  By the time we reach this code path:
+
+      * The position is at least ``_STUCK_AGE_HOURS`` (6h) old.
+      * The 5-minute auto-recovery has tried and failed enough times
+        to drive ``pending_live_exit.status`` into a blocked-terminal
+        state.
+      * On-chain truth confirms we still hold shares.
+      * The market is not resolved yet.
+      * The market end_date is more than
+        ``_PENDING_RESOLUTION_WINDOW_DAYS`` away.
+      * The last_error matches a real venue-rejection marker (not a
+        client-side timeout).
+
+    Even then, the right operator response is usually "do nothing":
+    when the market eventually resolves, the redeemer closes it.
+    The manual-writeoff API exists for the rare case where the
+    operator has external evidence the position is truly worthless
+    and wants to clear it from the dashboard before resolution.
+
+    Hence: lead with chain truth, present the manual-writeoff CTA
+    as optional, never use language that implies an SLA.
+    """
     chain_status = observation.get("chain_status") or {}
     notional = float(observation.get("notional_usd") or 0.0)
     balance = float(chain_status.get("wallet_balance_shares") or 0.0)
+    end_time = str(observation.get("market_end_time") or "unknown")
     return (
-        "🚨 *Stuck position needs operator review*\n"
+        "ℹ️ *Long-running blocked exit (informational)*\n"
         f"`order_id`        : `{observation.get('order_id')}`\n"
         f"`trader_id`       : `{observation.get('trader_id')}`\n"
         f"`source`          : `{observation.get('source')}`\n"
@@ -354,13 +496,15 @@ def _format_alert_message(observation: dict[str, Any]) -> str:
         f"`last_error`      : `{(observation.get('last_error') or '')[:60]}`\n"
         f"`chain_balance`   : `{balance:.4f} shares`\n"
         f"`market_resolved` : `{chain_status.get('market_resolved')}`\n"
+        f"`market_end_time` : `{end_time}`\n"
         f"`block_number`    : `{chain_status.get('block_number')}`\n"
         "\n"
-        "The bot has stopped retrying the SELL (chain says market is "
-        "still untradable).  When the market resolves, the redeemer "
-        "will close it automatically.  If you need to resolve sooner "
-        "use the manual-writeoff API (see "
-        "`/api/operator/orders/{order_id}/manual-writeoff`) — that "
+        "No action required by default.  The CLOB is refusing the SELL "
+        "for this market and the redeemer worker will close the "
+        "position on resolution.  If you have external evidence the "
+        "position is worthless and want to clear it from the dashboard "
+        "sooner, use the manual-writeoff API "
+        "(`/api/operator/orders/{order_id}/manual-writeoff`) — that "
         "writes a verified close with a full audit trail."
     )
 
@@ -376,7 +520,7 @@ async def alert_operator_on_stuck_positions(classified: list[dict[str, Any]]) ->
         "recovered_externally": 0,
         "redemption_pending": 0,
         "operator_intervention": 0,
-        # New classification: rows whose only failure is our own
+        # Classification: rows whose only failure is our own
         # client-side timeouts.  Counted but never alerted — the
         # lifecycle's auto-recovery kicks in after
         # ``_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS`` and
@@ -384,6 +528,11 @@ async def alert_operator_on_stuck_positions(classified: list[dict[str, Any]]) ->
         # what produced the 2026-04-28 alert-then-bulk-writeoff
         # incident.
         "transient_client_failure": 0,
+        # Classification: holdings + market unresolved + market end_date
+        # within ``_PENDING_RESOLUTION_WINDOW_DAYS``.  Counted but
+        # never alerted — the redeemer worker handles the close on
+        # resolution and nothing the operator can do is faster.
+        "pending_resolution": 0,
         "missing_chain_inputs": 0,
         "chain_unavailable": 0,
         "alerts_emitted": 0,

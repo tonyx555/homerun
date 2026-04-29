@@ -65,7 +65,19 @@ _FAILED_EXIT_PERSISTENT_TIMEOUT_THRESHOLD = 3
 # protects against truly persistent failures — those eventually
 # escalate to ``blocked_retry_exhausted_hard`` which still requires
 # operator action.
-_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS = 30 * 60
+# Cooldown for auto-recovering ``blocked_persistent_timeout`` rows.
+#
+# This was 30 minutes pre-incident; the long delay was a defensive
+# response to a flaky environment.  After the SELL-timeout bump
+# (5s→15s in commit a8ef524) and the DB-pressure cascade fix in commit
+# 4a319cd, transient client-side failures clear in seconds rather than
+# minutes — there is no reason to wait half an hour before retrying.
+#
+# The hard retry ceiling (``_FAILED_EXIT_HARD_RETRY_CEILING = 100``)
+# still bounds total attempts, so a genuinely stuck market still
+# escalates eventually; this just makes us notice it tradable again
+# sooner once the venue / our infra recovers.
+_BLOCKED_PERSISTENT_TIMEOUT_AUTO_RETRY_AFTER_SECONDS = 5 * 60
 
 # ── Short-lived cache for wallet data to avoid redundant Polymarket API
 # calls when multiple traders share the same execution wallet.
