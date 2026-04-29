@@ -22,6 +22,11 @@ TRADERS_COPY_TRADE_DEFAULTS: dict[str, Any] = {
     "min_source_notional_usd": 10.0,
     "max_entry_price": 0.98,
     "max_signal_age_seconds": 5,
+    # Architectural ceiling — even if a user sets max_signal_age_seconds
+    # very high, we never honor older than this. 600s is the original
+    # hard ceiling. Exposed in config so it's tunable, but raising it
+    # invites adverse-fill risk on stale source signals.
+    "max_signal_age_seconds_hard_ceiling": 600.0,
     "min_live_liquidity_usd": 150.0,
     "max_adverse_entry_drift_pct": 2.0,
     "copy_delay_seconds": 0,
@@ -606,10 +611,14 @@ class TradersCopyTradeStrategy(BaseStrategy):
             1.0,
             safe_float(params.get("max_signal_age_seconds"), 5.0),
         )
-        max_signal_age_seconds = min(
-            _MAX_LIVE_COPY_SIGNAL_AGE_SECONDS_HARD_CEILING,
-            requested_max_signal_age_seconds,
+        hard_ceiling = max(
+            1.0,
+            safe_float(
+                params.get("max_signal_age_seconds_hard_ceiling"),
+                _MAX_LIVE_COPY_SIGNAL_AGE_SECONDS_HARD_CEILING,
+            ),
         )
+        max_signal_age_seconds = min(hard_ceiling, requested_max_signal_age_seconds)
         age_seconds = max_signal_age_seconds + 1.0
         if detected_at is not None:
             age_seconds = max(0.0, (datetime.now(timezone.utc) - detected_at).total_seconds())

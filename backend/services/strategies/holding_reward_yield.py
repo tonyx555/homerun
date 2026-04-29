@@ -125,6 +125,13 @@ class HoldingRewardYieldStrategy(BaseStrategy):
         "min_edge_percent": 1.0,
         "min_confidence": 0.30,
         "max_risk_score": 0.75,
+        # APY assumed when the market doesn't publish its own reward rate.
+        # Reasonable for current Polymarket holding-reward defaults.
+        "default_holding_reward_apy": 4.0,
+        # How many days before resolution to flatten the carry position.
+        # Carrying right up to settlement reintroduces price-tail risk that
+        # the yield doesn't compensate for.
+        "exit_buffer_days": 7.0,
     }
 
     def __init__(self) -> None:
@@ -171,7 +178,8 @@ class HoldingRewardYieldStrategy(BaseStrategy):
             if not reward_eligible:
                 continue
 
-            apy = _extract_reward_apy(market) or _DEFAULT_HOLDING_REWARD_APY
+            default_apy = float(self.config.get("default_holding_reward_apy", _DEFAULT_HOLDING_REWARD_APY) or _DEFAULT_HOLDING_REWARD_APY)
+            apy = _extract_reward_apy(market) or default_apy
             if apy < min_apy:
                 continue
 
@@ -283,7 +291,8 @@ class HoldingRewardYieldStrategy(BaseStrategy):
             )
 
         seconds_left = to_float(market_state.get("seconds_left"))
-        if seconds_left is not None and seconds_left < _EXIT_BUFFER_DAYS * 86400:
+        exit_buffer_days = float(self.config.get("exit_buffer_days", _EXIT_BUFFER_DAYS) or _EXIT_BUFFER_DAYS)
+        if seconds_left is not None and seconds_left < exit_buffer_days * 86400:
             days_left = seconds_left / 86400.0
             return ExitDecision(
                 action="close",

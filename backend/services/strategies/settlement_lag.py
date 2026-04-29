@@ -104,8 +104,6 @@ class SettlementLagStrategy(BaseStrategy):
     def MAX_DAYS_TO_RESOLUTION(self):
         return max(0, int(to_float(self.config.get("max_days_to_resolution", 14), 14)))
 
-    OVERDUE_RESOLUTION_DAYS = 0  # Market past resolution date
-
     def detect(self, events: list[Event], markets: list[Market], prices: dict[str, dict]) -> list[Opportunity]:
         opportunities = []
 

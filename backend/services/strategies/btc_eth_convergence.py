@@ -418,13 +418,8 @@ def _get_crypto_series() -> list[tuple[str, str, str]]:
 _MAKER_QUOTE_TICK_SIZE = 0.01  # 1 tick = $0.01
 
 # -- Convergence (near-expiry) scoring --
-_CONVERGENCE_MIN_SECONDS_LEFT = 5.0
-_CONVERGENCE_MAX_SECONDS_LEFT = 45.0
-_CONVERGENCE_MIN_ORACLE_DIFF_PCT = 0.30
-_CONVERGENCE_BASE_SCORE = 20.0
-_CONVERGENCE_MAX_SCORE = 85.0
-_CONVERGENCE_MIN_PRICE = 0.85
-_CONVERGENCE_MAX_ENTRY_PRICE = 0.95
+# Convergence tunables now live in default_config — see ``convergence_*``
+# keys. Module-level here is reserved for algorithmic structure only.
 
 # Price history defaults
 _DEFAULT_HISTORY_WINDOW_SEC = 300  # 5 minutes for 15-min markets
@@ -897,6 +892,18 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         "resolution_risk_disable_when_take_profit_armed": True,
         # Circuit breaker
         "max_consecutive_losses_before_pause": 3,
+        # ── Convergence-detection tunables ─────────────────────────────
+        # The "convergence" thesis: in the final ~5-45s of a 15-minute
+        # cycle, when the oracle confidently points one way, the market
+        # mostly converges to that side. Strategy buys the favored side
+        # at >85¢ and rides to settlement.
+        "convergence_min_seconds_left": 5.0,        # don't enter inside the last 5s
+        "convergence_max_seconds_left": 45.0,       # only enter inside the last 45s
+        "convergence_min_oracle_diff_pct": 0.30,    # require ≥0.30% oracle diff
+        "convergence_base_score": 20.0,             # baseline score when window+diff pass
+        "convergence_max_score": 85.0,              # ceiling on final score
+        "convergence_min_price": 0.85,              # need ≥0.85¢ on the favored side
+        "convergence_max_entry_price": 0.95,        # too late once already at 0.95
     }
     default_config["enabled_sub_strategies"] = ["convergence"]
     default_config["strategy_mode"] = "convergence"
@@ -1253,11 +1260,20 @@ class BtcEthConvergenceStrategy(BaseStrategy):
                 reason="Cannot determine seconds remaining",
             )
 
-        if remaining_secs > _CONVERGENCE_MAX_SECONDS_LEFT or remaining_secs < _CONVERGENCE_MIN_SECONDS_LEFT:
+        cfg = self.config or {}
+        min_secs = float(cfg.get("convergence_min_seconds_left", 5.0) or 5.0)
+        max_secs = float(cfg.get("convergence_max_seconds_left", 45.0) or 45.0)
+        min_diff_pct = float(cfg.get("convergence_min_oracle_diff_pct", 0.30) or 0.30)
+        base_score = float(cfg.get("convergence_base_score", 20.0) or 20.0)
+        max_score = float(cfg.get("convergence_max_score", 85.0) or 85.0)
+        min_price = float(cfg.get("convergence_min_price", 0.85) or 0.85)
+        max_entry_price = float(cfg.get("convergence_max_entry_price", 0.95) or 0.95)
+
+        if remaining_secs > max_secs or remaining_secs < min_secs:
             return SubStrategyScore(
                 strategy=SubStrategy.CONVERGENCE,
                 score=0.0,
-                reason=f"Not in convergence window ({remaining_secs:.0f}s, need {_CONVERGENCE_MIN_SECONDS_LEFT}-{_CONVERGENCE_MAX_SECONDS_LEFT}s)",
+                reason=f"Not in convergence window ({remaining_secs:.0f}s, need {min_secs}-{max_secs}s)",
             )
 
         # Need oracle data to determine winning side
@@ -1271,11 +1287,11 @@ class BtcEthConvergenceStrategy(BaseStrategy):
             )
 
         diff_pct = abs((oracle_price - price_to_beat) / price_to_beat) * 100.0
-        if diff_pct < _CONVERGENCE_MIN_ORACLE_DIFF_PCT:
+        if diff_pct < min_diff_pct:
             return SubStrategyScore(
                 strategy=SubStrategy.CONVERGENCE,
                 score=0.0,
-                reason=f"Oracle diff too small ({diff_pct:.3f}% < {_CONVERGENCE_MIN_ORACLE_DIFF_PCT}%)",
+                reason=f"Oracle diff too small ({diff_pct:.3f}% < {min_diff_pct}%)",
             )
 
         # Determine winning side
@@ -1283,28 +1299,28 @@ class BtcEthConvergenceStrategy(BaseStrategy):
         winning_side = "YES" if oracle_says_up else "NO"
         winning_price = c.yes_price if oracle_says_up else c.no_price
 
-        # Entry price must be reasonable: between $0.85 and $0.95
-        if winning_price < _CONVERGENCE_MIN_PRICE:
+        # Entry price must be reasonable: between min_price and max_entry_price
+        if winning_price < min_price:
             return SubStrategyScore(
                 strategy=SubStrategy.CONVERGENCE,
                 score=0.0,
-                reason=f"Winning side price too low ({winning_price:.3f} < {_CONVERGENCE_MIN_PRICE})",
+                reason=f"Winning side price too low ({winning_price:.3f} < {min_price})",
             )
-        if winning_price > _CONVERGENCE_MAX_ENTRY_PRICE:
+        if winning_price > max_entry_price:
             return SubStrategyScore(
                 strategy=SubStrategy.CONVERGENCE,
                 score=0.0,
-                reason=f"Winning side already converged ({winning_price:.3f} > {_CONVERGENCE_MAX_ENTRY_PRICE})",
+                reason=f"Winning side already converged ({winning_price:.3f} > {max_entry_price})",
             )
 
         # Edge: expected $1.00 payout minus entry price
         edge = 1.0 - winning_price
 
         # Score based on edge and time to expiry (less time = more certainty)
-        time_certainty = clamp(1.0 - remaining_secs / _CONVERGENCE_MAX_SECONDS_LEFT, 0.0, 1.0)
+        time_certainty = clamp(1.0 - remaining_secs / max_secs, 0.0, 1.0)
         oracle_strength = clamp(diff_pct / 1.0, 0.0, 1.0)
-        score = _CONVERGENCE_BASE_SCORE + edge * 200.0 * time_certainty + oracle_strength * 20.0
-        score = min(score, _CONVERGENCE_MAX_SCORE)
+        score = base_score + edge * 200.0 * time_certainty + oracle_strength * 20.0
+        score = min(score, max_score)
 
         # Quote price: 1 tick below current winning side (maker order)
         entry_price = winning_price - _MAKER_QUOTE_TICK_SIZE

@@ -66,12 +66,19 @@ except ImportError:
 # Research shows 62% failure rate for LLM-detected dependencies.
 # These tiers gate which opportunities are surfaced.
 # ---------------------------------------------------------------------------
-HIGH_CONFIDENCE = 0.90  # Heuristic + LLM agree, structural valid, price consistent
-MEDIUM_CONFIDENCE = 0.75  # LLM confident + structural valid
-LOW_CONFIDENCE = 0.60  # LLM says yes but structural unclear
-REJECT_THRESHOLD = 0.60  # Below this: do not trade
+# Module-level fallbacks kept ONLY for back-compat with module-scope
+# helper functions whose default-arg values are evaluated at import time.
+# The strategy class reads the canonical values from default_config; user
+# tuning happens there.
+HIGH_CONFIDENCE = 0.90
+MEDIUM_CONFIDENCE = 0.75
+LOW_CONFIDENCE = 0.60
+REJECT_THRESHOLD = 0.60
 
 # Minimum LLM confidence to even consider executing
+# See note above on HIGH/MEDIUM/LOW confidence: this is the back-compat
+# default for helper-function arg evaluation. Strategy class reads
+# `min_llm_confidence` from default_config.
 MIN_LLM_CONFIDENCE = 0.85
 
 # Month ordering for date comparisons
@@ -398,6 +405,7 @@ class DependencyValidator:
         share_context: bool,
         medium_confidence_threshold: float = MEDIUM_CONFIDENCE,
         high_confidence_threshold: float = HIGH_CONFIDENCE,
+        low_confidence_threshold: float = LOW_CONFIDENCE,
     ) -> tuple[list[Dependency], float, str]:
         """
         Run the full validation pipeline on a set of dependencies.
@@ -453,6 +461,7 @@ class DependencyValidator:
             return [], 0.0, "REJECT"
 
         # Step 7: Assign confidence tier
+        low_threshold = max(0.0, min(1.0, float(low_confidence_threshold)))
         confidence, tier = self._assign_confidence_tier(
             known_pattern_match=known_pattern_match,
             heuristic_found=heuristic_found,
@@ -462,6 +471,7 @@ class DependencyValidator:
             price_consistent=price_consistent,
             medium_confidence_threshold=medium_threshold,
             high_confidence_threshold=high_threshold,
+            low_confidence_threshold=low_threshold,
         )
 
         return validated, confidence, tier
@@ -738,6 +748,7 @@ class DependencyValidator:
         price_consistent: bool,
         medium_confidence_threshold: float,
         high_confidence_threshold: float,
+        low_confidence_threshold: float = LOW_CONFIDENCE,
     ) -> tuple[float, str]:
         """
         Assign a confidence score and tier based on validation results.
@@ -763,9 +774,9 @@ class DependencyValidator:
             return (0.78, "MEDIUM")
 
         # LOW: LLM says yes but structural unclear
-        if llm_confidence >= LOW_CONFIDENCE:
+        if llm_confidence >= low_confidence_threshold:
             conf = llm_confidence * 0.85  # Penalize for lack of structural support
-            if conf >= LOW_CONFIDENCE:
+            if conf >= low_confidence_threshold:
                 return (conf, "LOW")
 
         return (llm_confidence * 0.5, "REJECT")
@@ -815,8 +826,19 @@ class CombinatorialStrategy(BaseStrategy):
         "min_confidence": 0.42,
         "max_risk_score": 0.68,
         "min_markets": 2,
+        # Confidence tiers (used by post-LLM scoring + risk-stratified
+        # quality filter). All in [0, 1]:
+        #   high   = heuristic + LLM agree, structural valid, price consistent
+        #   medium = LLM confident + structural valid
+        #   low    = LLM says yes but structural unclear
+        # Anything below the reject threshold is dropped before sizing.
+        "low_confidence_threshold": 0.60,
         "medium_confidence_threshold": 0.75,
         "high_confidence_threshold": 0.90,
+        "reject_confidence_threshold": 0.60,
+        # Minimum LLM-emitted confidence required to consider a candidate
+        # at all (prefiltering before structural / price checks).
+        "min_llm_confidence": 0.85,
     }
 
     # Maximum entries in the dependency cache before LRU eviction
@@ -875,7 +897,12 @@ class CombinatorialStrategy(BaseStrategy):
 
         return opportunities
 
-    def _confidence_thresholds(self) -> tuple[float, float]:
+    def _confidence_thresholds(self) -> tuple[float, float, float]:
+        """Read tunable confidence tiers from default_config.
+
+        Returns ``(medium, high, low)`` thresholds, all in [0, 1] and
+        ordered so that ``low <= medium <= high``.
+        """
         medium_threshold = max(
             0.0,
             min(
@@ -890,7 +917,14 @@ class CombinatorialStrategy(BaseStrategy):
                 to_float(self.config.get("high_confidence_threshold", HIGH_CONFIDENCE), HIGH_CONFIDENCE),
             ),
         )
-        return medium_threshold, high_threshold
+        low_threshold = max(
+            0.0,
+            min(
+                medium_threshold,
+                to_float(self.config.get("low_confidence_threshold", LOW_CONFIDENCE), LOW_CONFIDENCE),
+            ),
+        )
+        return medium_threshold, high_threshold, low_threshold
 
     async def on_event(self, event: DataEvent) -> list[Opportunity]:
         """Run bounded heuristic detection in scanner loops.
@@ -944,7 +978,7 @@ class CombinatorialStrategy(BaseStrategy):
 
         # --- Validation pipeline ---
         share_context = self._share_context(market_a.question.lower(), market_b.question.lower())
-        medium_threshold, high_threshold = self._confidence_thresholds()
+        medium_threshold, high_threshold, low_threshold = self._confidence_thresholds()
         validated_deps, confidence, tier = self._validator.validate_dependencies(
             dependencies=dependencies,
             market_a_question=market_a.question,
@@ -956,6 +990,7 @@ class CombinatorialStrategy(BaseStrategy):
             share_context=share_context,
             medium_confidence_threshold=medium_threshold,
             high_confidence_threshold=high_threshold,
+            low_confidence_threshold=low_threshold,
         )
 
         # Only proceed with HIGH or MEDIUM confidence
@@ -1431,7 +1466,7 @@ class CombinatorialStrategy(BaseStrategy):
             # --- Validation pipeline ---
             heuristic_found = heuristic_results.get((market_a.id, market_b.id), False)
             share_context = self._share_context(market_a.question.lower(), market_b.question.lower())
-            medium_threshold, high_threshold = self._confidence_thresholds()
+            medium_threshold, high_threshold, low_threshold = self._confidence_thresholds()
 
             validated_deps, confidence, tier = self._validator.validate_dependencies(
                 dependencies=analysis.dependencies,
@@ -1444,6 +1479,7 @@ class CombinatorialStrategy(BaseStrategy):
                 share_context=share_context,
                 medium_confidence_threshold=medium_threshold,
                 high_confidence_threshold=high_threshold,
+                low_confidence_threshold=low_threshold,
             )
 
             # Only proceed with HIGH or MEDIUM confidence

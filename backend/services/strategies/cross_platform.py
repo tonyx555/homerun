@@ -55,6 +55,9 @@ logger = get_logger(__name__)
 # ---------------------------------------------------------------------------
 # Cross-platform execution is non-atomic and includes two taker fills.
 # Keep a strict post-fee floor so marginal spreads are rejected.
+# Back-compat default for module-scope helpers that evaluate default
+# args at import time. Strategy class reads ``min_spread_after_fees``
+# from default_config.
 CROSS_PLATFORM_MIN_NET_PROFIT = 0.03
 
 # ---------------------------------------------------------------------------
@@ -118,6 +121,8 @@ _RE_MULTI_SPACE = re.compile(r"\s+")
 
 # Minimum Jaccard similarity to consider two markets as matching.
 # Higher threshold sharply reduces false positives from fuzzy title overlap.
+# Back-compat default for the helper above. Strategy class reads
+# ``match_threshold`` from default_config.
 _MATCH_THRESHOLD = 0.60
 
 # ---------------------------------------------------------------------------
@@ -843,6 +848,12 @@ class CrossPlatformStrategy(BaseStrategy):
         "min_confidence": 0.50,
         "max_risk_score": 0.70,
         "min_spread_after_fees": 0.03,
+        # Jaccard fuzzy-match score threshold for cross-platform pairing.
+        # A market on Polymarket and a market on Kalshi are treated as the
+        # SAME underlying question when their question-text Jaccard
+        # similarity exceeds this. 0.60 is conservative — lower values
+        # match more pairs (more candidates, lower precision).
+        "match_threshold": 0.60,
     }
 
     pipeline_defaults = {
@@ -949,7 +960,10 @@ class CrossPlatformStrategy(BaseStrategy):
                 best_score = score
                 best_market = km
 
-        if best_market is not None and best_score >= _MATCH_THRESHOLD:
+        match_threshold = float(
+            self.config.get("match_threshold", _MATCH_THRESHOLD) or _MATCH_THRESHOLD
+        )
+        if best_market is not None and best_score >= match_threshold:
             return best_market, best_score
         return None
 

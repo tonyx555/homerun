@@ -403,19 +403,10 @@ def _get_crypto_series() -> list[tuple[str, str, str]]:
 # ---------------------------------------------------------------------------
 
 # -- Maker Quote (two-sided market-making) scoring --
-_MAKER_QUOTE_MIN_SPREAD = 0.01  # Minimum bid-ask spread ($0.01 — makers get 0% fee)
-_MAKER_QUOTE_MIN_LIQUIDITY = 200.0  # Minimum market liquidity (thin books are BETTER)
-_MAKER_QUOTE_MIN_SECONDS_LEFT = 30.0  # Can quote until near expiry
-_MAKER_QUOTE_TICK_SIZE = 0.01  # 1 tick = $0.01
-_MAKER_QUOTE_BASE_SCORE = 25.0  # PRIMARY strategy — highest base score
-_MAKER_QUOTE_SPREAD_SCORE_SCALE = 400.0  # Score scale for spread width
-_MAKER_QUOTE_MAX_SCORE = 90.0  # Highest possible score
-_MAKER_QUOTE_THIN_BOOK_USD = 1000.0  # Below this, higher fill probability
-_MAKER_QUOTE_THIN_BOOK_BONUS = 15.0
-_MAKER_QUOTE_MIN_SIZE_USD = 5.0  # Minimum position size per side
-_MAKER_QUOTE_MAX_SIZE_USD = 25.0  # Maximum position size per side
-_MAKER_QUOTE_RESOLUTION_RISK_SECONDS = 45.0  # Extra risk near resolution
-_MAKER_QUOTE_SKEW_MAX = 0.03  # Max skew per side from oracle signal ($0.03)
+# Tick size is a venue property (Polymarket CLOB rounds to whole cents),
+# not a strategy knob, so it stays module-level. All other tunables are
+# in default_config under ``maker_quote_*`` keys.
+_MAKER_QUOTE_TICK_SIZE = 0.01
 
 # Price history defaults
 _DEFAULT_HISTORY_WINDOW_SEC = 300  # 5 minutes for 15-min markets
@@ -886,6 +877,22 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         "resolution_risk_disable_when_take_profit_armed": True,
         # Circuit breaker
         "max_consecutive_losses_before_pause": 3,
+        # ── Maker-quote tunables ───────────────────────────────────────
+        # Quote both sides 1 tick inside the spread, capturing maker fees.
+        # Thin books (low liquidity) actually IMPROVE fill rates because
+        # taker flow is more likely to hit any resting maker.
+        "maker_quote_min_spread": 0.01,             # need ≥1¢ spread to even quote
+        "maker_quote_min_liquidity": 200.0,         # don't quote against an empty book
+        "maker_quote_min_seconds_left": 30.0,       # pull quotes inside last 30s
+        "maker_quote_base_score": 25.0,
+        "maker_quote_spread_score_scale": 400.0,    # multiplier on spread width in score
+        "maker_quote_max_score": 90.0,
+        "maker_quote_thin_book_usd": 1000.0,        # threshold for "thin book" bonus
+        "maker_quote_thin_book_bonus": 15.0,        # extra score when book is thin
+        "maker_quote_min_size_usd": 5.0,            # minimum size per side
+        "maker_quote_max_size_usd": 25.0,           # maximum size per side
+        "maker_quote_resolution_risk_seconds": 45.0, # window for resolution-risk penalty
+        "maker_quote_skew_max": 0.03,               # max oracle-driven skew per side ($)
     }
     # Pin sub-strategy mode for the maker-quote clone.
     default_config["enabled_sub_strategies"] = ["maker_quote"]
@@ -1220,30 +1227,44 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         Primary strategy: earns bid-ask spread + maker rebates.
         When oracle data available, skews quotes for directional edge.
         """
+        cfg = self.config or {}
+        min_spread = float(cfg.get("maker_quote_min_spread", 0.01) or 0.01)
+        min_liq = float(cfg.get("maker_quote_min_liquidity", 200.0) or 200.0)
+        min_secs_left = float(cfg.get("maker_quote_min_seconds_left", 30.0) or 30.0)
+        base_score = float(cfg.get("maker_quote_base_score", 25.0) or 25.0)
+        spread_score_scale = float(cfg.get("maker_quote_spread_score_scale", 400.0) or 400.0)
+        max_score = float(cfg.get("maker_quote_max_score", 90.0) or 90.0)
+        thin_book_usd = float(cfg.get("maker_quote_thin_book_usd", 1000.0) or 1000.0)
+        thin_book_bonus = float(cfg.get("maker_quote_thin_book_bonus", 15.0) or 15.0)
+        min_size_usd = float(cfg.get("maker_quote_min_size_usd", 5.0) or 5.0)
+        max_size_usd = float(cfg.get("maker_quote_max_size_usd", 25.0) or 25.0)
+        resolution_risk_secs = float(cfg.get("maker_quote_resolution_risk_seconds", 45.0) or 45.0)
+        skew_max = float(cfg.get("maker_quote_skew_max", 0.03) or 0.03)
+
         spread = abs(1.0 - c.yes_price - c.no_price)
-        if spread < _MAKER_QUOTE_MIN_SPREAD:
+        if spread < min_spread:
             return SubStrategyScore(
                 strategy=SubStrategy.MAKER_QUOTE,
                 score=0.0,
-                reason=f"Spread too narrow ({spread:.4f} < {_MAKER_QUOTE_MIN_SPREAD})",
+                reason=f"Spread too narrow ({spread:.4f} < {min_spread})",
             )
 
         liquidity = c.market.liquidity
-        if liquidity < _MAKER_QUOTE_MIN_LIQUIDITY:
+        if liquidity < min_liq:
             return SubStrategyScore(
                 strategy=SubStrategy.MAKER_QUOTE,
                 score=0.0,
-                reason=f"Liquidity too low (${liquidity:.0f} < ${_MAKER_QUOTE_MIN_LIQUIDITY:.0f})",
+                reason=f"Liquidity too low (${liquidity:.0f} < ${min_liq:.0f})",
             )
 
         # Calculate seconds remaining
         remaining_secs = self._remaining_seconds(c)
 
-        if remaining_secs is not None and remaining_secs < _MAKER_QUOTE_MIN_SECONDS_LEFT:
+        if remaining_secs is not None and remaining_secs < min_secs_left:
             return SubStrategyScore(
                 strategy=SubStrategy.MAKER_QUOTE,
                 score=0.0,
-                reason=f"Too close to resolution ({remaining_secs:.0f}s < {_MAKER_QUOTE_MIN_SECONDS_LEFT:.0f}s)",
+                reason=f"Too close to resolution ({remaining_secs:.0f}s < {min_secs_left:.0f}s)",
             )
 
         # Base quote prices: 1 tick below each side's current ask
@@ -1264,7 +1285,7 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         price_to_beat = c.price_to_beat
         if oracle_price is not None and price_to_beat is not None and price_to_beat > 0:
             diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
-            oracle_skew = clamp(diff_pct * 0.015, -_MAKER_QUOTE_SKEW_MAX, _MAKER_QUOTE_SKEW_MAX)
+            oracle_skew = clamp(diff_pct * 0.015, -skew_max, skew_max)
             oracle_direction = "up" if diff_pct > 0 else "down"
 
         # Apply skew: if oracle says UP, tighten YES quote (more aggressive), widen NO quote
@@ -1275,14 +1296,14 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
         spread_capture = max(0.0, 1.0 - combined_cost)
 
         # Fill probability
-        if liquidity < _MAKER_QUOTE_THIN_BOOK_USD:
-            fill_prob = clamp(0.6 + 0.3 * (1.0 - liquidity / _MAKER_QUOTE_THIN_BOOK_USD), 0.3, 0.9)
+        if liquidity < thin_book_usd:
+            fill_prob = clamp(0.6 + 0.3 * (1.0 - liquidity / thin_book_usd), 0.3, 0.9)
         else:
             fill_prob = clamp(0.5 - 0.2 * (liquidity / 10000.0), 0.1, 0.5)
 
         # Resolution risk
-        if remaining_secs is not None and remaining_secs < _MAKER_QUOTE_RESOLUTION_RISK_SECONDS:
-            resolution_risk = 0.10 * (1.0 - remaining_secs / _MAKER_QUOTE_RESOLUTION_RISK_SECONDS)
+        if remaining_secs is not None and remaining_secs < resolution_risk_secs:
+            resolution_risk = 0.10 * (1.0 - remaining_secs / resolution_risk_secs)
         else:
             resolution_risk = 0.0
 
@@ -1299,16 +1320,16 @@ class BtcEthMakerQuoteStrategy(BaseStrategy):
                 reason=f"Negative EV: spread_capture={spread_capture:.4f}, fill_prob={fill_prob:.2f}, resolution_risk={resolution_risk:.4f}",
             )
 
-        score = _MAKER_QUOTE_BASE_SCORE + spread_capture * _MAKER_QUOTE_SPREAD_SCORE_SCALE
-        if liquidity < _MAKER_QUOTE_THIN_BOOK_USD:
-            score += _MAKER_QUOTE_THIN_BOOK_BONUS
+        score = base_score + spread_capture * spread_score_scale
+        if liquidity < thin_book_usd:
+            score += thin_book_bonus
         # Oracle skew bonus: having directional edge on top of spread is extra valuable
         if abs(oracle_skew) > 0.005:
             score += 10.0
-        score = min(score, _MAKER_QUOTE_MAX_SCORE)
+        score = min(score, max_score)
 
         size_ratio = clamp(spread_capture / 0.06, 0.0, 1.0)
-        size_usd = _MAKER_QUOTE_MIN_SIZE_USD + size_ratio * (_MAKER_QUOTE_MAX_SIZE_USD - _MAKER_QUOTE_MIN_SIZE_USD)
+        size_usd = min_size_usd + size_ratio * (max_size_usd - min_size_usd)
 
         return SubStrategyScore(
             strategy=SubStrategy.MAKER_QUOTE,

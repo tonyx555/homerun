@@ -410,21 +410,9 @@ def _get_crypto_series() -> list[tuple[str, str, str]]:
 # ---------------------------------------------------------------------------
 
 # -- Directional Edge scoring (oracle-based) --
-_DIRECTIONAL_EARLY_PHASE_MINUTES = 10.0  # Remaining minutes for early/mid boundary
-_DIRECTIONAL_EARLY_MIN_EDGE = 0.08  # Required edge in early phase
-_DIRECTIONAL_EARLY_SCORE_MULT = 1.0
-_DIRECTIONAL_MID_PHASE_MINUTES = 5.0  # Remaining minutes for mid/late boundary
-_DIRECTIONAL_MID_MIN_EDGE = 0.05  # Required edge in mid phase
-_DIRECTIONAL_MID_SCORE_MULT = 1.5
-_DIRECTIONAL_LATE_MIN_EDGE = 0.03  # Required edge in late phase
-_DIRECTIONAL_LATE_SCORE_MULT = 2.0
-_DIRECTIONAL_EDGE_SCORE_SCALE = 500.0  # Score scale for edge magnitude
-_DIRECTIONAL_MAX_SCORE = 80.0  # Cap on directional score
-_DIRECTIONAL_LATE_PHASE_BONUS = 20.0  # Extra score in late phase
-_DIRECTIONAL_ORACLE_PROB_MIN = 0.03  # Min/max model probability clamp (sigmoid)
-_DIRECTIONAL_ORACLE_PROB_MAX = 0.97
-_DIRECTIONAL_BASE_SCALE = 0.50  # Base sigmoid scale (diff_pct / scale)
-_DIRECTIONAL_MIN_SCALE = 0.08  # Min sigmoid scale (late in window)
+# Directional-edge tunables now live in default_config — see the
+# ``directional_*`` keys. Module-level here is reserved for algorithmic
+# structure only.
 
 # -- Maker Quote tick size (referenced by maker plan override helper) --
 _MAKER_QUOTE_TICK_SIZE = 0.01  # 1 tick = $0.01
@@ -900,6 +888,28 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         "resolution_risk_disable_when_take_profit_armed": True,
         # Circuit breaker
         "max_consecutive_losses_before_pause": 3,
+        # ── Directional-edge phase / scoring tunables ────────────────────
+        # The cycle's remaining time is partitioned into early / mid / late
+        # phases, each with its own minimum required edge and score
+        # multiplier. The sigmoid mapping diff% → probability uses a scale
+        # that decays from base toward min as the cycle ages (later in the
+        # window = higher conviction per unit of diff%).
+        "directional_min_diff_pct": 0.15,                  # threshold % to even consider a trade
+        "directional_early_phase_minutes": 10.0,           # boundary between early and mid
+        "directional_early_min_edge": 0.08,
+        "directional_early_score_mult": 1.0,
+        "directional_mid_phase_minutes": 5.0,              # boundary between mid and late
+        "directional_mid_min_edge": 0.05,
+        "directional_mid_score_mult": 1.5,
+        "directional_late_min_edge": 0.03,
+        "directional_late_score_mult": 2.0,
+        "directional_edge_score_scale": 500.0,             # multiplier on edge magnitude in the score
+        "directional_max_score": 80.0,                     # ceiling on directional score
+        "directional_late_phase_bonus": 20.0,              # extra points in late phase
+        "directional_oracle_prob_min": 0.03,               # clamp on sigmoid output
+        "directional_oracle_prob_max": 0.97,
+        "directional_base_scale": 0.50,                    # sigmoid scale at cycle start
+        "directional_min_scale": 0.08,                     # sigmoid scale floor near deadline
     }
     # Pin sub-strategy mode for the directional-edge clone.
     default_config["enabled_sub_strategies"] = ["directional_edge"]
@@ -1307,15 +1317,33 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         # --- Oracle direction: diff_pct sign determines side ---
         diff_pct = ((oracle_price - price_to_beat) / price_to_beat) * 100.0
 
+        # Pull all directional knobs from default_config (with safe defaults
+        # so a partial config still works).
+        cfg = self.config or {}
+        min_diff = float(cfg.get("directional_min_diff_pct", 0.15) or 0.15)
+        early_phase_min = float(cfg.get("directional_early_phase_minutes", 10.0) or 10.0)
+        mid_phase_min = float(cfg.get("directional_mid_phase_minutes", 5.0) or 5.0)
+        early_min_edge = float(cfg.get("directional_early_min_edge", 0.08) or 0.08)
+        mid_min_edge = float(cfg.get("directional_mid_min_edge", 0.05) or 0.05)
+        late_min_edge = float(cfg.get("directional_late_min_edge", 0.03) or 0.03)
+        early_score_mult = float(cfg.get("directional_early_score_mult", 1.0) or 1.0)
+        mid_score_mult = float(cfg.get("directional_mid_score_mult", 1.5) or 1.5)
+        late_score_mult = float(cfg.get("directional_late_score_mult", 2.0) or 2.0)
+        edge_score_scale = float(cfg.get("directional_edge_score_scale", 500.0) or 500.0)
+        max_score = float(cfg.get("directional_max_score", 80.0) or 80.0)
+        late_phase_bonus = float(cfg.get("directional_late_phase_bonus", 20.0) or 20.0)
+        oracle_prob_min = float(cfg.get("directional_oracle_prob_min", 0.03) or 0.03)
+        oracle_prob_max = float(cfg.get("directional_oracle_prob_max", 0.97) or 0.97)
+        base_scale = float(cfg.get("directional_base_scale", 0.50) or 0.50)
+        min_scale = float(cfg.get("directional_min_scale", 0.08) or 0.08)
+
         # Minimum oracle diff to have ANY directional edge
-        _MIN_DIFF_FOR_DIRECTIONAL = 0.15  # %
-        if abs(diff_pct) < _MIN_DIFF_FOR_DIRECTIONAL:
+        if abs(diff_pct) < min_diff:
             return SubStrategyScore(
                 strategy=SubStrategy.DIRECTIONAL_EDGE,
                 score=0.0,
                 reason=(
-                    f"Oracle diff too small for directional: |{diff_pct:.4f}%| < "
-                    f"{_MIN_DIFF_FOR_DIRECTIONAL}%"
+                    f"Oracle diff too small for directional: |{diff_pct:.4f}%| < {min_diff}%"
                 ),
             )
 
@@ -1333,12 +1361,12 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         best_edge = abs(diff_pct) * time_multiplier / 100.0  # as fraction
 
         # Sigmoid for model_up (used by generate for expected payout calc)
-        directional_scale = max(_DIRECTIONAL_MIN_SCALE, _DIRECTIONAL_BASE_SCALE * time_ratio)
+        directional_scale = max(min_scale, base_scale * time_ratio)
         directional_z = clamp(diff_pct / directional_scale, -60.0, 60.0)
         model_up = clamp(
             1.0 / (1.0 + math.exp(-directional_z)),
-            _DIRECTIONAL_ORACLE_PROB_MIN,
-            _DIRECTIONAL_ORACLE_PROB_MAX,
+            oracle_prob_min,
+            oracle_prob_max,
         )
 
         # Fee-aware entry gate: edge must exceed 2x taker fee
@@ -1357,18 +1385,18 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
         # Time-phase awareness
         remaining_min = (remaining_secs / 60.0) if remaining_secs is not None else 15.0
 
-        if remaining_min > _DIRECTIONAL_EARLY_PHASE_MINUTES:
+        if remaining_min > early_phase_min:
             phase = "EARLY"
-            min_edge = _DIRECTIONAL_EARLY_MIN_EDGE
-            score_multiplier = _DIRECTIONAL_EARLY_SCORE_MULT
-        elif remaining_min > _DIRECTIONAL_MID_PHASE_MINUTES:
+            min_edge = early_min_edge
+            score_multiplier = early_score_mult
+        elif remaining_min > mid_phase_min:
             phase = "MID"
-            min_edge = _DIRECTIONAL_MID_MIN_EDGE
-            score_multiplier = _DIRECTIONAL_MID_SCORE_MULT
+            min_edge = mid_min_edge
+            score_multiplier = mid_score_mult
         else:
             phase = "LATE"
-            min_edge = _DIRECTIONAL_LATE_MIN_EDGE
-            score_multiplier = _DIRECTIONAL_LATE_SCORE_MULT
+            min_edge = late_min_edge
+            score_multiplier = late_score_mult
 
         if best_edge < min_edge:
             return SubStrategyScore(
@@ -1384,11 +1412,11 @@ class BtcEthDirectionalEdgeStrategy(BaseStrategy):
             )
 
         # Score based on edge size, amplified by time phase
-        score = min(best_edge * _DIRECTIONAL_EDGE_SCORE_SCALE * score_multiplier, _DIRECTIONAL_MAX_SCORE)
+        score = min(best_edge * edge_score_scale * score_multiplier, max_score)
 
         # LATE phase bonus: oracle signal is most predictive near resolution
         if phase == "LATE":
-            score += _DIRECTIONAL_LATE_PHASE_BONUS
+            score += late_phase_bonus
 
         buy_fee = polymarket_fee_curve(buy_price)
 
