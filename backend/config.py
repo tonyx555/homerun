@@ -160,7 +160,25 @@ class Settings(BaseSettings):
     DATABASE_POOL_RECYCLE_SECONDS: int = 300
     DATABASE_CONNECT_TIMEOUT_SECONDS: float = 8.0
     DATABASE_STATEMENT_TIMEOUT_MS: int = 30000
-    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 60000
+    # Cap on how long a transaction can sit ``idle in transaction``
+    # before Postgres terminates the session.  Was 60s — too generous;
+    # a connection in that state holds an MVCC snapshot, prevents
+    # autovacuum on touched tables, and (most importantly) blocks any
+    # OTHER transaction that needs a row lock under the holder's gaze.
+    # The 2026-04-28 cascade routinely had 6-10 connections sitting
+    # idle-in-tx for 4-5s which serialized the fast trader behind the
+    # reconcile worker.
+    #
+    # The CONTRACT this enforces: a transaction must not span network
+    # I/O (Polymarket HTTP, RPC reads, SDK calls).  The lifecycle
+    # already uses ``release_conn(session)`` around external I/O to
+    # honor this — paths that don't will surface as
+    # ``IdleInTransactionSessionTimeout`` errors and get retried on a
+    # fresh connection by ``RetryableAsyncSession``, which is the
+    # right behavior.  10s is a generous floor below which legitimate
+    # CPU-bound batch work between DB calls (e.g. reconciling 50+
+    # positions in memory) should not need to release the connection.
+    DATABASE_IDLE_IN_TRANSACTION_TIMEOUT_MS: int = 10000
     # Per-statement lock-wait cap. Standard-pool callers (reconciliation,
     # scanner snapshot writers, ad-hoc API queries) compete with the
     # signal hot path on shared rows (trade_signals, strategy_versions).
