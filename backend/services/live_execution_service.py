@@ -1220,6 +1220,30 @@ class LiveExecutionService:
             return
 
         prior = self._balance_signature_type
+        # Capture the SDK's CURRENTLY-active signature_type + funder
+        # (i.e. the wallet the failing order was signed under) so we
+        # can mark it in each row.  Knowing which row was the active
+        # one is essential — sig 1 having $236 doesn't help if the
+        # SDK signed under sig 2 with $0.
+        active_sig: int | None = None
+        active_funder: str = ""
+        try:
+            builder = getattr(self._client, "builder", None)
+            if builder is not None and isinstance(getattr(builder, "signature_type", None), int):
+                active_sig = int(builder.signature_type)
+                active_funder = str(getattr(builder, "funder", "") or "")
+        except Exception:
+            pass
+        if active_sig is None and isinstance(prior, int):
+            active_sig = int(prior)
+            active_funder = str(self._funder_for_signature_type(active_sig) or "")
+        logger.warning(
+            "balance snapshot active signature_type at order submission",
+            context=context,
+            signature_type=active_sig,
+            funder=active_funder or None,
+        )
+
         try:
             for sig in POLYMARKET_SIGNATURE_TYPES:
                 if not self._signature_type_supported(int(sig)):
@@ -1229,6 +1253,7 @@ class LiveExecutionService:
                         signature_type=int(sig),
                         supported=False,
                         funder=None,
+                        active=(active_sig == int(sig)),
                     )
                     continue
                 funder = self._funder_for_signature_type(int(sig))
@@ -1299,6 +1324,7 @@ class LiveExecutionService:
                     balance_usdc=balance_str,
                     allowance_usdc=allowance_str,
                     error=err,
+                    active=(active_sig == int(sig)),
                 )
         except Exception as exc:
             logger.warning(
@@ -1347,6 +1373,28 @@ class LiveExecutionService:
             return False
 
     async def prepare_sell_balance_allowance(self, token_id: str) -> bool:
+        """Pre-flight refresh for a SELL submission.
+
+        Refreshes BOTH the conditional balance/allowance (the venue
+        needs to know we hold the tokens we're trying to sell) AND
+        the collateral balance/allowance (the venue charges a USDC
+        fee on SELLs and rejects the order if its cached view of our
+        USDC balance is below the fee — even if the actual on-chain
+        balance is fine).
+
+        The 2026-04-28 cascade was the collateral half of this:
+        Polymarket's CLOB cached our maker wallet at $8.33 USDC with
+        $8.32 reserved by old orders, leaving $0.01 free for fees.
+        Every SELL retry hit "not enough balance / allowance" because
+        we only refreshed the conditional side; the venue's stale
+        collateral view never got nudged.  Per-signature_type wallet
+        snapshot showed the actual on-chain balance was $236 in the
+        proxy.
+
+        Returns True if EITHER refresh succeeded — failure to refresh
+        is non-fatal, the SDK has its own on-the-fly approval
+        fall-through.
+        """
         token_key = str(token_id or "").strip()
         if token_key:
             try:
@@ -1369,7 +1417,21 @@ class LiveExecutionService:
                     if await self.refresh_conditional_balance_allowance(token_key):
                         conditional_refreshed = True
                         break
-        return conditional_refreshed
+        # Also force-refresh the collateral cache.  This is what fixes
+        # "balance: $8.33, sum of active orders: $8.32" rejections on
+        # SELL retries — without it the venue's stale USDC view sits
+        # at the same value across every retry, so the price walk-down
+        # and conditional refresh both run against an unfixable error.
+        collateral_refreshed = False
+        try:
+            collateral_refreshed = await self.refresh_collateral_balance_allowance()
+        except Exception as exc:
+            logger.debug(
+                "Sell allowance preparation could not refresh collateral",
+                token_id=token_key,
+                exc_info=exc,
+            )
+        return conditional_refreshed or collateral_refreshed
 
     async def _enforce_buy_pre_submit_gate(
         self,
