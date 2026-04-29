@@ -64,12 +64,20 @@ class Settings(BaseSettings):
     # only — Binance's edge has been observed to stop pushing data while
     # still answering pings during failovers, which would otherwise leave
     # oracle ages stuck at 10–15s before ping-timeout finally kicks in.
-    # Floor enforced at 0.5s in services/binance_feed.py.  8s gives
-    # headroom for transient event-loop stalls (heavy strategy bursts,
-    # GC pauses) without triggering reconnect storms — the recv loop
-    # also wall-clock-verifies staleness on timeout to suppress false
-    # positives under load.
-    BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS: float = 8.0
+    # Floor enforced at 0.5s in services/binance_feed.py.  Pre-2026-04-29
+    # this was 8s — too aggressive in practice; under live load the
+    # event loop occasionally stalls 9-10s on a strategy burst or a
+    # heavy DB cycle, and the 8s threshold fired a reconnect storm
+    # ("BinanceFeed: no bookTicker data for 8.0s — forcing reconnect")
+    # 5+ times per hour even though the underlying socket was healthy.
+    # The recv loop already wall-clock-verifies staleness on timeout
+    # to suppress false positives, but the threshold itself was the
+    # root noise source.  15s tolerates the longest event-loop stalls
+    # observed in the 02:30-04:00 logs without losing the ability to
+    # detect a genuinely-dead socket — Binance bookTicker streams
+    # send updates many times per second, so 15s of true silence is
+    # still a strong signal.
+    BINANCE_WS_STALE_DATA_TIMEOUT_SECONDS: float = 15.0
 
     # WebSocket Feed Settings
     WS_FEED_ENABLED: bool = True  # Enable real-time WebSocket price feeds
