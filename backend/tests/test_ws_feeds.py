@@ -47,11 +47,49 @@ def test_safe_binary_mid_rejects_degenerate_books():
     assert ws_feeds._safe_binary_mid(0.10, 0.80) is None
     # Both sides at extreme edge → degenerate print
     assert ws_feeds._safe_binary_mid(0.001, 0.998) is None
-    # One-sided fallback when one side is in-range
+    # One-sided fallback when the surviving side is in the non-extreme
+    # band (0.10–0.90).  Outside that band we refuse — see below.
     assert ws_feeds._safe_binary_mid(0.0, 0.42) == pytest.approx(0.42)
     assert ws_feeds._safe_binary_mid(0.42, 0.0) == pytest.approx(0.42)
     # Empty book
     assert ws_feeds._safe_binary_mid(0.0, 0.0) is None
+
+
+def test_safe_binary_mid_refuses_extreme_one_sided_quote():
+    """Regression test for the 2026-04-28 incident.
+
+    On the F1 Ocon market, the YES token's orderbook collapsed to a
+    single ask near 0.99 while the real midpoint (per Polymarket's
+    UI, last trade, and outcome_prices) was ~0.495.  The previous
+    implementation fell through to ``return best_ask`` for any
+    one-sided in-range quote, producing a phantom mid of 0.99 that
+    surfaced in the UI as a +1314% unrealized P&L.  Take-profit
+    would have triggered immediately had the SELL retry path been
+    healthy at the time.
+
+    A lone quote near 0.99 (or near 0.01) is overwhelmingly likely
+    to be a stale upside limit / thin liquidity provider quote
+    rather than a real market signal.  Refusing to derive a mid
+    from it forces upstream callers to either skip the mark update
+    or use a different source (last trade, cached outcome_prices),
+    which is the correct institutional behaviour."""
+    # Lone ask near the upside extreme — must NOT be returned as mid.
+    assert ws_feeds._safe_binary_mid(0.0, 0.99) is None
+    assert ws_feeds._safe_binary_mid(0.0, 0.95) is None
+    # Lone bid near the downside extreme — same refusal.
+    assert ws_feeds._safe_binary_mid(0.04, 0.0) is None
+    assert ws_feeds._safe_binary_mid(0.08, 0.0) is None
+    # The boundaries — exactly at the cutoff is refused; just inside
+    # is accepted.
+    assert ws_feeds._safe_binary_mid(0.0, 0.10) is None
+    assert ws_feeds._safe_binary_mid(0.0, 0.11) == pytest.approx(0.11)
+    assert ws_feeds._safe_binary_mid(0.0, 0.90) is None
+    assert ws_feeds._safe_binary_mid(0.0, 0.89) == pytest.approx(0.89)
+    # Two-sided books are unaffected by the new one-sided guard; the
+    # existing spread check still gates them.
+    assert ws_feeds._safe_binary_mid(0.49, 0.50) == pytest.approx(0.495)
+    # Spread > 0.50 is rejected (existing behaviour).
+    assert ws_feeds._safe_binary_mid(0.40, 0.99) is None  # spread = 0.59
 
 
 def test_price_cache_skips_callbacks_on_degenerate_mid():

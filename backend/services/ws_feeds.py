@@ -183,6 +183,12 @@ class ConnectionState(str, Enum):
 # crosses). Common during cycle resets on up/down markets and on illiquid books.
 _BINARY_PRICE_LO = 0.005
 _BINARY_PRICE_HI = 0.995
+# One-sided fallback only fires inside this narrower band.  See
+# ``_safe_binary_mid`` for the rationale; in practice this prevents a
+# lone-ask near 0.99 (the F1 Ocon failure mode on 2026-04-28) or a
+# lone-bid near 0.01 from being treated as the mid.
+_ONE_SIDED_NON_EXTREME_LO = 0.10
+_ONE_SIDED_NON_EXTREME_HI = 0.90
 
 # A spread wider than 50¢ on a 0-1 binary contract means there is no real
 # two-sided market — quoting a mid from it produces noise that fires spurious
@@ -193,10 +199,28 @@ _BINARY_MAX_SPREAD = 0.50
 def _safe_binary_mid(best_bid: float, best_ask: float) -> Optional[float]:
     """Compute a guarded mid for a 0-1 binary contract.
 
-    Returns ``None`` for degenerate books. Mirrors the behavior added in
-    the UpDownWalletMonitor reference implementation: rejects extreme-edge
-    prints and >50¢ spreads, but allows one-sided fallback when the
-    surviving side is in-range.
+    Returns ``None`` for degenerate books.  When BOTH sides are
+    in-range, the spread is bounded, and the average is returned as
+    the mid.
+
+    When only ONE side is in-range, fallback to that side is allowed
+    ONLY when it is in the non-extreme middle band
+    ``(_ONE_SIDED_NON_EXTREME_LO, _ONE_SIDED_NON_EXTREME_HI)``.  The
+    rationale is that a binary book with a single quote near 0.99 (or
+    near 0.01) is overwhelmingly likely to be a stale limit / thin
+    liquidity provider quote rather than a real market signal.  The
+    2026-04-28 incident on the F1 Ocon market saw the YES token's
+    orderbook collapse to a single ask at 0.99 while the real
+    midpoint was ~0.495; falling back to that ask as the mark
+    produced a phantom +1314% unrealized P&L that would have
+    triggered take-profit immediately had the SELL retry path been
+    healthy.
+
+    Returning ``None`` here forces upstream callers to either skip the
+    mark update or fall back to a different source (last trade price,
+    cached outcome_prices from the catalog, etc.) — the institutional
+    correct behaviour for "I cannot derive a trustworthy mark from
+    this orderbook".
     """
     valid_bid = best_bid > _BINARY_PRICE_LO and best_bid < _BINARY_PRICE_HI
     valid_ask = best_ask > _BINARY_PRICE_LO and best_ask < _BINARY_PRICE_HI
@@ -204,9 +228,12 @@ def _safe_binary_mid(best_bid: float, best_ask: float) -> Optional[float]:
         if best_ask - best_bid > _BINARY_MAX_SPREAD:
             return None
         return (best_bid + best_ask) / 2.0
-    if valid_bid:
+    # One-sided fallback: only trust the surviving side when it is in
+    # the non-extreme band.  Outside that band the lone quote is more
+    # likely a stale order than a meaningful price.
+    if valid_bid and _ONE_SIDED_NON_EXTREME_LO < best_bid < _ONE_SIDED_NON_EXTREME_HI:
         return best_bid
-    if valid_ask:
+    if valid_ask and _ONE_SIDED_NON_EXTREME_LO < best_ask < _ONE_SIDED_NON_EXTREME_HI:
         return best_ask
     return None
 
