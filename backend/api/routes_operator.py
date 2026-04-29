@@ -42,7 +42,9 @@ from pydantic import BaseModel, Field
 from models.database import AsyncSessionLocal
 from services.operator_writeoff import (
     ManualWriteoffRejected,
+    ManualWriteoffReversalRejected,
     manual_writeoff_order,
+    reverse_manual_writeoff_order,
 )
 from services.stuck_position_monitor import (
     classify_stuck_position,
@@ -88,6 +90,26 @@ class ManualWriteoffRequest(BaseModel):
             "Recorded in the audit event for traceability."
         ),
     )
+    override_venue_rejection_check: bool = Field(
+        default=False,
+        description=(
+            "Default False — the writeoff is rejected unless the row's "
+            "``pending_live_exit.last_error`` matches a known "
+            "venue-rejection marker (orderbook gone, market not "
+            "tradable, allowance error, etc.).  Setting True bypasses "
+            "that gate; ``override_rationale`` then becomes mandatory "
+            "and is captured immutably in the audit event."
+        ),
+    )
+    override_rationale: Optional[str] = Field(
+        default=None,
+        max_length=2000,
+        description=(
+            "Required when override_venue_rejection_check=True: a "
+            "free-form explanation for why a full-loss realisation is "
+            "the correct call despite no venue-rejection evidence."
+        ),
+    )
 
 
 class ManualWriteoffResponse(BaseModel):
@@ -96,6 +118,48 @@ class ManualWriteoffResponse(BaseModel):
     realized_pnl: float
     operator_id: str
     reason: str
+    applied_at: str
+
+
+class ReverseManualWriteoffRequest(BaseModel):
+    reason: str = Field(
+        ...,
+        min_length=1,
+        max_length=2000,
+        description=(
+            "Mandatory free-form explanation for the reversal.  Recorded "
+            "in the manual_writeoff_reversed verification event."
+        ),
+    )
+    operator_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=120,
+        description="Identifier for the reversing operator.",
+    )
+    expected_chain_balance_shares: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Optional sanity check: the reversal aborts unless the "
+            "original writeoff event recorded a chain balance at least "
+            "this large.  Set this to the wallet share count you've "
+            "verified against Polymarket so a reversal driven by 'the "
+            "wallet still holds shares' cannot fire against a row whose "
+            "wallet was actually empty at writeoff time."
+        ),
+    )
+
+
+class ReverseManualWriteoffResponse(BaseModel):
+    order_id: str
+    next_status: str
+    verification_status: str
+    operator_id: str
+    reason: str
+    prior_actual_profit: Optional[float] = None
+    prior_lifecycle_status: str
+    prior_writeoff_event_id: Optional[str] = None
     applied_at: str
 
 
@@ -147,6 +211,8 @@ async def operator_manual_writeoff(
                 reason=body.reason,
                 operator_id=body.operator_id,
                 chain_evidence=body.chain_evidence,
+                override_venue_rejection_check=body.override_venue_rejection_check,
+                override_rationale=body.override_rationale,
             )
         except ManualWriteoffRejected as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -168,3 +234,60 @@ async def operator_manual_writeoff(
         },
     )
     return ManualWriteoffResponse(**result)
+
+
+@router.post(
+    "/orders/{order_id}/reverse-manual-writeoff",
+    response_model=ReverseManualWriteoffResponse,
+)
+async def operator_reverse_manual_writeoff(
+    order_id: str,
+    body: ReverseManualWriteoffRequest,
+) -> ReverseManualWriteoffResponse:
+    """Reverse a prior manual writeoff and restore the row to active.
+
+    Use when a writeoff turns out to have been the wrong call (the
+    wallet still holds shares and the market is still tradable — i.e.
+    the SELL failures were our own client-side timeouts rather than a
+    venue rejection).  The row is restored to ``status='executed'`` /
+    ``verification_status='wallet_position'``, ``actual_profit`` is
+    cleared, and the lifecycle's exit retry counters are reset so the
+    reconcile sweep re-evaluates the position from scratch.
+
+    Returns 400 with a structured ``detail`` if the request fails any
+    precondition (row not found, not a writeoff terminal row, optional
+    chain-balance sanity check fails).
+    """
+    async with AsyncSessionLocal() as session:
+        try:
+            result = await reverse_manual_writeoff_order(
+                session,
+                order_id=order_id,
+                reason=body.reason,
+                operator_id=body.operator_id,
+                expected_chain_balance_shares=body.expected_chain_balance_shares,
+            )
+        except ManualWriteoffReversalRejected as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception(
+                "reverse_manual_writeoff failed unexpectedly",
+                extra={"order_id": order_id, "operator_id": body.operator_id},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"reverse_manual_writeoff failed: {exc}",
+            ) from exc
+        await session.commit()
+
+    logger.warning(
+        "Operator manual write-off REVERSED",
+        extra={
+            "order_id": result["order_id"],
+            "operator_id": result["operator_id"],
+            "reason": result["reason"],
+            "prior_actual_profit": result.get("prior_actual_profit"),
+            "prior_lifecycle_status": result.get("prior_lifecycle_status"),
+        },
+    )
+    return ReverseManualWriteoffResponse(**result)
