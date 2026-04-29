@@ -1707,7 +1707,22 @@ class IntentRuntime:
                     "direction": str(direction or "").strip(),
                     "entry_price": float(entry_price) if entry_price is not None else None,
                     "effective_price": None,
-                    "edge_percent": float(getattr(opportunity, "roi_percent", 0.0) or 0.0),
+                    # Prefer the strategy-emitted edge_percent (probabilistic
+                    # conviction in price-cents x 100). Source it from either
+                    # the Opportunity field (post-migration) or from
+                    # strategy_context["edge_percent"] (transitional path used
+                    # by directional strategies that need to decouple
+                    # conviction from capital-efficiency ROI). Fall back to
+                    # roi_percent only when neither is present — the
+                    # back-compat path for arb strategies where edge == ROI.
+                    "edge_percent": float(
+                        (getattr(opportunity, "edge_percent", None)
+                         if getattr(opportunity, "edge_percent", None) is not None
+                         else (strategy_context.get("edge_percent")
+                               if isinstance(strategy_context, dict)
+                                  and strategy_context.get("edge_percent") is not None
+                               else getattr(opportunity, "roi_percent", 0.0) or 0.0))
+                    ),
                     "confidence": float(getattr(opportunity, "confidence", 0.0) or 0.0),
                     "liquidity": float(getattr(opportunity, "min_liquidity", 0.0) or 0.0),
                     "expires_at": _to_iso(_normalize_datetime(expires_at)),

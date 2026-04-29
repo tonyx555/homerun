@@ -111,6 +111,23 @@ class Opportunity(BaseModel):
     is_guaranteed: bool = True  # True for structural arb, False for directional bets
     roi_type: Optional[str] = None  # "guaranteed_spread" or "directional_payout"
 
+    # Conviction signal for the trader's score formula. Naturally bounded by
+    # price space: it represents the absolute price disagreement between the
+    # strategy's fair-value estimate and the market price, scaled to a 0-100
+    # range (so 9¢ disagreement → 9.0).
+    #
+    # For arbitrage strategies edge_percent should equal roi_percent (a 5%
+    # guaranteed bundle is a 5% conviction signal). For directional
+    # strategies — where roi_percent reflects capital efficiency on a
+    # low-priced contract (e.g. 900% if a $0.10 YES wins for $1.00) — the
+    # two diverge: a 9¢ price disagreement is a 9-point conviction signal,
+    # NOT a 900-point one. Conflating these used to feed structurally
+    # inflated conviction into the trader's compute_score.
+    #
+    # When unset (None), downstream code falls back to roi_percent for
+    # back-compat with arb strategies that haven't been migrated.
+    edge_percent: Optional[float] = None
+
     # Risk assessment
     risk_score: float = Field(ge=0.0, le=1.0, default=0.5)
     risk_factors: list[str] = []
