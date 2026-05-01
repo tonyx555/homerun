@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: homerun-backend
+    runtime: python
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: DATABASE_URL
+        fromDatabase:
+          name: homerun-db
+          property: connectionString
+
+  - type: web
+    name: homerun-frontend
+    runtime: node
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm run preview -- --port $PORT --host
+
+databases:
+  - name: homerun-db
+    databaseName: homerun_db
+    user: homerun_user
