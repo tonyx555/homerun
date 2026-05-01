@@ -1,0 +1,12 @@
+[build]
+builder = "nixpacks"
+
+[[services]]
+name = "backend"
+rootDirectory = "backend"
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+
+[[services]]
+name = "frontend"
+rootDirectory = "frontend"
+startCommand = "npm run build && npm run preview"
